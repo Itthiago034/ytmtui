@@ -1,0 +1,11 @@
+# Artefatos de build do Cargo
+/target
+
+# Backups e scripts de desenvolvimento (não fazem parte do projeto)
+/ytmtui_src
+/apitest.rs
+/examples/apitest.rs
+
+# Arquivos de sistema
+.DS_Store
+*.swp

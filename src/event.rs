@@ -60,6 +60,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         // Modos de reprodução.
         KeyCode::Char('z') => app.toggle_shuffle(),
         KeyCode::Char('r') => app.cycle_repeat(),
+        // Alterna o tema de cores.
+        KeyCode::Char('t') => app.cycle_theme(),
 
         // Alterna o foco entre a barra lateral e o painel principal.
         KeyCode::Tab => {

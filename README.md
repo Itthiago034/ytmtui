@@ -6,19 +6,24 @@ Inspirado em clientes como o *spotify-tui*, ele permite **buscar, navegar e ouvi
 músicas do YouTube Music direto do terminal**, sem precisar de login.
 
 ```
-┌ ytmtui ────────┐┌ Buscar ─────────────────────────────────────────────┐
-│ 🔍 Buscar      ││ 🔍 coldplay yellow                                  │
-│ 🎵 Playlists   │└─────────────────────────────────────────────────────┘
-│ 👤 Artistas    │┌ Resultados da busca ────────────────────────────────┐
-│ 📃 Fila        ││ ▶  1  Yellow — Coldplay                        4:27 │
-│ 📝 Letra       ││    2  Viva La Vida — Coldplay                  4:03 │
-│ ❓ Ajuda       ││    3  The Scientist — Coldplay                 5:10 │
-└────────────────┘└─────────────────────────────────────────────────────┘
+ ♫ ytmtui        ┌ Buscar ─────────────────────────────────────────────┐
+─────────────────│ 🔍 coldplay yellow                                  │
+  T  Thiago S.   └─────────────────────────────────────────────────────┘
+                 ┌ Resultados da busca ────────────────────────────────┐
+┌ Menu ─────────┐│ ▶  1  Yellow — Coldplay                        4:27 │
+│ 🔍 Buscar     ││    2  Viva La Vida — Coldplay                  4:03 │
+│ 📚 Biblioteca ││    3  The Scientist — Coldplay                 5:10 │
+│ 🎵 Playlists  ││                                                     │
+│ 👤 Artistas   ││                                                     │
+│ 📃 Fila       ││                                                     │
+│ 📝 Letra      ││                                                     │
+│ ❓ Ajuda      ││                                                     │
+└───────────────┘└─────────────────────────────────────────────────────┘
 ┌ ▶ Player ───────────────────────────────────────────────────────────────┐
 │ ▀▀▀▀▀  Yellow                                                            │
 │ ▀▀▀▀▀  Coldplay  •  Parachutes                                           │
 │ ▀▀▀▀▀  ██████████░░░░░░░░░░░░  1:45 / 4:27                                │
-│        ▶ tocando    🔊 ████████░░  80%                                    │
+│        ▶ tocando  🔊 ████████░░ 80%  🔀 off  🔁 off  🎨 Roxo             │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -28,8 +33,13 @@ músicas do YouTube Music direto do terminal**, sem precisar de login.
 
 - 🔍 **Busca** de músicas, artistas e playlists no YouTube Music (sem autenticação).
   As três sub-buscas rodam **em paralelo** para menor latência.
-- 🎵 **Reprodução** de músicas com streaming (via `yt-dlp`), **sem transcodificação**
-  (baixa `m4a`/AAC e decodifica direto), o que acelera o início da faixa.
+- 🎵 **Reprodução** de músicas com streaming (via `yt-dlp`). O áudio `m4a`/AAC é
+  **remuxado** para ADTS (`ffmpeg -c copy`, sem re-encode), garantindo playback
+  confiável e rápido.
+- 🔐 **Login automático**: detecta os cookies em `~/.config/ytmtui/cookies.txt`,
+  mostra o **nome da sua conta** e as **suas playlists** (seção 📚 Biblioteca).
+- 🎨 **Temas de cores** (Roxo, YT Vermelho, Verde, Oceano, Âmbar, Rosa) trocáveis
+  em tempo real com a tecla `t`; a escolha é lembrada entre sessões.
 - ⚡ **Cache + prefetch**: a próxima faixa da fila é pré-baixada e faixas já ouvidas
   tocam instantaneamente ao repetir.
 - ⏯️ **Controles de player**: play/pause, próxima, anterior, parar, **seek (±5s)**, volume.
@@ -53,7 +63,7 @@ Antes de compilar/rodar, você precisa ter instalado:
 | **Rust** (1.75+) e Cargo | compilar o projeto | https://rustup.rs |
 | **yt-dlp** | resolver/baixar o áudio das músicas | `pip install yt-dlp` |
 | **deno** | runtime JS exigido por versões recentes do yt-dlp | https://deno.land |
-| **ffmpeg** (opcional) | não é mais necessário no caminho padrão (`m4a`/AAC), útil só como apoio | `apt install ffmpeg` / `brew install ffmpeg` |
+| **ffmpeg** | remuxa o `m4a`/AAC para ADTS antes de tocar (playback confiável) | `apt install ffmpeg` / `brew install ffmpeg` |
 | **ALSA** (Linux) | saída de áudio | `apt install libasound2-dev` |
 
 > No macOS e Windows a saída de áudio funciona nativamente (CoreAudio / WASAPI),
@@ -110,6 +120,11 @@ cargo run
 | `+` / `=` | Aumentar volume |
 | `-` / `_` | Diminuir volume |
 
+### Aparência
+| Tecla | Ação |
+|-------|------|
+| `t` | Trocar o tema de cores (salvo automaticamente) |
+
 ### Geral
 | Tecla | Ação |
 |-------|------|
@@ -141,20 +156,23 @@ cookies (mesmo mecanismo do site).
 
 1. No navegador logado no [music.youtube.com](https://music.youtube.com), exporte
    os cookies em **formato Netscape** (ex.: extensão *"Get cookies.txt"*).
-2. Inicie o app apontando a variável `YTM_COOKIES` para esse arquivo:
+2. Salve o arquivo em **`~/.config/ytmtui/cookies.txt`**. O app **descobre o
+   arquivo automaticamente** na próxima vez que abrir — não é preciso configurar
+   nada. Ao conectar, o **nome da sua conta** aparece na barra lateral.
 
 ```bash
-export YTM_COOKIES="/caminho/para/cookies.txt"
+mkdir -p ~/.config/ytmtui
+cp /caminho/do/download/cookies.txt ~/.config/ytmtui/cookies.txt
 ./target/release/ytmtui
 ```
 
 3. Abra a seção **📚 Biblioteca** no menu lateral e pressione `Enter` em uma
    playlist para carregar as faixas.
 
-> O mesmo arquivo de cookies também é usado na reprodução (contorna o bloqueio
-> anti-bot). Os cookies expiram de tempos em tempos; se a biblioteca parar de
-> carregar, basta reexportá-los. Sem login, busca/playlists públicas/letras
-> continuam funcionando normalmente.
+> Alternativamente, você pode apontar a variável `YTM_COOKIES` para outro caminho.
+> O mesmo arquivo é usado na reprodução (contorna o bloqueio anti-bot). Os cookies
+> expiram de tempos em tempos; se a biblioteca parar de carregar, basta
+> reexportá-los. Sem login, busca/playlists públicas/letras continuam funcionando.
 
 ---
 
@@ -178,6 +196,31 @@ export YTM_COOKIES="/caminho/para/cookies.txt"
 
 ---
 
+## 🎨 Personalização
+
+As preferências ficam em **`~/.config/ytmtui/config.json`** (Linux) e podem ser
+editadas à mão:
+
+```json
+{
+  "volume": 0.8,
+  "shuffle": false,
+  "repeat": "off",
+  "cookies": null,
+  "theme": "Roxo",
+  "username": null
+}
+```
+
+- **`theme`** — tema de cores. Valores: `Roxo`, `YT Vermelho`, `Verde Spotify`,
+  `Oceano`, `Âmbar`, `Rosa`. Também alternável com a tecla `t` dentro do app.
+- **`username`** — nome de exibição personalizado na barra lateral. Se `null`, o
+  app usa o nome real da sua conta do YouTube Music.
+- **`cookies`** — caminho do arquivo de cookies (opcional; por padrão o app usa
+  `~/.config/ytmtui/cookies.txt`).
+
+---
+
 ## 🏗️ Arquitetura do projeto
 
 ```
@@ -185,11 +228,13 @@ src/
 ├── main.rs            # Ponto de entrada: terminal + laço de eventos
 ├── lib.rs             # Exposição dos módulos (permite testes/examples)
 ├── app.rs             # Estado central e coordenação das tasks assíncronas
-├── config.rs          # Configuração persistente (volume, shuffle, repeat, cookies)
+├── config.rs          # Configuração persistente (volume, shuffle, repeat, cookies, tema)
+├── theme.rs           # Temas de cores (presets de acento) da interface
 ├── event.rs           # Tratamento das teclas → ações
 ├── ascii_art.rs       # Conversão da capa em arte colorida (meio-blocos)
 ├── ytmusic/
-│   ├── mod.rs         # Cliente da API interna (InnerTube) do YouTube Music
+│   ├── mod.rs         # Cliente da API interna (InnerTube), busca, biblioteca e conta
+│   ├── auth.rs        # Autenticação por cookies (SAPISIDHASH)
 │   ├── models.rs      # Modelos: Track, Playlist, Artist, SearchResults
 │   └── parse.rs       # Helpers de parsing do JSON aninhado da API
 ├── player/
@@ -202,8 +247,10 @@ src/
 ```
 
 ### Detalhes técnicos
-- **API sem autenticação**: as chamadas usam a API interna *InnerTube*
-  (`music.youtube.com/youtubei/v1/*`) com o cliente `WEB_REMIX`, sem cookies.
+- **API InnerTube**: as chamadas usam a API interna
+  (`music.youtube.com/youtubei/v1/*`) com o cliente `WEB_REMIX`. Busca/letras
+  funcionam sem cookies; a biblioteca e o nome da conta usam autenticação por
+  cookies (`SAPISIDHASH`).
 - **Concorrência**: a interface roda no laço principal (síncrono, via `crossterm`),
   enquanto buscas, letras, download de capas e resolução de áudio rodam em
   *tasks* do **Tokio**, comunicando-se com a UI por um canal `mpsc`.

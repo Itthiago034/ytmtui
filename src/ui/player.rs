@@ -16,12 +16,13 @@ fn fmt(secs: u64) -> String {
 
 /// Desenha o painel do player.
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
+    let player_color = app.theme().player;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(player_color))
         .title(Span::styled(
             " ▶ Player ",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default().fg(player_color).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -42,6 +43,7 @@ fn draw_artwork(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let (w, h) = (area.width, area.height);
+    let accent = app.theme().accent;
 
     let lines: Vec<Line<'static>> = if let Some(bytes) = &app.artwork_bytes {
         // Usa o cache se o tamanho não mudou.
@@ -54,13 +56,13 @@ fn draw_artwork(f: &mut Frame, app: &mut App, area: Rect) {
             Some(l) => l,
             None => {
                 let l = ascii_art::image_to_lines(bytes, w, h)
-                    .unwrap_or_else(|| ascii_art::placeholder(h));
+                    .unwrap_or_else(|| ascii_art::placeholder(h, accent));
                 app.artwork_cache = Some((w, h, l.clone()));
                 l
             }
         }
     } else {
-        ascii_art::placeholder(h)
+        ascii_art::placeholder(h, accent)
     };
 
     f.render_widget(Paragraph::new(lines), area);
@@ -68,6 +70,7 @@ fn draw_artwork(f: &mut Frame, app: &mut App, area: Rect) {
 
 /// Desenha título, artista, barra de progresso e volume.
 fn draw_info(f: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -106,7 +109,7 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
     // Artista • Álbum.
     let sub = if album.is_empty() { artist } else { format!("{artist}  •  {album}") };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(sub, Style::default().fg(Color::Cyan)))),
+        Paragraph::new(Line::from(Span::styled(sub, Style::default().fg(theme.secondary)))),
         layout[1],
     );
 
@@ -125,7 +128,7 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
         "--:-- / --:--".to_string()
     };
     let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30)))
+        .gauge_style(Style::default().fg(theme.player).bg(Color::Rgb(30, 30, 30)))
         .ratio(ratio)
         .label(Span::styled(label, Style::default().fg(Color::White)));
     f.render_widget(gauge, layout[2]);
@@ -138,7 +141,7 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
     } else if app.player.is_paused() {
         Span::styled("⏸ pausado", Style::default().fg(Color::Yellow))
     } else {
-        Span::styled("▶ tocando", Style::default().fg(Color::Green))
+        Span::styled("▶ tocando", Style::default().fg(theme.player))
     };
     let vol = (app.player.volume() * 100.0).round() as u32;
     let vol_blocks = (app.player.volume() * 10.0).round() as usize;
@@ -146,12 +149,12 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
 
     // Indicadores de shuffle e repeat.
     let shuffle_style = if app.shuffle {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.player).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
     let repeat_style = if app.repeat != crate::app::RepeatMode::Off {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.player).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -160,7 +163,7 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
             state_icon,
             Span::raw("    "),
             Span::styled("🔊 ", Style::default().fg(Color::White)),
-            Span::styled(vol_bar, Style::default().fg(Color::Green)),
+            Span::styled(vol_bar, Style::default().fg(theme.player)),
             Span::styled(format!(" {vol}%"), Style::default().fg(Color::Gray)),
             Span::raw("    "),
             Span::styled("🔀", shuffle_style),
@@ -171,12 +174,15 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("  "),
             Span::styled("🔁", repeat_style),
             Span::styled(format!(" {}", app.repeat.label()), repeat_style),
+            Span::raw("    "),
+            Span::styled("🎨 ", Style::default().fg(theme.accent)),
+            Span::styled(theme.name, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
         ])),
         layout[3],
     );
 
     // Barra de status / atalhos.
-    let help = "Espaço play/pause  n/p próx/ant  [ ] seek  z shuffle  r repeat  +/- vol  / buscar  ? ajuda  q sair";
+    let help = "Espaço play/pause  n/p próx/ant  [ ] seek  z shuffle  r repeat  t tema  +/- vol  / buscar  ? ajuda  q sair";
     let status_line = Line::from(vec![
         Span::styled(app.status.clone(), Style::default().fg(Color::Yellow)),
     ]);

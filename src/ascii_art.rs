@@ -36,18 +36,21 @@ pub fn image_to_lines(bytes: &[u8], cols: u16, rows: u16) -> Option<Vec<Line<'st
 }
 
 /// Arte de reserva (placeholder) exibida quando não há capa disponível.
-pub fn placeholder(rows: u16) -> Vec<Line<'static>> {
+/// `accent` colore as notas musicais (segue o tema ativo).
+pub fn placeholder(rows: u16, accent: Color) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for i in 0..rows {
-        let filled = if i == rows / 2 {
-            "        ♪  ♫  ♪        "
+        if i == rows / 2 {
+            lines.push(Line::from(Span::styled(
+                "        ♪  ♫  ♪        ",
+                Style::default().fg(accent),
+            )));
         } else {
-            "                      "
-        };
-        lines.push(Line::from(Span::styled(
-            filled,
-            Style::default().fg(Color::DarkGray),
-        )));
+            lines.push(Line::from(Span::styled(
+                "                      ",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     }
     lines
 }

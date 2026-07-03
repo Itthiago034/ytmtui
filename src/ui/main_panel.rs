@@ -10,8 +10,9 @@ use crate::app::{App, Focus, Section};
 
 /// Desenha o conteúdo do painel principal de acordo com a seção ativa.
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme();
     let focused = app.focus == Focus::Main;
-    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+    let border_color = if focused { theme.accent } else { Color::DarkGray };
 
     let title = match app.section {
         Section::Buscar => app.songs_title.clone(),
@@ -28,7 +29,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             format!(" {title} "),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ));
 
     match app.section {
@@ -38,12 +39,18 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Playlists => draw_playlists(f, app, area, block),
         Section::Artistas => draw_artists(f, app, area, block),
         Section::Letra => draw_lyrics(f, app, area, block),
-        Section::Ajuda => draw_help(f, area, block),
+        Section::Ajuda => draw_help(f, area, block, app.theme().accent, app.theme().secondary),
     }
 }
 
 /// Formata uma linha de faixa: "01  Título  —  Artista        3:45".
-fn track_line(index: usize, t: &crate::ytmusic::Track, width: usize, playing: bool) -> Line<'static> {
+fn track_line(
+    index: usize,
+    t: &crate::ytmusic::Track,
+    width: usize,
+    playing: bool,
+    accent: Color,
+) -> Line<'static> {
     let num = format!("{:>2}  ", index + 1);
     let dur = if t.duration.is_empty() { String::new() } else { t.duration.clone() };
     // Espaço reservado para número + duração + margens.
@@ -53,14 +60,14 @@ fn track_line(index: usize, t: &crate::ytmusic::Track, width: usize, playing: bo
     let pad = " ".repeat(avail.saturating_sub(main.chars().count()) + 2);
 
     let marker_style = if playing {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
     Line::from(vec![
         Span::styled(if playing { "▶ " } else { "  " }, marker_style),
         Span::styled(num, Style::default().fg(Color::DarkGray)),
-        Span::styled(main, Style::default().fg(if playing { Color::Green } else { Color::White })),
+        Span::styled(main, Style::default().fg(if playing { accent } else { Color::White })),
         Span::raw(pad),
         Span::styled(dur, Style::default().fg(Color::DarkGray)),
     ])
@@ -75,13 +82,14 @@ fn draw_songs(f: &mut Frame, app: &App, area: Rect, block: Block, songs: &[crate
         return;
     }
     let width = area.width.saturating_sub(4) as usize;
+    let accent = app.theme().player;
     let current_id = app.current.as_ref().map(|t| t.video_id.clone());
     let items: Vec<ListItem> = songs
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let playing = current_id.as_deref() == Some(t.video_id.as_str());
-            ListItem::new(track_line(i, t, width, playing))
+            ListItem::new(track_line(i, t, width, playing, accent))
         })
         .collect();
 
@@ -97,13 +105,14 @@ fn draw_queue(f: &mut Frame, app: &App, area: Rect, block: Block) {
         return;
     }
     let width = area.width.saturating_sub(4) as usize;
+    let accent = app.theme().player;
     let items: Vec<ListItem> = app
         .queue
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let playing = app.queue_index == Some(i);
-            ListItem::new(track_line(i, t, width, playing))
+            ListItem::new(track_line(i, t, width, playing, accent))
         })
         .collect();
     render_list(f, app, area, block, items);
@@ -117,12 +126,13 @@ fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
         f.render_widget(msg, area);
         return;
     }
+    let accent = app.theme().accent;
     let items: Vec<ListItem> = app
         .playlists
         .iter()
         .map(|p| {
             ListItem::new(Line::from(vec![
-                Span::styled("🎵 ", Style::default().fg(Color::Magenta)),
+                Span::styled("🎵 ", Style::default().fg(accent)),
                 Span::styled(
                     p.title.clone(),
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -137,11 +147,11 @@ fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
 fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
     if !app.logged_in {
         let msg = Paragraph::new(
-            "Você não está logado.\n\n\
-             Para ver suas playlists, exporte os cookies do YouTube Music \
-             (formato Netscape) e inicie o app com:\n\n\
-             export YTM_COOKIES=\"/caminho/para/cookies.txt\"\n\
-             ./target/release/ytmtui",
+            "Você não está conectado.\n\n\
+             Para ver suas playlists, salve os cookies do YouTube Music \
+             (formato Netscape) em:\n\n\
+             ~/.config/ytmtui/cookies.txt\n\n\
+             O app detecta o arquivo automaticamente na próxima vez que abrir.",
         )
         .style(Style::default().fg(Color::DarkGray))
         .block(block)
@@ -156,12 +166,13 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
         f.render_widget(msg, area);
         return;
     }
+    let accent = app.theme().accent;
     let items: Vec<ListItem> = app
         .library
         .iter()
         .map(|p| {
             ListItem::new(Line::from(vec![
-                Span::styled("📚 ", Style::default().fg(Color::Magenta)),
+                Span::styled("📚 ", Style::default().fg(accent)),
                 Span::styled(
                     p.title.clone(),
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -181,12 +192,13 @@ fn draw_artists(f: &mut Frame, app: &App, area: Rect, block: Block) {
         f.render_widget(msg, area);
         return;
     }
+    let secondary = app.theme().secondary;
     let items: Vec<ListItem> = app
         .artists
         .iter()
         .map(|a| {
             ListItem::new(Line::from(vec![
-                Span::styled("👤 ", Style::default().fg(Color::Cyan)),
+                Span::styled("👤 ", Style::default().fg(secondary)),
                 Span::styled(
                     a.name.clone(),
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -218,7 +230,7 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
     f.render_widget(p, area);
 }
 
-fn draw_help(f: &mut Frame, area: Rect, block: Block) {
+fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: Color) {
     let rows = [
         ("Navegação", ""),
         ("  ↑/↓  ou  k/j", "mover seleção"),
@@ -231,8 +243,8 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block) {
         ("  Esc", "cancelar busca"),
         ("", ""),
         ("Conta / Biblioteca", ""),
-        ("  📚 Biblioteca", "suas playlists (requer login por cookies)"),
-        ("  YTM_COOKIES", "variável com o caminho do cookies.txt"),
+        ("  📚 Biblioteca", "suas playlists da conta conectada"),
+        ("  cookies.txt", "em ~/.config/ytmtui/ (login automático)"),
         ("", ""),
         ("Reprodução", ""),
         ("  Espaço", "play / pause"),
@@ -242,6 +254,9 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block) {
         ("  + / -", "volume"),
         ("  z", "alternar aleatório (shuffle)"),
         ("  r", "modo de repetição (off/todos/1)"),
+        ("", ""),
+        ("Aparência", ""),
+        ("  t", "trocar tema de cores"),
         ("", ""),
         ("Geral", ""),
         ("  ?", "esta ajuda"),
@@ -253,11 +268,11 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block) {
             if v.is_empty() {
                 Line::from(Span::styled(
                     k.to_string(),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
                 ))
             } else {
                 Line::from(vec![
-                    Span::styled(format!("{k:<18}"), Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("{k:<18}"), Style::default().fg(secondary)),
                     Span::styled(v.to_string(), Style::default().fg(Color::Gray)),
                 ])
             }
@@ -272,7 +287,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<Li
         .block(block)
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(40, 40, 60))
+                .bg(app.theme().highlight_bg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("");

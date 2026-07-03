@@ -109,6 +109,7 @@ impl RepeatMode {
 pub enum Msg {
     SearchResults(SearchResults),
     LibraryPlaylists(Vec<Playlist>),
+    AccountName(Option<String>),
     PlaylistTracks { title: String, tracks: Vec<Track> },
     Lyrics(Option<String>),
     ArtworkBytes(Vec<u8>),
@@ -145,6 +146,10 @@ pub struct App {
     pub library: Vec<Playlist>,
     /// Indica se o cliente está autenticado (login por cookies).
     pub logged_in: bool,
+    /// Nome de exibição da conta (personalizado na config ou vindo da API).
+    pub account_name: Option<String>,
+    /// Índice do tema de cores ativo (ver `crate::theme`).
+    pub theme_index: usize,
     pub list_state: ListState,
 
     // Reprodução.
@@ -220,6 +225,10 @@ impl App {
         };
         let logged_in = client.is_authenticated();
 
+        // Tema salvo e nome de exibição personalizado (opcional).
+        let theme_index = crate::theme::index_by_name(&config.theme);
+        let account_name = config.username.clone().filter(|s| !s.trim().is_empty());
+
         // Semente do PRNG a partir do relógio (evita dependência externa).
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -254,6 +263,8 @@ impl App {
             artists: Vec::new(),
             library: Vec::new(),
             logged_in,
+            account_name,
+            theme_index,
             list_state,
             queue: Vec::new(),
             queue_index: None,
@@ -291,19 +302,50 @@ impl App {
         });
     }
 
+    /// Carrega (em background) o nome da conta, se autenticado e sem nome
+    /// personalizado já definido na config.
+    pub fn load_account(&self) {
+        if !self.logged_in || self.account_name.is_some() {
+            return;
+        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(name) = client.get_account_name().await {
+                let _ = tx.send(Msg::AccountName(name));
+            }
+        });
+    }
+
+    /// Tema de cores ativo.
+    pub fn theme(&self) -> &'static crate::theme::Theme {
+        crate::theme::get(self.theme_index)
+    }
+
+    /// Alterna para o próximo tema de cores e salva a preferência.
+    pub fn cycle_theme(&mut self) {
+        self.theme_index = (self.theme_index + 1) % crate::theme::THEMES.len();
+        self.artwork_cache = None; // recolore o placeholder na próxima renderização
+        self.status = format!("🎨 Tema: {}", self.theme().name);
+        self.save_config();
+    }
+
     /// Persiste as preferências atuais em disco.
     pub fn save_config(&self) {
         // Nunca apaga um caminho de cookies válido já salvo: se o app subiu
         // sem cookies (self.cookies == None), preserva o que estiver em disco.
-        let cookies = self
-            .cookies
-            .clone()
-            .or_else(|| Config::load().cookies);
+        let saved = Config::load();
+        let cookies = self.cookies.clone().or(saved.cookies);
+        // Só persiste um username se for personalizado (mantém o que já existia
+        // em vez de gravar o nome obtido da API automaticamente).
+        let username = saved.username;
         Config {
             volume: self.player.volume(),
             shuffle: self.shuffle,
             repeat: self.repeat.as_config().to_string(),
             cookies,
+            theme: self.theme().name.to_string(),
+            username,
         }
         .save();
     }
@@ -650,6 +692,13 @@ impl App {
                         "📚 Biblioteca: {} playlist(s). Acesse '📚 Biblioteca' no menu.",
                         self.library.len()
                     );
+                }
+                Msg::AccountName(name) => {
+                    if let Some(n) = name {
+                        if self.account_name.is_none() {
+                            self.account_name = Some(n);
+                        }
+                    }
                 }
                 Msg::PlaylistTracks { title, tracks } => {
                     self.songs = tracks;

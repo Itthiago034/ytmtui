@@ -5,5 +5,6 @@ pub mod ascii_art;
 pub mod config;
 pub mod event;
 pub mod player;
+pub mod theme;
 pub mod ui;
 pub mod ytmusic;

@@ -42,17 +42,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 /// Barra de busca no topo.
 fn draw_search_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let theme = app.theme();
     let (border_color, hint) = if app.input_mode {
-        (Color::Yellow, "  (Enter: buscar | Esc: cancelar)")
+        (theme.accent, "  (Enter: buscar | Esc: cancelar)")
     } else {
         (Color::DarkGray, "  (pressione '/' para buscar)")
     };
 
     let content = if app.input_mode {
         Line::from(vec![
-            Span::styled("🔍 ", Style::default().fg(Color::Yellow)),
+            Span::styled("🔍 ", Style::default().fg(theme.accent)),
             Span::raw(&app.query),
-            Span::styled("▏", Style::default().fg(Color::Yellow)),
+            Span::styled("▏", Style::default().fg(theme.accent)),
         ])
     } else if app.query.is_empty() {
         Line::from(Span::styled(
@@ -61,7 +62,7 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ))
     } else {
         Line::from(vec![
-            Span::styled("🔍 ", Style::default().fg(Color::Cyan)),
+            Span::styled("🔍 ", Style::default().fg(theme.secondary)),
             Span::raw(&app.query),
         ])
     };
@@ -71,7 +72,7 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             " Buscar ",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ));
 
     f.render_widget(Paragraph::new(content).block(block), area);

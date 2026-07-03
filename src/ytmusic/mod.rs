@@ -138,6 +138,24 @@ impl YtMusicClient {
         Ok(out)
     }
 
+    /// Obtém o nome da conta logada (via `account/account_menu`).
+    ///
+    /// Retorna `None` se anônimo ou se o nome não puder ser extraído.
+    pub async fn get_account_name(&self) -> Result<Option<String>> {
+        if !self.is_authenticated() {
+            return Ok(None);
+        }
+        let body = json!({ "context": self.context() });
+        let data = self.post("account/account_menu", body).await?;
+        if let Some(name) = find_key(&data, "accountName") {
+            let text = join_runs(name);
+            if !text.is_empty() {
+                return Ok(Some(text));
+            }
+        }
+        Ok(None)
+    }
+
     /// Busca completa: músicas, artistas e playlists.
     ///
     /// As três sub-buscas rodam em paralelo (`tokio::join!`), reduzindo bastante

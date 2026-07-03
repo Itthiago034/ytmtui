@@ -20,6 +20,10 @@ pub struct Config {
     pub repeat: String,
     /// Caminho opcional para arquivo de cookies do yt-dlp.
     pub cookies: Option<String>,
+    /// Nome do tema de cores (ver `crate::theme::THEMES`).
+    pub theme: String,
+    /// Nome de exibição personalizado (sobrepõe o nome vindo da conta).
+    pub username: Option<String>,
 }
 
 impl Default for Config {
@@ -29,6 +33,8 @@ impl Default for Config {
             shuffle: false,
             repeat: "off".to_string(),
             cookies: None,
+            theme: "Roxo".to_string(),
+            username: None,
         }
     }
 }

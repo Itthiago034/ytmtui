@@ -38,6 +38,11 @@ músicas do YouTube Music direto do terminal**, sem precisar de login.
   confiável e rápido.
 - 🔐 **Login automático**: detecta os cookies em `~/.config/ytmtui/cookies.txt`,
   mostra o **nome da sua conta** e as **suas playlists** (seção 📚 Biblioteca).
+- 🏠 **Início/Recomendados** (feed `FEmusic_home`) personalizado ao seu perfil.
+- 👤 **Página do artista**: `Enter` em um artista lista suas principais faixas.
+- 📻 **Rádio/autoplay**: ao terminar a fila, continua com faixas relacionadas.
+- ➕ **Fila**: `a` adiciona a faixa selecionada à fila sem interromper a atual.
+- 💚 **Curtir/descurtir** a faixa atual (`f`) na sua conta.
 - 🎨 **Temas de cores** (Roxo, YT Vermelho, Verde, Oceano, Âmbar, Rosa) trocáveis
   em tempo real com a tecla `t`; a escolha é lembrada entre sessões.
 - ⚡ **Cache + prefetch**: a próxima faixa da fila é pré-baixada e faixas já ouvidas
@@ -98,7 +103,8 @@ cargo run
 | `↑` / `↓` ou `k` / `j` | Mover seleção para cima/baixo |
 | `←` / `→` ou `h` / `l` | Alternar entre o menu lateral e a lista |
 | `Tab` | Alternar o foco (menu ↔ lista) |
-| `Enter` | Tocar a música / abrir a playlist selecionada |
+| `Enter` | Tocar a música / abrir a playlist / abrir o artista |
+| `a` | Adicionar a faixa selecionada à fila |
 
 ### Busca
 | Tecla | Ação |
@@ -116,6 +122,7 @@ cargo run
 | `[` / `]` | Retroceder / avançar 5 segundos |
 | `z` | Alternar reprodução aleatória (shuffle) |
 | `r` | Alternar modo de repetição (off / todos / uma) |
+| `f` | Curtir / descurtir a faixa atual (requer conta conectada) |
 | `s` | Parar |
 | `+` / `=` | Aumentar volume |
 | `-` / `_` | Diminuir volume |

@@ -142,6 +142,46 @@ pub fn extract_continuation(value: &Value) -> Option<String> {
     None
 }
 
+/// Converte um `playlistPanelVideoRenderer` (item de fila/rádio) em `Track`.
+pub fn parse_panel_video(r: &Value) -> Option<crate::ytmusic::Track> {
+    let video_id = r
+        .get("videoId")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            find_key(r, "watchEndpoint")
+                .and_then(|w| w.get("videoId"))
+                .and_then(|v| v.as_str())
+        })?
+        .to_string();
+    if video_id.is_empty() {
+        return None;
+    }
+    let title = r.get("title").map(join_runs).unwrap_or_default();
+    let byline = r
+        .get("longBylineText")
+        .or_else(|| r.get("shortBylineText"))
+        .map(join_runs)
+        .unwrap_or_default();
+    let segments: Vec<&str> = byline.split('•').map(|s| s.trim()).collect();
+    let artist = segments.first().map(|s| s.to_string()).unwrap_or_default();
+    let album = segments
+        .iter()
+        .skip(1)
+        .find(|s| !s.contains(':') && !s.ends_with("views") && !s.contains("visualiz"))
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let duration = r.get("lengthText").map(join_runs).unwrap_or_default();
+    Some(crate::ytmusic::Track {
+        video_id,
+        title,
+        artist,
+        album,
+        duration_secs: parse_duration(&duration),
+        duration,
+        thumbnail: extract_thumbnail(r),
+    })
+}
+
 /// Extrai a duração (texto) de um `fixedColumn`, comum em itens de playlist.
 pub fn fixed_duration(renderer: &Value) -> Option<String> {
     let cols = renderer.get("fixedColumns")?.as_array()?;

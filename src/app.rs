@@ -13,6 +13,7 @@ use crate::ytmusic::{Artist, Playlist, SearchResults, Track, YtMusicClient};
 /// Seções da barra lateral (também define o conteúdo do painel principal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
+    Inicio,
     Buscar,
     Biblioteca,
     Playlists,
@@ -24,7 +25,8 @@ pub enum Section {
 
 impl Section {
     /// Ordem de exibição na barra lateral.
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
+        Section::Inicio,
         Section::Buscar,
         Section::Biblioteca,
         Section::Playlists,
@@ -37,6 +39,7 @@ impl Section {
     /// Rótulo exibido na barra lateral.
     pub fn label(&self) -> &'static str {
         match self {
+            Section::Inicio => "🏠 Início",
             Section::Buscar => "🔍 Buscar",
             Section::Biblioteca => "📚 Biblioteca",
             Section::Playlists => "🎵 Playlists",
@@ -109,6 +112,8 @@ impl RepeatMode {
 pub enum Msg {
     SearchResults(SearchResults),
     LibraryPlaylists(Vec<Playlist>),
+    HomePlaylists(Vec<Playlist>),
+    RadioTracks(Vec<Track>),
     AccountName(Option<String>),
     PlaylistTracks { title: String, tracks: Vec<Track> },
     Lyrics(Option<String>),
@@ -144,6 +149,12 @@ pub struct App {
     pub artists: Vec<Artist>,
     /// Playlists da biblioteca do usuário logado.
     pub library: Vec<Playlist>,
+    /// Recomendações da tela inicial (playlists/álbuns).
+    pub home: Vec<Playlist>,
+    /// videoIds curtidos nesta sessão (para alternar curtir/descurtir).
+    pub liked: std::collections::HashSet<String>,
+    /// Autoplay: continuar com uma rádio quando a fila termina.
+    pub autoplay: bool,
     /// Indica se o cliente está autenticado (login por cookies).
     pub logged_in: bool,
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
@@ -253,7 +264,7 @@ impl App {
             tx,
             rx,
             focus: Focus::Sidebar,
-            section: Section::Buscar,
+            section: Section::Inicio,
             sidebar_index: 0,
             input_mode: false,
             query: String::new(),
@@ -262,6 +273,9 @@ impl App {
             playlists: Vec::new(),
             artists: Vec::new(),
             library: Vec::new(),
+            home: Vec::new(),
+            liked: std::collections::HashSet::new(),
+            autoplay: true,
             logged_in,
             account_name,
             theme_index,
@@ -298,6 +312,99 @@ impl App {
                 Err(e) => {
                     let _ = tx.send(Msg::Error(format!("Erro ao carregar biblioteca: {e}")));
                 }
+            }
+        });
+    }
+
+    /// Carrega (em background) as recomendações da tela inicial.
+    pub fn load_home(&self) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(pls) = client.get_home().await {
+                let _ = tx.send(Msg::HomePlaylists(pls));
+            }
+        });
+    }
+
+    /// Abre a recomendação selecionada na tela inicial.
+    pub fn open_selected_home(&mut self) {
+        let Some(idx) = self.list_state.selected() else { return };
+        let Some(pl) = self.home.get(idx).cloned() else { return };
+        self.load_playlist(pl);
+    }
+
+    /// Abre o artista selecionado, carregando suas principais faixas.
+    pub fn open_selected_artist(&mut self) {
+        let Some(idx) = self.list_state.selected() else { return };
+        let Some(artist) = self.artists.get(idx).cloned() else { return };
+        if artist.browse_id.is_empty() {
+            self.status = "Artista sem página disponível.".to_string();
+            return;
+        }
+        self.status = format!("Carregando artista \"{}\"...", artist.name);
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        let title = format!("Artista: {}", artist.name);
+        tokio::spawn(async move {
+            match client.get_artist(&artist.browse_id).await {
+                Ok(tracks) => {
+                    let _ = tx.send(Msg::PlaylistTracks { title, tracks });
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(format!("Erro ao abrir artista: {e}")));
+                }
+            }
+        });
+    }
+
+    /// Adiciona a faixa selecionada ao fim da fila (sem interromper a atual).
+    pub fn enqueue_selected(&mut self) {
+        let track = match self.section {
+            Section::Buscar => self.list_state.selected().and_then(|i| self.songs.get(i)).cloned(),
+            Section::Fila => None, // já está na fila
+            _ => None,
+        };
+        let Some(track) = track else { return };
+        let title = track.title.clone();
+        self.queue.push(track);
+        // Nada tocando ainda? começa a tocar o que foi enfileirado.
+        if self.current.is_none() {
+            self.queue_index = Some(self.queue.len() - 1);
+            self.start_current();
+        } else {
+            // Recalcula o próximo (a fila mudou de tamanho).
+            if let Some(idx) = self.queue_index {
+                self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
+            }
+            self.status = format!("➕ \"{title}\" adicionada à fila ({} na fila).", self.queue.len());
+        }
+    }
+
+    /// Curte ou descurte a faixa atual (alterna com base no estado da sessão).
+    pub fn like_current(&mut self) {
+        let Some(track) = self.current.clone() else {
+            self.status = "Nada tocando para curtir.".to_string();
+            return;
+        };
+        if !self.logged_in {
+            self.status = "⚠ Conecte sua conta para curtir faixas.".to_string();
+            return;
+        }
+        let vid = track.video_id.clone();
+        let like = !self.liked.contains(&vid);
+        if like {
+            self.liked.insert(vid.clone());
+            self.status = format!("💚 Curtiu: {}", track.title);
+        } else {
+            self.liked.remove(&vid);
+            self.status = format!("🤍 Removeu a curtida: {}", track.title);
+        }
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.rate_song(&vid, like).await {
+                let _ = tx.send(Msg::Error(format!("Não foi possível curtir: {e}")));
             }
         });
     }
@@ -441,6 +548,7 @@ impl App {
     /// Número de itens na lista principal da seção atual.
     pub fn main_len(&self) -> usize {
         match self.section {
+            Section::Inicio => self.home.len(),
             Section::Buscar => self.songs.len(),
             Section::Biblioteca => self.library.len(),
             Section::Playlists => self.playlists.len(),
@@ -658,7 +766,23 @@ impl App {
                 self.start_current();
             }
             None => {
-                // Fim da fila sem repetição: encerra a reprodução.
+                // Fim da fila: tenta continuar com uma rádio (autoplay).
+                if self.autoplay {
+                    if let Some(seed) = self.current.as_ref().map(|t| t.video_id.clone()) {
+                        if !seed.is_empty() {
+                            self.status = "📻 Fila concluída — carregando rádio...".to_string();
+                            let client = self.client.clone();
+                            let tx = self.tx.clone();
+                            tokio::spawn(async move {
+                                if let Ok(tracks) = client.get_radio(&seed).await {
+                                    let _ = tx.send(Msg::RadioTracks(tracks));
+                                }
+                            });
+                            return;
+                        }
+                    }
+                }
+                // Sem autoplay/semente: encerra a reprodução.
                 self.player.stop();
                 self.current = None;
                 self.loading_audio = false;
@@ -692,6 +816,26 @@ impl App {
                         "📚 Biblioteca: {} playlist(s). Acesse '📚 Biblioteca' no menu.",
                         self.library.len()
                     );
+                }
+                Msg::HomePlaylists(pls) => {
+                    self.home = pls;
+                    if self.section == Section::Inicio {
+                        self.list_state.select(Some(0));
+                    }
+                }
+                Msg::RadioTracks(tracks) => {
+                    if tracks.is_empty() {
+                        self.player.stop();
+                        self.current = None;
+                        self.loading_audio = false;
+                        self.status = "Fila concluída.".to_string();
+                    } else {
+                        let start = self.queue.len();
+                        self.queue.extend(tracks);
+                        self.queue_index = Some(start);
+                        self.status = "📻 Rádio iniciada.".to_string();
+                        self.start_current();
+                    }
                 }
                 Msg::AccountName(name) => {
                     if let Some(n) = name {

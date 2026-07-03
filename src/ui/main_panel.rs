@@ -15,6 +15,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let border_color = if focused { theme.accent } else { Color::DarkGray };
 
     let title = match app.section {
+        Section::Inicio => "Início · recomendados".to_string(),
         Section::Buscar => app.songs_title.clone(),
         Section::Biblioteca => "Minhas playlists".to_string(),
         Section::Playlists => "Playlists".to_string(),
@@ -33,6 +34,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         ));
 
     match app.section {
+        Section::Inicio => draw_home(f, app, area, block),
         Section::Buscar => draw_songs(f, app, area, block, &app.songs.clone()),
         Section::Fila => draw_queue(f, app, area, block),
         Section::Biblioteca => draw_library(f, app, area, block),
@@ -144,6 +146,32 @@ fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
     render_list(f, app, area, block, items);
 }
 
+fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    if app.home.is_empty() {
+        let msg = Paragraph::new("Carregando recomendações...")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(block);
+        f.render_widget(msg, area);
+        return;
+    }
+    let accent = app.theme().accent;
+    let items: Vec<ListItem> = app
+        .home
+        .iter()
+        .map(|p| {
+            ListItem::new(Line::from(vec![
+                Span::styled("★ ", Style::default().fg(accent)),
+                Span::styled(
+                    p.title.clone(),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  ·  {}", p.subtitle), Style::default().fg(Color::DarkGray)),
+            ]))
+        })
+        .collect();
+    render_list(f, app, area, block, items);
+}
+
 fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
     if !app.logged_in {
         let msg = Paragraph::new(
@@ -236,7 +264,8 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: 
         ("  ↑/↓  ou  k/j", "mover seleção"),
         ("  ←/→  ou  h/l", "alternar entre menu e lista"),
         ("  Tab", "alternar foco menu/lista"),
-        ("  Enter", "tocar música / abrir playlist"),
+        ("  Enter", "tocar / abrir playlist / abrir artista"),
+        ("  a", "adicionar faixa à fila"),
         ("", ""),
         ("Busca", ""),
         ("  /", "abrir campo de busca"),
@@ -254,6 +283,7 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: 
         ("  + / -", "volume"),
         ("  z", "alternar aleatório (shuffle)"),
         ("  r", "modo de repetição (off/todos/1)"),
+        ("  f", "curtir / descurtir a faixa atual"),
         ("", ""),
         ("Aparência", ""),
         ("  t", "trocar tema de cores"),

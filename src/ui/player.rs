@@ -97,14 +97,20 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
         ),
     };
 
-    // Título.
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            title,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ))),
-        layout[0],
-    );
+    // Título (com coração se a faixa atual estiver curtida).
+    let liked = app
+        .current
+        .as_ref()
+        .map(|t| app.liked.contains(&t.video_id))
+        .unwrap_or(false);
+    let mut title_spans = vec![Span::styled(
+        title,
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    )];
+    if liked {
+        title_spans.push(Span::styled("  💚", Style::default().fg(theme.player)));
+    }
+    f.render_widget(Paragraph::new(Line::from(title_spans)), layout[0]);
 
     // Artista • Álbum.
     let sub = if album.is_empty() { artist } else { format!("{artist}  •  {album}") };
@@ -182,7 +188,7 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
     );
 
     // Barra de status / atalhos.
-    let help = "Espaço play/pause  n/p próx/ant  [ ] seek  z shuffle  r repeat  t tema  +/- vol  / buscar  ? ajuda  q sair";
+    let help = "Espaço play/pause  n/p próx/ant  a fila  f curtir  z shuffle  r repeat  t tema  +/- vol  / buscar  ? ajuda  q sair";
     let status_line = Line::from(vec![
         Span::styled(app.status.clone(), Style::default().fg(Color::Yellow)),
     ]);

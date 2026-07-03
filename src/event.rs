@@ -60,6 +60,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         // Modos de reprodução.
         KeyCode::Char('z') => app.toggle_shuffle(),
         KeyCode::Char('r') => app.cycle_repeat(),
+        // Adiciona a faixa selecionada à fila.
+        KeyCode::Char('a') => app.enqueue_selected(),
+        // Curte / descurte a faixa atual.
+        KeyCode::Char('f') => app.like_current(),
         // Alterna o tema de cores.
         KeyCode::Char('t') => app.cycle_theme(),
 
@@ -111,8 +115,10 @@ fn activate(app: &mut App) {
         }
         Focus::Main => match app.section {
             Section::Buscar | Section::Fila => app.play_selected(),
+            Section::Inicio => app.open_selected_home(),
             Section::Playlists => app.open_selected_playlist(),
             Section::Biblioteca => app.open_selected_library_playlist(),
+            Section::Artistas => app.open_selected_artist(),
             _ => {}
         },
     }

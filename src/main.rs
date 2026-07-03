@@ -36,7 +36,8 @@ async fn main() -> Result<()> {
     let mut terminal = setup_terminal()?;
     let mut app = App::new()?;
 
-    // Carrega a biblioteca e o nome da conta (se logado via cookies).
+    // Carrega recomendações, biblioteca e nome da conta (se logado).
+    app.load_home();
     app.load_library();
     app.load_account();
 

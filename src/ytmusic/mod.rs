@@ -138,6 +138,94 @@ impl YtMusicClient {
         Ok(out)
     }
 
+    /// Recomendações da tela inicial (`FEmusic_home`): playlists e álbuns.
+    ///
+    /// Funciona logado (personalizado) ou anônimo (recomendações genéricas).
+    pub async fn get_home(&self) -> Result<Vec<Playlist>> {
+        let body = json!({ "context": self.context(), "browseId": "FEmusic_home" });
+        let data = self.post("browse", body).await?;
+
+        let mut renderers = Vec::new();
+        collect_key(&data, "musicTwoRowItemRenderer", &mut renderers);
+
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for r in renderers {
+            let browse_id = r
+                .get("navigationEndpoint")
+                .and_then(|n| n.get("browseEndpoint"))
+                .and_then(|b| b.get("browseId"))
+                .and_then(|b| b.as_str())
+                .unwrap_or("");
+            // Apenas playlists (VL) e álbuns (MPRE) navegáveis; sem duplicatas.
+            if !(browse_id.starts_with("VL") || browse_id.starts_with("MPRE")) {
+                continue;
+            }
+            if !seen.insert(browse_id.to_string()) {
+                continue;
+            }
+            let title = r.get("title").map(join_runs).unwrap_or_default();
+            let subtitle = r.get("subtitle").map(join_runs).unwrap_or_default();
+            out.push(Playlist {
+                browse_id: browse_id.to_string(),
+                title,
+                subtitle,
+                thumbnail: extract_thumbnail(r),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Obtém as principais faixas de um artista a partir do seu `browseId`.
+    pub async fn get_artist(&self, browse_id: &str) -> Result<Vec<Track>> {
+        let body = json!({ "context": self.context(), "browseId": browse_id });
+        let data = self.post("browse", body).await?;
+        let mut renderers = Vec::new();
+        collect_key(&data, "musicResponsiveListItemRenderer", &mut renderers);
+        let mut out = Vec::new();
+        for r in renderers {
+            if let Some(t) = self.parse_track_renderer(r) {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Monta uma "rádio" (fila de relacionadas) a partir de uma faixa semente.
+    pub async fn get_radio(&self, video_id: &str) -> Result<Vec<Track>> {
+        let body = json!({
+            "context": self.context(),
+            "videoId": video_id,
+            "playlistId": format!("RDAMVM{video_id}"),
+            "isAudioOnly": true,
+        });
+        let data = self.post("next", body).await?;
+        let mut renderers = Vec::new();
+        collect_key(&data, "playlistPanelVideoRenderer", &mut renderers);
+        let mut out = Vec::new();
+        for r in renderers {
+            if let Some(t) = parse_panel_video(r) {
+                // Ignora a própria semente (costuma ser o primeiro item).
+                if t.video_id != video_id {
+                    out.push(t);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Curte (`like`) ou remove a curtida (`removelike`) de uma faixa.
+    /// Requer autenticação.
+    pub async fn rate_song(&self, video_id: &str, like: bool) -> Result<()> {
+        if !self.is_authenticated() {
+            return Err(anyhow!("não autenticado: conecte sua conta para curtir faixas"));
+        }
+        let endpoint = if like { "like/like" } else { "like/removelike" };
+        let body = json!({ "context": self.context(), "target": { "videoId": video_id } });
+        self.post(endpoint, body).await?;
+        Ok(())
+    }
+
     /// Obtém o nome da conta logada (via `account/account_menu`).
     ///
     /// Retorna `None` se anônimo ou se o nome não puder ser extraído.
@@ -249,6 +337,11 @@ impl YtMusicClient {
     /// Converte um item de lista (`musicResponsiveListItemRenderer`) em `Track`.
     fn parse_track_item(&self, item: &Value) -> Option<Track> {
         let r = item.get("musicResponsiveListItemRenderer")?;
+        self.parse_track_renderer(r)
+    }
+
+    /// Converte o conteúdo de um `musicResponsiveListItemRenderer` em `Track`.
+    fn parse_track_renderer(&self, r: &Value) -> Option<Track> {
         let texts = flex_texts(r);
 
         // videoId pode estar em playlistItemData ou em um watchEndpoint.

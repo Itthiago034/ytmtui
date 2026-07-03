@@ -262,18 +262,25 @@ src/
   enquanto buscas, letras, download de capas e resolução de áudio rodam em
   *tasks* do **Tokio**, comunicando-se com a UI por um canal `mpsc`.
 - **Áudio**: a `OutputStream` do **rodio** (que não é `Send`) roda em uma thread
-  dedicada; o `yt-dlp` baixa a melhor faixa de áudio para um arquivo temporário
-  que é então decodificado e reproduzido.
+  dedicada; o `yt-dlp` baixa a melhor faixa de áudio, que é **remuxada** para
+  ADTS antes de ser decodificada e reproduzida.
+
+> 📐 Uma descrição completa da arquitetura (módulos, fluxos, threading e pontos
+> de extensão) está em **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**.
 
 ---
 
-## 🧪 Testando o cliente da API
-
-Há um exemplo que exercita a API (busca, playlists e letras) sem abrir a TUI:
+## 🧪 Desenvolvimento
 
 ```bash
-cargo run --example apitest
+# Testes unitários (parsing, durações, temas, etc.)
+cargo test
+
+# Documentação da API interna (rustdoc), abre no navegador
+cargo doc --no-deps --open
 ```
+
+O histórico de mudanças fica em **[`CHANGELOG.md`](CHANGELOG.md)**.
 
 ---
 

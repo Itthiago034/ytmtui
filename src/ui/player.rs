@@ -22,7 +22,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(player_color))
         .title(Span::styled(
             " ▶ Player ",
-            Style::default().fg(player_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(player_color)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -105,7 +107,9 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or(false);
     let mut title_spans = vec![Span::styled(
         title,
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     )];
     if liked {
         title_spans.push(Span::styled("  💚", Style::default().fg(theme.player)));
@@ -113,9 +117,16 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(title_spans)), layout[0]);
 
     // Artista • Álbum.
-    let sub = if album.is_empty() { artist } else { format!("{artist}  •  {album}") };
+    let sub = if album.is_empty() {
+        artist
+    } else {
+        format!("{artist}  •  {album}")
+    };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(sub, Style::default().fg(theme.secondary)))),
+        Paragraph::new(Line::from(Span::styled(
+            sub,
+            Style::default().fg(theme.secondary),
+        ))),
         layout[1],
     );
 
@@ -155,12 +166,16 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
 
     // Indicadores de shuffle e repeat.
     let shuffle_style = if app.shuffle {
-        Style::default().fg(theme.player).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.player)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
     let repeat_style = if app.repeat != crate::app::RepeatMode::Off {
-        Style::default().fg(theme.player).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.player)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -173,26 +188,40 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!(" {vol}%"), Style::default().fg(Color::Gray)),
             Span::raw("    "),
             Span::styled("🔀", shuffle_style),
-            Span::styled(
-                if app.shuffle { " on" } else { " off" },
-                shuffle_style,
-            ),
+            Span::styled(if app.shuffle { " on" } else { " off" }, shuffle_style),
             Span::raw("  "),
             Span::styled("🔁", repeat_style),
             Span::styled(format!(" {}", app.repeat.label()), repeat_style),
             Span::raw("    "),
             Span::styled("🎨 ", Style::default().fg(theme.accent)),
-            Span::styled(theme.name, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                theme.name,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ])),
         layout[3],
     );
 
     // Barra de status / atalhos.
     let help = "Espaço play/pause  n/p próx/ant  a fila  f curtir  z shuffle  r repeat  t tema  +/- vol  / buscar  ? ajuda  q sair";
-    let status_line = Line::from(vec![
-        Span::styled(app.status.clone(), Style::default().fg(Color::Yellow)),
-    ]);
+    let mut status_spans = Vec::new();
+    if app.is_loading() {
+        status_spans.push(Span::styled(
+            format!("{} ", app.spinner()),
+            Style::default().fg(theme.player),
+        ));
+    }
+    status_spans.push(Span::styled(
+        app.status.clone(),
+        Style::default().fg(Color::Yellow),
+    ));
+    let status_line = Line::from(status_spans);
     let mut lines = vec![status_line];
-    lines.push(Line::from(Span::styled(help, Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled(
+        help,
+        Style::default().fg(Color::DarkGray),
+    )));
     f.render_widget(Paragraph::new(lines), layout[4]);
 }

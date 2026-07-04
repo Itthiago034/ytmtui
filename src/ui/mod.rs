@@ -72,7 +72,9 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             " Buscar ",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
 
     f.render_widget(Paragraph::new(content).block(block), area);

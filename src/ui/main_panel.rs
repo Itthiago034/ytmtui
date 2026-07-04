@@ -12,7 +12,11 @@ use crate::app::{App, Focus, Section};
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     let focused = app.focus == Focus::Main;
-    let border_color = if focused { theme.accent } else { Color::DarkGray };
+    let border_color = if focused {
+        theme.accent
+    } else {
+        Color::DarkGray
+    };
 
     let title = match app.section {
         Section::Inicio => "Início · recomendados".to_string(),
@@ -30,7 +34,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             format!(" {title} "),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
 
     match app.section {
@@ -54,7 +60,11 @@ fn track_line(
     accent: Color,
 ) -> Line<'static> {
     let num = format!("{:>2}  ", index + 1);
-    let dur = if t.duration.is_empty() { String::new() } else { t.duration.clone() };
+    let dur = if t.duration.is_empty() {
+        String::new()
+    } else {
+        t.duration.clone()
+    };
     // Espaço reservado para número + duração + margens.
     let avail = width.saturating_sub(num.len() + dur.len() + 6);
     let main = format!("{} — {}", t.title, t.artist);
@@ -69,7 +79,10 @@ fn track_line(
     Line::from(vec![
         Span::styled(if playing { "▶ " } else { "  " }, marker_style),
         Span::styled(num, Style::default().fg(Color::DarkGray)),
-        Span::styled(main, Style::default().fg(if playing { accent } else { Color::White })),
+        Span::styled(
+            main,
+            Style::default().fg(if playing { accent } else { Color::White }),
+        ),
         Span::raw(pad),
         Span::styled(dur, Style::default().fg(Color::DarkGray)),
     ])
@@ -137,9 +150,14 @@ fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
                 Span::styled("🎵 ", Style::default().fg(accent)),
                 Span::styled(
                     p.title.clone(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  ·  {}", p.subtitle), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  ·  {}", p.subtitle),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]))
         })
         .collect();
@@ -148,7 +166,14 @@ fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
 
 fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
     if app.home.is_empty() {
-        let msg = Paragraph::new("Carregando recomendações...")
+        let text = if app.busy {
+            format!("{} Carregando recomendações...", app.spinner())
+        } else if app.logged_in {
+            "Sem recomendações no momento. Pressione '/' para buscar.".to_string()
+        } else {
+            "Faça login para ver recomendações. Pressione '?' para instruções.".to_string()
+        };
+        let msg = Paragraph::new(text)
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(msg, area);
@@ -163,9 +188,14 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
                 Span::styled("★ ", Style::default().fg(accent)),
                 Span::styled(
                     p.title.clone(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  ·  {}", p.subtitle), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  ·  {}", p.subtitle),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]))
         })
         .collect();
@@ -188,7 +218,12 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
         return;
     }
     if app.library.is_empty() {
-        let msg = Paragraph::new("Carregando sua biblioteca...")
+        let text = if app.busy {
+            format!("{} Carregando sua biblioteca...", app.spinner())
+        } else {
+            "Nenhuma playlist na biblioteca.".to_string()
+        };
+        let msg = Paragraph::new(text)
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(msg, area);
@@ -203,9 +238,14 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
                 Span::styled("📚 ", Style::default().fg(accent)),
                 Span::styled(
                     p.title.clone(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  ·  {}", p.subtitle), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  ·  {}", p.subtitle),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]))
         })
         .collect();
@@ -229,9 +269,14 @@ fn draw_artists(f: &mut Frame, app: &App, area: Rect, block: Block) {
                 Span::styled("👤 ", Style::default().fg(secondary)),
                 Span::styled(
                     a.name.clone(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  ·  {}", a.subtitle), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  ·  {}", a.subtitle),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]))
         })
         .collect();

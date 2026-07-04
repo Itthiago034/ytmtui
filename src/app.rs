@@ -188,6 +188,10 @@ pub struct App {
     pub cookies: Option<String>,
     /// Um download de áudio está em andamento.
     pub loading_audio: bool,
+    /// Uma tarefa de carregamento (busca/playlist/artista/biblioteca) está ativa.
+    pub busy: bool,
+    /// Quadro atual do spinner de carregamento (avança a cada tick).
+    pub spinner_frame: usize,
 }
 
 impl App {
@@ -294,14 +298,28 @@ impl App {
             status,
             cookies,
             loading_audio: false,
+            busy: false,
+            spinner_frame: 0,
         })
     }
 
+    /// Há alguma tarefa de carregamento em andamento (rede ou áudio)?
+    pub fn is_loading(&self) -> bool {
+        self.busy || self.loading_audio
+    }
+
+    /// Glifo atual do spinner de carregamento (braille animado).
+    pub fn spinner(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        FRAMES[self.spinner_frame % FRAMES.len()]
+    }
+
     /// Carrega (em background) as playlists da biblioteca, se autenticado.
-    pub fn load_library(&self) {
+    pub fn load_library(&mut self) {
         if !self.logged_in {
             return;
         }
+        self.busy = true;
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -317,7 +335,8 @@ impl App {
     }
 
     /// Carrega (em background) as recomendações da tela inicial.
-    pub fn load_home(&self) {
+    pub fn load_home(&mut self) {
+        self.busy = true;
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -329,20 +348,29 @@ impl App {
 
     /// Abre a recomendação selecionada na tela inicial.
     pub fn open_selected_home(&mut self) {
-        let Some(idx) = self.list_state.selected() else { return };
-        let Some(pl) = self.home.get(idx).cloned() else { return };
+        let Some(idx) = self.list_state.selected() else {
+            return;
+        };
+        let Some(pl) = self.home.get(idx).cloned() else {
+            return;
+        };
         self.load_playlist(pl);
     }
 
     /// Abre o artista selecionado, carregando suas principais faixas.
     pub fn open_selected_artist(&mut self) {
-        let Some(idx) = self.list_state.selected() else { return };
-        let Some(artist) = self.artists.get(idx).cloned() else { return };
+        let Some(idx) = self.list_state.selected() else {
+            return;
+        };
+        let Some(artist) = self.artists.get(idx).cloned() else {
+            return;
+        };
         if artist.browse_id.is_empty() {
             self.status = "Artista sem página disponível.".to_string();
             return;
         }
         self.status = format!("Carregando artista \"{}\"...", artist.name);
+        self.busy = true;
         let client = self.client.clone();
         let tx = self.tx.clone();
         let title = format!("Artista: {}", artist.name);
@@ -361,7 +389,11 @@ impl App {
     /// Adiciona a faixa selecionada ao fim da fila (sem interromper a atual).
     pub fn enqueue_selected(&mut self) {
         let track = match self.section {
-            Section::Buscar => self.list_state.selected().and_then(|i| self.songs.get(i)).cloned(),
+            Section::Buscar => self
+                .list_state
+                .selected()
+                .and_then(|i| self.songs.get(i))
+                .cloned(),
             Section::Fila => None, // já está na fila
             _ => None,
         };
@@ -377,7 +409,10 @@ impl App {
             if let Some(idx) = self.queue_index {
                 self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
             }
-            self.status = format!("➕ \"{title}\" adicionada à fila ({} na fila).", self.queue.len());
+            self.status = format!(
+                "➕ \"{title}\" adicionada à fila ({} na fila).",
+                self.queue.len()
+            );
         }
     }
 
@@ -533,7 +568,9 @@ impl App {
 
     /// Pré-baixa (em background) o áudio da faixa de índice `idx` para o cache.
     fn prefetch(&self, idx: usize) {
-        let Some(track) = self.queue.get(idx) else { return };
+        let Some(track) = self.queue.get(idx) else {
+            return;
+        };
         if track.video_id.is_empty() {
             return;
         }
@@ -586,6 +623,7 @@ impl App {
             return;
         }
         self.status = format!("Buscando por \"{q}\"...");
+        self.busy = true;
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -602,21 +640,30 @@ impl App {
 
     /// Abre a playlist da biblioteca selecionada, carregando suas faixas.
     pub fn open_selected_library_playlist(&mut self) {
-        let Some(idx) = self.list_state.selected() else { return };
-        let Some(pl) = self.library.get(idx).cloned() else { return };
+        let Some(idx) = self.list_state.selected() else {
+            return;
+        };
+        let Some(pl) = self.library.get(idx).cloned() else {
+            return;
+        };
         self.load_playlist(pl);
     }
 
     /// Abre a playlist selecionada, carregando suas faixas.
     pub fn open_selected_playlist(&mut self) {
-        let Some(idx) = self.list_state.selected() else { return };
-        let Some(pl) = self.playlists.get(idx).cloned() else { return };
+        let Some(idx) = self.list_state.selected() else {
+            return;
+        };
+        let Some(pl) = self.playlists.get(idx).cloned() else {
+            return;
+        };
         self.load_playlist(pl);
     }
 
     /// Dispara o carregamento (assíncrono) das faixas de uma playlist.
     fn load_playlist(&mut self, pl: Playlist) {
         self.status = format!("Carregando playlist \"{}\"...", pl.title);
+        self.busy = true;
         let client = self.client.clone();
         let tx = self.tx.clone();
         let title = pl.title.clone();
@@ -659,7 +706,9 @@ impl App {
     /// Inicia a reprodução da faixa apontada por `queue_index`.
     fn start_current(&mut self) {
         let Some(idx) = self.queue_index else { return };
-        let Some(track) = self.queue.get(idx).cloned() else { return };
+        let Some(track) = self.queue.get(idx).cloned() else {
+            return;
+        };
         self.current = Some(track.clone());
         self.lyrics = None;
         self.lyrics_scroll = 0;
@@ -796,6 +845,7 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::SearchResults(res) => {
+                    self.busy = false;
                     self.songs = res.songs;
                     self.songs_title = "Resultados da busca".to_string();
                     self.playlists = res.playlists;
@@ -811,6 +861,7 @@ impl App {
                     }
                 }
                 Msg::LibraryPlaylists(pls) => {
+                    self.busy = false;
                     self.library = pls;
                     self.status = format!(
                         "📚 Biblioteca: {} playlist(s). Acesse '📚 Biblioteca' no menu.",
@@ -818,6 +869,7 @@ impl App {
                     );
                 }
                 Msg::HomePlaylists(pls) => {
+                    self.busy = false;
                     self.home = pls;
                     if self.section == Section::Inicio {
                         self.list_state.select(Some(0));
@@ -845,6 +897,7 @@ impl App {
                     }
                 }
                 Msg::PlaylistTracks { title, tracks } => {
+                    self.busy = false;
                     self.songs = tracks;
                     self.songs_title = format!("Playlist: {title}");
                     self.section = Section::Buscar;
@@ -869,6 +922,7 @@ impl App {
                 Msg::Status(s) => self.status = s,
                 Msg::Error(e) => {
                     self.loading_audio = false;
+                    self.busy = false;
                     self.status = format!("⚠ {e}");
                 }
             }
@@ -877,6 +931,9 @@ impl App {
 
     /// Chamado a cada tick para tarefas periódicas (auto-avanço de faixa).
     pub fn tick(&mut self) {
+        if self.is_loading() {
+            self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        }
         if self.player.take_finished() && !self.loading_audio {
             self.advance_auto();
         }

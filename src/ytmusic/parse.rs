@@ -95,8 +95,9 @@ pub fn flex_texts(renderer: &Value) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(cols) = renderer.get("flexColumns").and_then(|c| c.as_array()) {
         for col in cols {
-            if let Some(text) =
-                col.get("musicResponsiveListItemFlexColumnRenderer").and_then(|r| r.get("text"))
+            if let Some(text) = col
+                .get("musicResponsiveListItemFlexColumnRenderer")
+                .and_then(|r| r.get("text"))
             {
                 out.push(join_runs(text));
             }
@@ -186,8 +187,9 @@ pub fn parse_panel_video(r: &Value) -> Option<crate::ytmusic::Track> {
 pub fn fixed_duration(renderer: &Value) -> Option<String> {
     let cols = renderer.get("fixedColumns")?.as_array()?;
     for col in cols {
-        if let Some(text) =
-            col.get("musicResponsiveListItemFixedColumnRenderer").and_then(|r| r.get("text"))
+        if let Some(text) = col
+            .get("musicResponsiveListItemFixedColumnRenderer")
+            .and_then(|r| r.get("text"))
         {
             let s = join_runs(text);
             if s.contains(':') {
@@ -252,7 +254,10 @@ mod tests {
             ]
         });
         let texts = flex_texts(&renderer);
-        assert_eq!(texts, vec!["Título".to_string(), "Artista • Álbum".to_string()]);
+        assert_eq!(
+            texts,
+            vec!["Título".to_string(), "Artista • Álbum".to_string()]
+        );
     }
 
     #[test]
@@ -264,12 +269,18 @@ mod tests {
                 }
             }
         });
-        assert_eq!(extract_continuation(&new_fmt).as_deref(), Some("TOKEN_NOVO"));
+        assert_eq!(
+            extract_continuation(&new_fmt).as_deref(),
+            Some("TOKEN_NOVO")
+        );
 
         let old_fmt = json!({
             "continuations": [{ "nextContinuationData": { "continuation": "TOKEN_ANTIGO" } }]
         });
-        assert_eq!(extract_continuation(&old_fmt).as_deref(), Some("TOKEN_ANTIGO"));
+        assert_eq!(
+            extract_continuation(&old_fmt).as_deref(),
+            Some("TOKEN_ANTIGO")
+        );
 
         let none = json!({ "foo": "bar" });
         assert!(extract_continuation(&none).is_none());

@@ -27,10 +27,17 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(" ♫ ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " ♫ ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             "ytmtui",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(Span::styled(
@@ -40,7 +47,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
     // Linha da conta.
     if app.logged_in {
-        let name = app.account_name.clone().unwrap_or_else(|| "conectado".to_string());
+        let name = app
+            .account_name
+            .clone()
+            .unwrap_or_else(|| "conectado".to_string());
         let initial = name
             .chars()
             .find(|c| c.is_alphanumeric())
@@ -59,7 +69,12 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
-            Span::styled(shown, Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                shown,
+                Style::default()
+                    .fg(theme.secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
     } else {
         lines.push(Line::from(vec![
@@ -76,7 +91,11 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 fn draw_menu(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     let focused = app.focus == Focus::Sidebar;
-    let border_color = if focused { theme.accent } else { Color::DarkGray };
+    let border_color = if focused {
+        theme.accent
+    } else {
+        Color::DarkGray
+    };
 
     let items: Vec<ListItem> = Section::ALL
         .iter()
@@ -99,7 +118,9 @@ fn draw_menu(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             " Menu ",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let list = List::new(items).block(block).highlight_symbol("");

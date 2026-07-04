@@ -20,6 +20,33 @@ use rodio::{Decoder, OutputStream, Sink};
 /// ignorar panics capturados aqui (evita bagunçar o terminal em modo raw).
 pub const AUDIO_THREAD_NAME: &str = "ytmtui-audio";
 
+/// Verifica se um binário externo está disponível no `PATH`.
+///
+/// Considera o comando presente se conseguir iniciá-lo (qualquer código de
+/// saída); só o trata como ausente quando o SO reporta `NotFound`.
+fn command_exists(bin: &str) -> bool {
+    match Command::new(bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Lista as ferramentas externas ausentes como pares `(nome, essencial)`.
+///
+/// - `yt-dlp` e `ffmpeg` são essenciais (sem eles a reprodução falha ou trava).
+/// - `deno` é opcional: só é usado por alguns desafios de JS do `yt-dlp`.
+pub fn missing_dependencies() -> Vec<(&'static str, bool)> {
+    [("yt-dlp", true), ("ffmpeg", true), ("deno", false)]
+        .into_iter()
+        .filter(|(bin, _)| !command_exists(bin))
+        .collect()
+}
+
 /// Comandos enviados para a thread de áudio.
 enum Cmd {
     /// Reproduz o arquivo indicado.
@@ -65,7 +92,12 @@ impl AudioPlayer {
             })
             .expect("falha ao iniciar a thread de áudio");
 
-        Ok(Self { tx, state, volume: 0.8, paused: false })
+        Ok(Self {
+            tx,
+            state,
+            volume: 0.8,
+            paused: false,
+        })
     }
 
     /// Carrega e reproduz um arquivo local (já baixado).
@@ -189,9 +221,9 @@ fn audio_thread(rx: Receiver<Cmd>, state: Arc<Mutex<SharedState>>) {
                 // O decoder do symphonia pode entrar em pânico ao inicializar
                 // certos arquivos; captura para não derrubar a thread/o app.
                 let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    File::open(&path).map_err(anyhow::Error::from).and_then(|f| {
-                        Decoder::new(BufReader::new(f)).map_err(|e| anyhow!(e))
-                    })
+                    File::open(&path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|f| Decoder::new(BufReader::new(f)).map_err(|e| anyhow!(e)))
                 }))
                 .unwrap_or_else(|_| Err(anyhow!("falha ao decodificar o áudio")));
                 match decoded {
@@ -398,13 +430,16 @@ pub fn download_audio(watch_url: &str, video_id: &str, cookies: Option<&str>) ->
         cmd.arg("--cookies").arg(c);
     }
 
-    let output = cmd.output().map_err(|e| {
-        anyhow!("não foi possível executar o yt-dlp ({e}). Ele está instalado?")
-    })?;
+    let output = cmd
+        .output()
+        .map_err(|e| anyhow!("não foi possível executar o yt-dlp ({e}). Ele está instalado?"))?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("yt-dlp falhou: {}", err.lines().last().unwrap_or("erro desconhecido")));
+        return Err(anyhow!(
+            "yt-dlp falhou: {}",
+            err.lines().last().unwrap_or("erro desconhecido")
+        ));
     }
 
     // O caminho final é impresso na última linha do stdout.

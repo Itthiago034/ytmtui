@@ -56,6 +56,8 @@ músicas do YouTube Music direto do terminal**, sem precisar de login.
 - ⚙️ **Configuração persistente** (volume, shuffle e repeat são lembrados entre sessões).
 - ⌨️ **Navegação por teclado** no estilo *vim* (`h/j/k/l`) ou setas.
 - 🧩 **Interface em painéis** (menu lateral, lista principal e player).
+- ⏳ **Spinner de carregamento** durante buscas, playlists e downloads.
+- 🩺 **Checagem de dependências** no início, avisando se faltar `yt-dlp`/`ffmpeg`.
 
 ---
 
@@ -92,6 +94,18 @@ cargo build --release
 # — ou, para desenvolvimento —
 cargo run
 ```
+
+### Instalar como comando (`ytmtui`)
+
+Para instalar o binário no seu `PATH` (`~/.cargo/bin`):
+
+```bash
+cargo install --path .
+```
+
+Depois é só rodar `ytmtui` de qualquer lugar. Binários prontos por versão
+também são publicados em **Releases** (veja abaixo) sempre que uma tag `v*`
+é criada.
 
 ---
 
@@ -276,9 +290,18 @@ src/
 # Testes unitários (parsing, durações, temas, etc.)
 cargo test
 
+# Formatação e lints (o CI exige ambos limpos)
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+
 # Documentação da API interna (rustdoc), abre no navegador
 cargo doc --no-deps --open
 ```
+
+O CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) roda `fmt`,
+`clippy` e `test` a cada push/PR. Ao criar uma tag `v*`, o workflow de release
+([`.github/workflows/release.yml`](.github/workflows/release.yml)) compila e
+publica binários para Linux e macOS.
 
 O histórico de mudanças fica em **[`CHANGELOG.md`](CHANGELOG.md)**.
 
@@ -292,4 +315,4 @@ não se responsabilizam pelo uso indevido.
 
 ## 📄 Licença
 
-MIT.
+MIT — veja **[`LICENSE`](LICENSE)**.

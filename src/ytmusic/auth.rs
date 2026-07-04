@@ -66,9 +66,9 @@ impl Auth {
             pairs.push(format!("{name}={value}"));
 
             // Prefere __Secure-3PAPISID; cai para SAPISID quando ausente.
-            if name == "__Secure-3PAPISID" {
-                sapisid = Some(value.to_string());
-            } else if name == "SAPISID" && sapisid.is_none() {
+            let is_primary = name == "__Secure-3PAPISID";
+            let is_fallback = name == "SAPISID" && sapisid.is_none();
+            if is_primary || is_fallback {
                 sapisid = Some(value.to_string());
             }
         }
@@ -78,7 +78,10 @@ impl Auth {
             return None;
         }
 
-        Some(Auth { cookie_header: pairs.join("; "), sapisid })
+        Some(Auth {
+            cookie_header: pairs.join("; "),
+            sapisid,
+        })
     }
 
     /// Calcula o cabeçalho `Authorization: SAPISIDHASH ...` para o instante atual.

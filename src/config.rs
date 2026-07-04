@@ -47,8 +47,12 @@ fn config_path() -> Option<PathBuf> {
 impl Config {
     /// Carrega a configuração do disco; retorna o padrão em caso de erro.
     pub fn load() -> Self {
-        let Some(path) = config_path() else { return Self::default() };
-        let Ok(contents) = std::fs::read_to_string(&path) else { return Self::default() };
+        let Some(path) = config_path() else {
+            return Self::default();
+        };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
         serde_json::from_str(&contents).unwrap_or_default()
     }
 

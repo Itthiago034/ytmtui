@@ -105,7 +105,9 @@ impl YtMusicClient {
     /// Requer autenticação (cookies). Retorna erro se o cliente for anônimo.
     pub async fn get_library_playlists(&self) -> Result<Vec<Playlist>> {
         if !self.is_authenticated() {
-            return Err(anyhow!("não autenticado: configure YTM_COOKIES para ver a biblioteca"));
+            return Err(anyhow!(
+                "não autenticado: configure YTM_COOKIES para ver a biblioteca"
+            ));
         }
 
         let body = json!({ "context": self.context(), "browseId": "FEmusic_liked_playlists" });
@@ -218,7 +220,9 @@ impl YtMusicClient {
     /// Requer autenticação.
     pub async fn rate_song(&self, video_id: &str, like: bool) -> Result<()> {
         if !self.is_authenticated() {
-            return Err(anyhow!("não autenticado: conecte sua conta para curtir faixas"));
+            return Err(anyhow!(
+                "não autenticado: conecte sua conta para curtir faixas"
+            ));
         }
         let endpoint = if like { "like/like" } else { "like/removelike" };
         let body = json!({ "context": self.context(), "target": { "videoId": video_id } });
@@ -283,7 +287,9 @@ impl YtMusicClient {
         if let Some(shelf) = find_key(&data, "musicShelfRenderer") {
             if let Some(items) = shelf.get("contents").and_then(|c| c.as_array()) {
                 for item in items {
-                    let Some(r) = item.get("musicResponsiveListItemRenderer") else { continue };
+                    let Some(r) = item.get("musicResponsiveListItemRenderer") else {
+                        continue;
+                    };
                     let texts = flex_texts(r);
                     let browse_id = top_browse_id(r);
                     out.push(Artist {
@@ -306,7 +312,9 @@ impl YtMusicClient {
         if let Some(shelf) = find_key(&data, "musicShelfRenderer") {
             if let Some(items) = shelf.get("contents").and_then(|c| c.as_array()) {
                 for item in items {
-                    let Some(r) = item.get("musicResponsiveListItemRenderer") else { continue };
+                    let Some(r) = item.get("musicResponsiveListItemRenderer") else {
+                        continue;
+                    };
                     let texts = flex_texts(r);
                     let browse_id = top_browse_id(r);
                     out.push(Playlist {
@@ -324,8 +332,12 @@ impl YtMusicClient {
     /// Faz o parsing do "shelf" de músicas retornado pela busca.
     fn parse_song_shelf(&self, data: &Value) -> Vec<Track> {
         let mut out = Vec::new();
-        let Some(shelf) = find_key(data, "musicShelfRenderer") else { return out };
-        let Some(items) = shelf.get("contents").and_then(|c| c.as_array()) else { return out };
+        let Some(shelf) = find_key(data, "musicShelfRenderer") else {
+            return out;
+        };
+        let Some(items) = shelf.get("contents").and_then(|c| c.as_array()) else {
+            return out;
+        };
         for item in items {
             if let Some(track) = self.parse_track_item(item) {
                 out.push(track);
@@ -369,13 +381,9 @@ impl YtMusicClient {
 
         let artist = segments.first().cloned().unwrap_or_default();
         // Duração: tenta fixedColumn, senão o último segmento no formato tempo.
-        let duration = fixed_duration(r).or_else(|| {
-            segments
-                .iter()
-                .rev()
-                .find(|s| s.contains(':'))
-                .cloned()
-        }).unwrap_or_default();
+        let duration = fixed_duration(r)
+            .or_else(|| segments.iter().rev().find(|s| s.contains(':')).cloned())
+            .unwrap_or_default();
         let album = segments
             .iter()
             .skip(1)
@@ -440,7 +448,9 @@ impl YtMusicClient {
             pages += 1;
 
             let body = json!({ "context": self.context(), "continuation": tok });
-            let Ok(cont) = self.post("browse", body).await else { break };
+            let Ok(cont) = self.post("browse", body).await else {
+                break;
+            };
 
             let before = out.len();
             let items = find_key(&cont, "continuationItems")
@@ -473,7 +483,9 @@ impl YtMusicClient {
         let mut lyrics_id: Option<String> = None;
         if let Some(tabs) = find_key(&next, "tabs").and_then(|t| t.as_array()) {
             for tab in tabs {
-                let Some(tr) = tab.get("tabRenderer") else { continue };
+                let Some(tr) = tab.get("tabRenderer") else {
+                    continue;
+                };
                 let bid = tr
                     .get("endpoint")
                     .and_then(|e| e.get("browseEndpoint"))
@@ -481,7 +493,8 @@ impl YtMusicClient {
                     .and_then(|b| b.as_str());
                 let title = tr.get("title").and_then(|t| t.as_str()).unwrap_or("");
                 if let Some(bid) = bid {
-                    if bid.starts_with("MPLY") || title.eq_ignore_ascii_case("Lyrics")
+                    if bid.starts_with("MPLY")
+                        || title.eq_ignore_ascii_case("Lyrics")
                         || title.eq_ignore_ascii_case("Letra")
                     {
                         lyrics_id = Some(bid.to_string());
@@ -491,7 +504,9 @@ impl YtMusicClient {
             }
         }
 
-        let Some(lyrics_id) = lyrics_id else { return Ok(None) };
+        let Some(lyrics_id) = lyrics_id else {
+            return Ok(None);
+        };
 
         // 2) browse na aba de letras.
         let body = json!({ "context": self.context(), "browseId": lyrics_id });

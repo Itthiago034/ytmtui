@@ -36,6 +36,25 @@ async fn main() -> Result<()> {
     let mut terminal = setup_terminal()?;
     let mut app = App::new()?;
 
+    // Avisa (uma vez) se faltar alguma ferramenta essencial de reprodução.
+    let missing = player::missing_dependencies();
+    if missing.iter().any(|(_, essential)| *essential) {
+        let names: Vec<String> = missing
+            .iter()
+            .map(|(name, essential)| {
+                if *essential {
+                    format!("{name} (essencial)")
+                } else {
+                    name.to_string()
+                }
+            })
+            .collect();
+        app.status = format!(
+            "⚠ Dependências ausentes: {}. Veja o README para instalar.",
+            names.join(", ")
+        );
+    }
+
     // Carrega recomendações, biblioteca e nome da conta (se logado).
     app.load_home();
     app.load_library();

@@ -22,6 +22,15 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.
 - **Login automático**: descoberta do arquivo `~/.config/ytmtui/cookies.txt`,
   exibição do **nome da conta** e da **biblioteca** (playlists da conta).
 - **Configuração** com novos campos `theme` e `username`.
+- **Spinner de carregamento** (braille animado) exibido na barra de status e nos
+  painéis enquanto buscas, playlists, biblioteca ou downloads estão em andamento.
+- **Checagem de dependências** na inicialização: avisa se `yt-dlp`/`ffmpeg`
+  (essenciais) ou `deno` (opcional) não estiverem no `PATH`.
+- **Empacotamento**: metadados no `Cargo.toml` (autor, repositório, keywords,
+  categorias, `rust-version`), arquivo `LICENSE` (MIT) e instruções de
+  `cargo install`.
+- **CI/CD** no GitHub Actions: workflow de `fmt` + `clippy` + `test` a cada
+  push/PR e workflow de release que publica binários (Linux/macOS) em tags `v*`.
 - Documentação: `docs/ARCHITECTURE.md` e este `CHANGELOG.md`.
 
 ### Alterado

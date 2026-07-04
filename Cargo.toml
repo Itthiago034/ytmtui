@@ -2,9 +2,16 @@
 name = "ytmtui"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 description = "Cliente TUI para YouTube Music escrito em Rust com Ratatui"
+authors = ["Itthiago <kiyottiago@gmail.com>"]
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/itthiago/ytmtui"
+homepage = "https://github.com/itthiago/ytmtui"
+keywords = ["youtube-music", "tui", "ratatui", "music", "terminal"]
+categories = ["multimedia::audio", "command-line-utilities"]
+exclude = ["/.github", "/docs", "/ytmtui_src", "examples/apitest.rs", "*.txt"]
 
 [[bin]]
 name = "ytmtui"

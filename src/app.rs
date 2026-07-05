@@ -2,8 +2,8 @@
 
 mod authentication;
 
-pub use authentication::AuthenticationState;
 use authentication::resolve_cookie_path;
+pub use authentication::AuthenticationState;
 
 use std::path::PathBuf;
 
@@ -13,9 +13,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
 use crate::player::{self, AudioPlayer};
-use crate::ytmusic::{
-    Artist, Playlist, SearchResults, Track, YtMusicClient, YtMusicError,
-};
+use crate::ytmusic::{Artist, Playlist, SearchResults, Track, YtMusicClient, YtMusicError};
 
 /// Seções da barra lateral (também define o conteúdo do painel principal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,16 +42,16 @@ impl Section {
     ];
 
     /// Rótulo exibido na barra lateral.
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
             Section::Inicio => "🏠 Início",
-            Section::Buscar => "🔍 Buscar",
+            Section::Buscar => "🔎 Buscar",
             Section::Biblioteca => "📚 Biblioteca",
-            Section::Playlists => "🎵 Playlists",
-            Section::Artistas => "👤 Artistas",
-            Section::Fila => "📃 Fila",
-            Section::Letra => "📝 Letra",
-            Section::Ajuda => "❓ Ajuda",
+            Section::Playlists => "💿 Playlists",
+            Section::Artistas => "🎤 Artistas",
+            Section::Fila => "🎶 Fila Atual",
+            Section::Letra => "📖 Letras",
+            Section::Ajuda => "💡 Ajuda",
         }
     }
 
@@ -257,8 +255,7 @@ impl App {
                 "Signed in. Loading your library... Press / to search or ? for help.".to_string()
             }
             AuthenticationState::InvalidCookies => {
-                "Cookie file is invalid. Refresh it with ./scripts/refresh-cookies.sh."
-                    .to_string()
+                "Cookie file is invalid. Refresh it with ./scripts/refresh-cookies.sh.".to_string()
             }
             AuthenticationState::Anonymous => match resolution.missing_requested_path.as_deref() {
                 Some(path) => format!("Configured cookie file does not exist: {path}"),

@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Focus, Section};
@@ -31,6 +31,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             format!(" {title} "),
@@ -355,8 +356,8 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: 
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Renderiza uma lista com estado (seleção destacada).
 fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<ListItem>) {
+    let item_count = items.len();
     let list = List::new(items)
         .block(block)
         .highlight_style(
@@ -367,4 +368,27 @@ fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<Li
         .highlight_symbol("");
     let mut state = app.list_state.clone();
     f.render_stateful_widget(list, area, &mut state);
+
+    if item_count > 0 && area.height > 2 {
+        let mut scrollbar_state = ratatui::widgets::ScrollbarState::default()
+            .content_length(item_count)
+            .viewport_content_length(area.height.saturating_sub(2) as usize);
+        if let Some(selected) = state.selected() {
+            scrollbar_state = scrollbar_state.position(selected);
+        }
+
+        let scrollbar = ratatui::widgets::Scrollbar::default()
+            .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .thumb_symbol("█")
+            .track_symbol(Some("│"));
+
+        // inner margin to avoid overwriting the block border
+        let scroll_area = area.inner(ratatui::layout::Margin {
+            vertical: 1,
+            horizontal: 0,
+        });
+        f.render_stateful_widget(scrollbar, scroll_area, &mut scrollbar_state);
+    }
 }

@@ -77,11 +77,10 @@ impl Auth {
     /// Retorna `None` se o arquivo não puder ser lido ou não contiver os
     /// cookies necessários (em especial o SAPISID).
     pub fn from_cookie_file(path: &str) -> Result<Auth, AuthError> {
-        let content =
-            std::fs::read_to_string(path).map_err(|source| AuthError::ReadFile {
-                path: PathBuf::from(path),
-                source,
-            })?;
+        let content = std::fs::read_to_string(path).map_err(|source| AuthError::ReadFile {
+            path: PathBuf::from(path),
+            source,
+        })?;
         Self::from_cookie_text(&content)
     }
 

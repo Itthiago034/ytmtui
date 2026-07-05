@@ -79,8 +79,8 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
     while app.running {
         terminal.draw(|f| ui::draw(f, app))?;
 
-        // Aguarda eventos por até 100ms; caso contrário, atualiza a tela.
-        if cevent::poll(Duration::from_millis(100))? {
+        // Aguarda eventos por até 50ms; caso contrário, redesenha a tela.
+        if cevent::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = cevent::read()? {
                 // Ignora eventos de "release" (relevante no Windows).
                 if key.kind == KeyEventKind::Press {

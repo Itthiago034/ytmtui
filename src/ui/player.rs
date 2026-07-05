@@ -3,7 +3,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -19,6 +19,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let player_color = app.theme().player;
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(player_color))
         .title(Span::styled(
             " ▶ Player ",
@@ -147,6 +148,7 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
     let gauge = Gauge::default()
         .gauge_style(Style::default().fg(theme.player).bg(Color::Rgb(30, 30, 30)))
         .ratio(ratio)
+        .use_unicode(true)
         .label(Span::styled(label, Style::default().fg(Color::White)));
     f.render_widget(gauge, layout[2]);
 
@@ -162,7 +164,12 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect) {
     };
     let vol = (app.player.volume() * 100.0).round() as u32;
     let vol_blocks = (app.player.volume() * 10.0).round() as usize;
-    let vol_bar: String = "█".repeat(vol_blocks) + &"░".repeat(10usize.saturating_sub(vol_blocks));
+    let vol_bar = format!(
+        "{}{}{}",
+        "━".repeat(vol_blocks),
+        "●",
+        "─".repeat(10usize.saturating_sub(vol_blocks))
+    );
 
     // Indicadores de shuffle e repeat.
     let shuffle_style = if app.shuffle {

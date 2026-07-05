@@ -12,7 +12,7 @@ if ! command -v yt-dlp >/dev/null; then
 fi
 
 BROWSER="${1:-brave}"
-TEMP="$(mktemp "${DEST}.tmp.XXXXXX")"
+TEMP="$(mktemp -u "${DEST}.tmp.XXXXXX")"
 trap 'rm -f "$TEMP"' EXIT
 
 echo "Exporting cookies from $BROWSER..."

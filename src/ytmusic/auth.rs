@@ -55,12 +55,22 @@ pub struct Auth {
 /// Em nomes duplicados (ex.: `__Secure-3PSID` em `.google.com` e `.youtube.com`),
 /// preferimos o cookie do domínio do YouTube — enviar ambos ou o valor errado
 /// faz a API tratar a requisição como anônima.
+/// Whether `domain` (a Netscape cookie-file domain field, e.g. `.youtube.com`
+/// or `music.youtube.com`) is `base` itself or a subdomain of it. Uses a
+/// proper suffix match rather than a raw substring check, since `contains`
+/// would also accept an unrelated domain like `fakeyoutube.com` or
+/// `youtube.com.attacker.net`.
+fn domain_matches(domain: &str, base: &str) -> bool {
+    let domain = domain.strip_prefix('.').unwrap_or(domain);
+    domain == base || domain.ends_with(&format!(".{base}"))
+}
+
 fn domain_priority(domain: &str) -> u8 {
-    if domain.contains("youtube.com") {
+    if domain_matches(domain, "youtube.com") {
         0
-    } else if domain.contains("google.com.br") {
+    } else if domain_matches(domain, "google.com.br") {
         1
-    } else if domain.contains("google.com") {
+    } else if domain_matches(domain, "google.com") {
         2
     } else {
         u8::MAX
@@ -68,7 +78,7 @@ fn domain_priority(domain: &str) -> u8 {
 }
 
 fn is_allowed_domain(domain: &str) -> bool {
-    domain.contains("youtube.com") || domain.contains("google.com")
+    domain_matches(domain, "youtube.com") || domain_matches(domain, "google.com")
 }
 
 impl Auth {
@@ -118,12 +128,14 @@ impl Auth {
             }
         }
 
+        // `chosen` already resolved each cookie name to its highest-priority
+        // domain above, so there's no youtube-vs-google distinction left to
+        // make here — just prefer `__Secure-3PAPISID` over the plain
+        // `SAPISID` fallback.
         let sapisid = chosen
             .get("__Secure-3PAPISID")
-            .filter(|(_, domain, _)| domain.contains("youtube.com"))
+            .or_else(|| chosen.get("SAPISID"))
             .map(|(v, _, _)| v.clone())
-            .or_else(|| chosen.get("__Secure-3PAPISID").map(|(v, _, _)| v.clone()))
-            .or_else(|| chosen.get("SAPISID").map(|(v, _, _)| v.clone()))
             .ok_or(AuthError::MissingSapisid)?;
 
         let mut pairs: Vec<_> = chosen
@@ -206,5 +218,30 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, AuthError::ReadFile { .. }));
+    }
+
+    #[test]
+    fn domain_matching_rejects_lookalike_domains() {
+        // A substring check would wrongly accept these as youtube.com/
+        // google.com cookies.
+        assert!(!is_allowed_domain("fakeyoutube.com"));
+        assert!(!is_allowed_domain("youtube.com.attacker.net"));
+        assert!(!is_allowed_domain("notgoogle.com"));
+        // Real (sub)domains, with or without the Netscape leading dot, must
+        // still be accepted.
+        assert!(is_allowed_domain(".youtube.com"));
+        assert!(is_allowed_domain("music.youtube.com"));
+        assert!(is_allowed_domain("youtube.com"));
+        assert!(is_allowed_domain(".google.com"));
+    }
+
+    #[test]
+    fn spoofed_lookalike_domain_cannot_shadow_the_real_cookie() {
+        let text = "\
+fakeyoutube.com\tTRUE\t/\tTRUE\t9999999999\t__Secure-3PAPISID\tspoofed
+.youtube.com\tTRUE\t/\tTRUE\t9999999999\t__Secure-3PAPISID\treal
+";
+        let auth = Auth::from_cookie_text(text).expect("auth");
+        assert_eq!(auth.sapisid, "real");
     }
 }

@@ -13,7 +13,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
 use crate::player::{self, AudioPlayer};
-use crate::ytmusic::{Artist, Playlist, SearchResults, Track, YtMusicClient};
+use crate::ytmusic::{
+    Artist, Playlist, SearchResults, Track, YtMusicClient, YtMusicError,
+};
 
 /// Seções da barra lateral (também define o conteúdo do painel principal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,8 +131,15 @@ pub enum Msg {
     AudioReady(PathBuf),
     Status(String),
     Error(String),
-    /// Cookies presentes, mas a sessão não é mais válida na API.
+    /// Cookies are present, but the API session is no longer valid.
     SessionExpired,
+}
+
+fn client_error_message(context: &str, error: YtMusicError) -> Msg {
+    match error {
+        YtMusicError::SessionExpired { .. } => Msg::SessionExpired,
+        other => Msg::Error(format!("{context}: {other}")),
+    }
 }
 
 /// Estado completo da aplicação.
@@ -330,13 +339,8 @@ impl App {
                 Ok(pls) => {
                     let _ = tx.send(Msg::LibraryPlaylists(pls));
                 }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("HTTP 401") || msg.contains("HTTP 403") {
-                        let _ = tx.send(Msg::SessionExpired);
-                    } else {
-                        let _ = tx.send(Msg::Error(format!("Erro ao carregar biblioteca: {e}")));
-                    }
+                Err(error) => {
+                    let _ = tx.send(client_error_message("Could not load library", error));
                 }
             }
         });
@@ -466,11 +470,8 @@ impl App {
                     let _ = tx.send(Msg::AccountName(Some(name)));
                 }
                 Ok(None) => {}
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("HTTP 401") || msg.contains("HTTP 403") {
-                        let _ = tx.send(Msg::SessionExpired);
-                    }
+                Err(error) => {
+                    let _ = tx.send(client_error_message("Could not load account", error));
                 }
             }
         });
@@ -918,8 +919,8 @@ impl App {
                     self.authentication = AuthenticationState::Expired;
                     self.library.clear();
                     self.account_name = None;
-                    self.status = "⚠ Sessão expirada. Rode: ./scripts/refresh-cookies.sh \
-                                    (com music.youtube.com aberto e logado no Brave) e reinicie."
+                    self.status = "Session expired. Run ./scripts/refresh-cookies.sh with \
+                                   music.youtube.com signed in, then restart ytmtui."
                         .to_string();
                 }
                 Msg::PlaylistTracks { title, tracks } => {
@@ -963,5 +964,25 @@ impl App {
         if self.player.take_finished() && !self.loading_audio {
             self.advance_auto();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ytmusic::YtMusicError;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn session_expiry_maps_to_the_dedicated_message() {
+        let message = client_error_message(
+            "Could not load library",
+            YtMusicError::SessionExpired {
+                status: StatusCode::UNAUTHORIZED,
+                endpoint: "browse".to_string(),
+            },
+        );
+
+        assert!(matches!(message, Msg::SessionExpired));
     }
 }

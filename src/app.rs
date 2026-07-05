@@ -126,9 +126,26 @@ pub enum Msg {
         title: String,
         tracks: Vec<Track>,
     },
-    Lyrics(Option<String>),
-    ArtworkBytes(Vec<u8>),
-    AudioReady(PathBuf),
+    /// Lyrics for the track whose `video_id` is carried alongside them, so a
+    /// slow fetch from a track the user has since skipped past can be told
+    /// apart from the currently playing one and discarded.
+    Lyrics {
+        video_id: String,
+        lyrics: Option<String>,
+    },
+    /// Same rationale as `Lyrics`: the cover art is tagged with the track it
+    /// belongs to.
+    ArtworkBytes {
+        video_id: String,
+        bytes: Vec<u8>,
+    },
+    /// Same rationale as `Lyrics`: the downloaded audio is tagged with the
+    /// track it belongs to, so a slow download for a track the user has
+    /// since skipped past never gets played over the current one.
+    AudioReady {
+        video_id: String,
+        path: PathBuf,
+    },
     Status(String),
     Error(String),
     /// Cookies are present, but the API session is no longer valid.
@@ -386,8 +403,16 @@ impl App {
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Ok(pls) = client.get_home().await {
-                let _ = tx.send(Msg::HomePlaylists(pls));
+            match client.get_home().await {
+                Ok(pls) => {
+                    let _ = tx.send(Msg::HomePlaylists(pls));
+                }
+                Err(error) => {
+                    let _ = tx.send(client_error_message(
+                        "Could not load recommendations",
+                        error,
+                    ));
+                }
             }
         });
     }
@@ -738,7 +763,13 @@ impl App {
                 if self.songs.is_empty() {
                     return;
                 }
-                let idx = self.list_state.selected().unwrap_or(0);
+                // A stale selection (e.g. left over from a longer list shown
+                // before this one) must not index past the current list.
+                let idx = self
+                    .list_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(self.songs.len() - 1);
                 self.queue = self.songs.clone();
                 self.queue_index = Some(idx);
             }
@@ -746,12 +777,25 @@ impl App {
                 if self.queue.is_empty() {
                     return;
                 }
-                let idx = self.list_state.selected().unwrap_or(0);
+                let idx = self
+                    .list_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(self.queue.len() - 1);
                 self.queue_index = Some(idx);
             }
             _ => return,
         }
         self.start_current();
+    }
+
+    /// Whether `video_id` matches the currently playing track. Used to
+    /// discard results from a slow async fetch (audio download, lyrics,
+    /// artwork) started for a track the user has since skipped past.
+    fn is_current_track(&self, video_id: &str) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|t| t.video_id == video_id)
     }
 
     /// Clears the current album art and flags the terminal for a full clear
@@ -772,6 +816,7 @@ impl App {
         self.lyrics = None;
         self.lyrics_scroll = 0;
         self.clear_artwork();
+        self.visualizer.reset();
         self.loading_audio = true;
         self.status = format!("Baixando \"{}\"...", track.title);
 
@@ -783,7 +828,10 @@ impl App {
         tokio::task::spawn_blocking(move || {
             match player::download_audio(&url, &vid_audio, cookies.as_deref()) {
                 Ok(path) => {
-                    let _ = tx.send(Msg::AudioReady(path));
+                    let _ = tx.send(Msg::AudioReady {
+                        video_id: vid_audio,
+                        path,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(Msg::Error(format!("Falha ao obter áudio: {e}")));
@@ -803,7 +851,10 @@ impl App {
         let vid = track.video_id.clone();
         tokio::spawn(async move {
             if let Ok(lyr) = client.get_lyrics(&vid).await {
-                let _ = tx2.send(Msg::Lyrics(lyr));
+                let _ = tx2.send(Msg::Lyrics {
+                    video_id: vid,
+                    lyrics: lyr,
+                });
             }
         });
 
@@ -811,9 +862,13 @@ impl App {
         if let Some(url) = track.thumbnail.clone() {
             let tx3 = self.tx.clone();
             let http = self.client.clone();
+            let vid_art = track.video_id.clone();
             tokio::spawn(async move {
                 if let Ok(bytes) = http.fetch_bytes(&url).await {
-                    let _ = tx3.send(Msg::ArtworkBytes(bytes));
+                    let _ = tx3.send(Msg::ArtworkBytes {
+                        video_id: vid_art,
+                        bytes,
+                    });
                 }
             });
         }
@@ -881,8 +936,16 @@ impl App {
                             let client = self.client.clone();
                             let tx = self.tx.clone();
                             tokio::spawn(async move {
-                                if let Ok(tracks) = client.get_radio(&seed).await {
-                                    let _ = tx.send(Msg::RadioTracks(tracks));
+                                match client.get_radio(&seed).await {
+                                    Ok(tracks) => {
+                                        let _ = tx.send(Msg::RadioTracks(tracks));
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.send(client_error_message(
+                                            "Could not load radio",
+                                            error,
+                                        ));
+                                    }
                                 }
                             });
                             return;
@@ -915,9 +978,12 @@ impl App {
                         self.playlists.len(),
                         self.artists.len()
                     );
-                    if self.section == Section::Buscar {
-                        self.list_state.select(Some(0));
-                    }
+                    // `songs`/`playlists`/`artists` were all just replaced,
+                    // so any list_state selection now refers to whichever of
+                    // them is visible — reset it regardless of section, or a
+                    // stale index from a longer previous list survives and
+                    // desyncs Enter-key handling from what's on screen.
+                    self.list_state.select(Some(0));
                 }
                 Msg::LibraryPlaylists(pls) => {
                     self.busy = false;
@@ -974,24 +1040,34 @@ impl App {
                     self.list_state.select(Some(0));
                     self.status = format!("{} faixas carregadas.", self.songs.len());
                 }
-                Msg::Lyrics(lyr) => {
-                    self.lyrics = lyr;
-                }
-                Msg::ArtworkBytes(bytes) => {
-                    // Decode the cover and prepare it for the terminal's
-                    // image protocol; without a picker no art is shown.
-                    self.artwork = self.picker.as_mut().and_then(|picker| {
-                        image::load_from_memory(&bytes)
-                            .ok()
-                            .map(|img| picker.new_resize_protocol(img))
-                    });
-                }
-                Msg::AudioReady(path) => {
-                    self.loading_audio = false;
-                    if let Some(t) = &self.current {
-                        self.status = format!("▶ Tocando: {} — {}", t.title, t.artist);
+                Msg::Lyrics { video_id, lyrics } => {
+                    // A slow fetch for a track the user has since skipped
+                    // past must not overwrite the current track's lyrics.
+                    if self.is_current_track(&video_id) {
+                        self.lyrics = lyrics;
                     }
-                    self.player.play_file(path);
+                }
+                Msg::ArtworkBytes { video_id, bytes } => {
+                    if self.is_current_track(&video_id) {
+                        // Decode the cover and prepare it for the terminal's
+                        // image protocol; without a picker no art is shown.
+                        self.artwork = self.picker.as_mut().and_then(|picker| {
+                            image::load_from_memory(&bytes)
+                                .ok()
+                                .map(|img| picker.new_resize_protocol(img))
+                        });
+                    }
+                }
+                Msg::AudioReady { video_id, path } => {
+                    // A slow download for a track the user has since skipped
+                    // past must never start playing over the current one.
+                    if self.is_current_track(&video_id) {
+                        self.loading_audio = false;
+                        if let Some(t) = &self.current {
+                            self.status = format!("▶ Tocando: {} — {}", t.title, t.artist);
+                        }
+                        self.player.play_file(path);
+                    }
                 }
                 Msg::Status(s) => self.status = s,
                 Msg::Error(e) => {

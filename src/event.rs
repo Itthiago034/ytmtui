@@ -42,6 +42,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.section = Section::Buscar;
             app.sidebar_index = 0;
             app.focus = Focus::Main;
+            // Otherwise a selection left over from whatever list was open
+            // before (e.g. index 4 of a 5-item queue) stays applied to the
+            // new, possibly shorter, search results list.
+            app.list_state.select(Some(0));
         }
         KeyCode::Char('?') => {
             app.section = Section::Ajuda;

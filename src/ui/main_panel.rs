@@ -168,8 +168,8 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
     if app.home.is_empty() {
         let text = if app.busy {
             format!("{} Carregando recomendações...", app.spinner())
-        } else if app.logged_in {
-            "Sem recomendações no momento. Pressione '/' para buscar.".to_string()
+        } else if app.is_authenticated() {
+            "No recommendations are available. Press / to search.".to_string()
         } else {
             "Faça login para ver recomendações. Pressione '?' para instruções.".to_string()
         };
@@ -203,13 +203,12 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
 }
 
 fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
-    if !app.logged_in {
+    if !app.is_authenticated() {
         let msg = Paragraph::new(
-            "Você não está conectado.\n\n\
-             Para ver suas playlists, salve os cookies do YouTube Music \
-             (formato Netscape) em:\n\n\
+            "You are not signed in.\n\n\
+             Save a Netscape cookie file to:\n\n\
              ~/.config/ytmtui/cookies.txt\n\n\
-             O app detecta o arquivo automaticamente na próxima vez que abrir.",
+             Restart ytmtui after refreshing the file.",
         )
         .style(Style::default().fg(Color::DarkGray))
         .block(block)

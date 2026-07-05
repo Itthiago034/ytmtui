@@ -46,7 +46,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     )));
 
     // Linha da conta.
-    if app.logged_in {
+    if app.is_authenticated() {
         let name = app
             .account_name
             .clone()

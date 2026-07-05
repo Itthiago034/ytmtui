@@ -1,5 +1,10 @@
 //! Estado central da aplicação e lógica de coordenação.
 
+mod authentication;
+
+pub use authentication::AuthenticationState;
+use authentication::resolve_cookie_path;
+
 use std::path::PathBuf;
 
 use ratatui::text::Line;
@@ -115,12 +120,17 @@ pub enum Msg {
     HomePlaylists(Vec<Playlist>),
     RadioTracks(Vec<Track>),
     AccountName(Option<String>),
-    PlaylistTracks { title: String, tracks: Vec<Track> },
+    PlaylistTracks {
+        title: String,
+        tracks: Vec<Track>,
+    },
     Lyrics(Option<String>),
     ArtworkBytes(Vec<u8>),
     AudioReady(PathBuf),
     Status(String),
     Error(String),
+    /// Cookies presentes, mas a sessão não é mais válida na API.
+    SessionExpired,
 }
 
 /// Estado completo da aplicação.
@@ -155,8 +165,8 @@ pub struct App {
     pub liked: std::collections::HashSet<String>,
     /// Autoplay: continuar com uma rádio quando a fila termina.
     pub autoplay: bool,
-    /// Indica se o cliente está autenticado (login por cookies).
-    pub logged_in: bool,
+    /// Current cookie authentication state.
+    pub authentication: AuthenticationState,
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
     pub account_name: Option<String>,
     /// Índice do tema de cores ativo (ver `crate::theme`).
@@ -203,45 +213,24 @@ impl App {
         // Carrega preferências persistidas.
         let config = Config::load();
 
-        // Cookies: variável de ambiente tem prioridade sobre a config, mas só
-        // consideramos caminhos que realmente existem — assim um valor de
-        // exemplo (ex.: "/caminho/para/cookies.txt") não sobrescreve o caminho
-        // válido salvo na config.
-        let valid_path = |s: String| -> Option<String> {
-            if !s.is_empty() && std::path::Path::new(&s).exists() {
-                Some(s)
-            } else {
-                None
-            }
-        };
-        // Um caminho informado mas inexistente (env ou config) vira um aviso.
-        let bad_path = std::env::var("YTM_COOKIES")
-            .ok()
-            .filter(|s| !s.is_empty() && !std::path::Path::new(s).exists());
-        // Fallback: descobre automaticamente o cookies.txt padrão em
-        // ~/.config/ytmtui/cookies.txt (mesmo que env/config estejam vazios).
-        let default_cookies = dirs::config_dir()
-            .map(|d| d.join("ytmtui").join("cookies.txt"))
-            .filter(|p| p.exists())
-            .map(|p| p.to_string_lossy().into_owned());
-        let cookies = std::env::var("YTM_COOKIES")
-            .ok()
-            .and_then(&valid_path)
-            .or_else(|| config.cookies.clone().and_then(&valid_path))
-            .or(default_cookies);
+        let default_cookies = dirs::config_dir().map(|dir| dir.join("ytmtui/cookies.txt"));
+        let resolution = resolve_cookie_path(
+            std::env::var("YTM_COOKIES").ok(),
+            config.cookies.clone(),
+            default_cookies,
+        );
+        let cookies = resolution.path;
 
         let mut player = AudioPlayer::new()?;
         player.set_volume(config.volume);
 
-        // Cria o cliente: autenticado se houver cookies, senão anônimo.
-        let client = match &cookies {
+        let (client, authentication) = match cookies.as_deref() {
             Some(path) => match YtMusicClient::with_cookies(path) {
-                Ok(client) => client,
-                Err(_) => YtMusicClient::new(),
+                Ok(client) => (client, AuthenticationState::Authenticated),
+                Err(_) => (YtMusicClient::new(), AuthenticationState::InvalidCookies),
             },
-            None => YtMusicClient::new(),
+            None => (YtMusicClient::new(), AuthenticationState::Anonymous),
         };
-        let logged_in = client.is_authenticated();
 
         // Tema salvo e nome de exibição personalizado (opcional).
         let theme_index = crate::theme::index_by_name(&config.theme);
@@ -254,14 +243,21 @@ impl App {
             .unwrap_or(0x9E3779B97F4A7C15)
             | 1;
 
-        let status = if logged_in {
-            "✅ Logado! Carregando sua biblioteca...  '/' busca, '?' ajuda.".to_string()
-        } else if let Some(p) = &bad_path {
-            format!("⚠ YTM_COOKIES aponta para um arquivo inexistente: {p}")
-        } else if cookies.is_some() {
-            "⚠ Cookies inválidos/expirados — não foi possível autenticar.".to_string()
-        } else {
-            "Bem-vindo ao ytmtui! Pressione '/' para buscar, '?' para ajuda.".to_string()
+        let status = match authentication {
+            AuthenticationState::Authenticated => {
+                "Signed in. Loading your library... Press / to search or ? for help.".to_string()
+            }
+            AuthenticationState::InvalidCookies => {
+                "Cookie file is invalid. Refresh it with ./scripts/refresh-cookies.sh."
+                    .to_string()
+            }
+            AuthenticationState::Anonymous => match resolution.missing_requested_path.as_deref() {
+                Some(path) => format!("Configured cookie file does not exist: {path}"),
+                None => "Welcome to ytmtui. Press / to search or ? for help.".to_string(),
+            },
+            AuthenticationState::Expired => {
+                "Session expired. Refresh browser cookies and restart ytmtui.".to_string()
+            }
         };
 
         Ok(Self {
@@ -283,7 +279,7 @@ impl App {
             home: Vec::new(),
             liked: std::collections::HashSet::new(),
             autoplay: true,
-            logged_in,
+            authentication,
             account_name,
             theme_index,
             list_state,
@@ -306,6 +302,10 @@ impl App {
         })
     }
 
+    pub fn is_authenticated(&self) -> bool {
+        self.authentication.is_authenticated()
+    }
+
     /// Há alguma tarefa de carregamento em andamento (rede ou áudio)?
     pub fn is_loading(&self) -> bool {
         self.busy || self.loading_audio
@@ -319,7 +319,7 @@ impl App {
 
     /// Carrega (em background) as playlists da biblioteca, se autenticado.
     pub fn load_library(&mut self) {
-        if !self.logged_in {
+        if !self.is_authenticated() {
             return;
         }
         self.busy = true;
@@ -331,7 +331,12 @@ impl App {
                     let _ = tx.send(Msg::LibraryPlaylists(pls));
                 }
                 Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("Erro ao carregar biblioteca: {e}")));
+                    let msg = e.to_string();
+                    if msg.contains("HTTP 401") || msg.contains("HTTP 403") {
+                        let _ = tx.send(Msg::SessionExpired);
+                    } else {
+                        let _ = tx.send(Msg::Error(format!("Erro ao carregar biblioteca: {e}")));
+                    }
                 }
             }
         });
@@ -425,7 +430,7 @@ impl App {
             self.status = "Nada tocando para curtir.".to_string();
             return;
         };
-        if !self.logged_in {
+        if !self.is_authenticated() {
             self.status = "⚠ Conecte sua conta para curtir faixas.".to_string();
             return;
         }
@@ -450,14 +455,23 @@ impl App {
     /// Carrega (em background) o nome da conta, se autenticado e sem nome
     /// personalizado já definido na config.
     pub fn load_account(&self) {
-        if !self.logged_in || self.account_name.is_some() {
+        if !self.is_authenticated() {
             return;
         }
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Ok(name) = client.get_account_name().await {
-                let _ = tx.send(Msg::AccountName(name));
+            match client.get_account_name().await {
+                Ok(Some(name)) => {
+                    let _ = tx.send(Msg::AccountName(Some(name)));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("HTTP 401") || msg.contains("HTTP 403") {
+                        let _ = tx.send(Msg::SessionExpired);
+                    }
+                }
             }
         });
     }
@@ -898,6 +912,15 @@ impl App {
                             self.account_name = Some(n);
                         }
                     }
+                }
+                Msg::SessionExpired => {
+                    self.busy = false;
+                    self.authentication = AuthenticationState::Expired;
+                    self.library.clear();
+                    self.account_name = None;
+                    self.status = "⚠ Sessão expirada. Rode: ./scripts/refresh-cookies.sh \
+                                    (com music.youtube.com aberto e logado no Brave) e reinicie."
+                        .to_string();
                 }
                 Msg::PlaylistTracks { title, tracks } => {
                     self.busy = false;

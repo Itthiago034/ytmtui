@@ -81,12 +81,21 @@ async fn main() -> Result<()> {
 /// Laço principal: desenha, lê eventos e processa mensagens.
 async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     while app.running {
+        if app.take_clear_screen() {
+            terminal.clear()?;
+        }
         terminal.draw(|f| ui::draw(f, app))?;
 
         // Adaptive redraw timing: redraw quickly only while something is
         // animating (loading spinner or playback progress); idle frames wait
-        // longer. Key presses interrupt the poll immediately either way.
-        let poll_timeout = if app.needs_animation() {
+        // longer. The Home screen's spectrum visualizer needs a tighter tier
+        // still, since bars must look like continuous motion — that only
+        // raises CPU use while Home is open with a track actively playing;
+        // every other section/state keeps the coarser tiers. Key presses
+        // interrupt the poll immediately either way.
+        let poll_timeout = if app.needs_fast_animation() {
+            Duration::from_millis(60)
+        } else if app.needs_animation() {
             Duration::from_millis(200)
         } else {
             Duration::from_millis(800)

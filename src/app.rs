@@ -14,6 +14,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
 use crate::player::{self, AudioPlayer};
+use crate::visualizer::SpectrumAnalyzer;
 use crate::ytmusic::{Artist, Playlist, SearchResults, Track, YtMusicClient, YtMusicError};
 
 /// Seções da barra lateral (também define o conteúdo do painel principal).
@@ -146,6 +147,8 @@ pub struct App {
     pub running: bool,
     pub client: YtMusicClient,
     pub player: AudioPlayer,
+    /// Real-time FFT spectrum feeding the Home screen's visualizer bars.
+    pub visualizer: SpectrumAnalyzer,
 
     // Canais de comunicação com tasks assíncronas.
     pub tx: UnboundedSender<Msg>,
@@ -202,6 +205,12 @@ pub struct App {
     pub picker: Option<Picker>,
     /// Album art for the current track, prepared for the detected protocol.
     pub artwork: Option<StatefulProtocol>,
+    /// Set when the album art changed and the terminal needs a full clear
+    /// before the next draw. Kitty/Sixel graphics live outside ratatui's
+    /// cell buffer, so terminals (Konsole included) can leave the previous
+    /// cover's pixels on screen when the widget briefly stops drawing there;
+    /// only an explicit screen erase reliably removes them.
+    pub clear_screen: bool,
 
     pub status: String,
     /// Caminho opcional para arquivo de cookies do yt-dlp.
@@ -273,6 +282,7 @@ impl App {
             running: true,
             client,
             player,
+            visualizer: SpectrumAnalyzer::new(),
             tx,
             rx,
             focus: Focus::Sidebar,
@@ -303,6 +313,7 @@ impl App {
             lyrics_scroll: 0,
             picker: None,
             artwork: None,
+            clear_screen: false,
             status,
             cookies,
             loading_audio: false,
@@ -325,6 +336,22 @@ impl App {
     /// can redraw far less often without losing feedback.
     pub fn needs_animation(&self) -> bool {
         self.is_loading() || (self.current.is_some() && !self.player.is_paused())
+    }
+
+    /// Whether the Home screen's spectrum visualizer is actively animating:
+    /// only true while that section is open and a track is audibly playing.
+    /// The main loop uses this to redraw faster than the general animation
+    /// tier, since a spectrum needs to look like continuous motion.
+    pub fn needs_fast_animation(&self) -> bool {
+        self.section == Section::Inicio && self.current.is_some() && !self.player.is_paused()
+    }
+
+    /// Consumes the pending full-clear flag set by [`Self::clear_artwork`].
+    /// The main loop calls this right before drawing and, if set, erases the
+    /// whole terminal so leftover Kitty/Sixel graphics from the previous
+    /// cover don't linger behind the next frame.
+    pub fn take_clear_screen(&mut self) -> bool {
+        std::mem::take(&mut self.clear_screen)
     }
 
     /// Glifo atual do spinner de carregamento (braille animado).
@@ -727,6 +754,14 @@ impl App {
         self.start_current();
     }
 
+    /// Clears the current album art and flags the terminal for a full clear
+    /// on the next draw, so Kitty/Sixel graphics left over by the previous
+    /// cover don't linger behind whatever gets drawn next.
+    fn clear_artwork(&mut self) {
+        self.artwork = None;
+        self.clear_screen = true;
+    }
+
     /// Inicia a reprodução da faixa apontada por `queue_index`.
     fn start_current(&mut self) {
         let Some(idx) = self.queue_index else { return };
@@ -736,7 +771,7 @@ impl App {
         self.current = Some(track.clone());
         self.lyrics = None;
         self.lyrics_scroll = 0;
-        self.artwork = None;
+        self.clear_artwork();
         self.loading_audio = true;
         self.status = format!("Baixando \"{}\"...", track.title);
 
@@ -857,7 +892,7 @@ impl App {
                 // Sem autoplay/semente: encerra a reprodução.
                 self.player.stop();
                 self.current = None;
-                self.artwork = None;
+                self.clear_artwork();
                 self.loading_audio = false;
                 self.status = "Fila concluída.".to_string();
             }
@@ -903,7 +938,7 @@ impl App {
                     if tracks.is_empty() {
                         self.player.stop();
                         self.current = None;
-                        self.artwork = None;
+                        self.clear_artwork();
                         self.loading_audio = false;
                         self.status = "Fila concluída.".to_string();
                     } else {
@@ -976,6 +1011,21 @@ impl App {
         if self.player.take_finished() && !self.loading_audio {
             self.advance_auto();
         }
+
+        // Spectrum analysis only matters while it's visible (Home) and
+        // audible (a track is loaded and not paused); elsewhere tapped
+        // chunks are simply left to be dropped by the tap's backpressure,
+        // and the bars settle toward zero instead of freezing.
+        if self.section == Section::Inicio {
+            let audible = self.current.is_some() && !self.player.is_paused();
+            if audible {
+                for chunk in self.player.drain_sample_chunks() {
+                    self.visualizer.push_samples(&chunk);
+                }
+            } else {
+                self.visualizer.decay_idle();
+            }
+        }
     }
 }
 
@@ -995,6 +1045,7 @@ impl App {
             running: true,
             client: YtMusicClient::new(),
             player: AudioPlayer::new().expect("audio thread should start"),
+            visualizer: SpectrumAnalyzer::new(),
             tx,
             rx,
             focus: Focus::Sidebar,
@@ -1025,6 +1076,7 @@ impl App {
             lyrics_scroll: 0,
             picker: None,
             artwork: None,
+            clear_screen: false,
             status: "Ready.".to_string(),
             cookies: None,
             loading_audio: false,

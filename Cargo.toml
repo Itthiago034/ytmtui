@@ -48,6 +48,9 @@ sha1 = "0.10"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 ratatui-image = "3.0.0"
 
+# FFT for the Home screen's real-time audio spectrum visualizer
+rustfft = "6"
+
 [profile.release]
 opt-level = 3
 lto = true

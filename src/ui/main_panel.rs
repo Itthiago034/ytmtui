@@ -2,13 +2,14 @@
 //! This is the only panel that keeps a rounded border and a scrollbar; both
 //! aid orientation in long lists.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Focus, Section};
+use crate::theme::Theme;
 
 /// Desenha o conteúdo do painel principal de acordo com a seção ativa.
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
@@ -165,7 +166,33 @@ fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
     render_list(f, app, area, block, items);
 }
 
+/// Height of the player panel above the recommendations list: 1 title row +
+/// 5 bar rows + 1 blank spacer row.
+const PLAYER_PANEL_HEIGHT: u16 = 7;
+
+/// Home renders the outer border once around the whole area, then — when
+/// there's enough height — splits the inside into a player panel (track
+/// title + spectrum bars) above the usual recommendations list. Short
+/// terminals degrade to just the list/message, exactly like before.
 fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height < PLAYER_PANEL_HEIGHT + 3 {
+        draw_home_body(f, app, inner);
+        return;
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(PLAYER_PANEL_HEIGHT), Constraint::Min(1)])
+        .split(inner);
+    draw_player_panel(f, app, rows[0]);
+    draw_home_body(f, app, rows[1]);
+}
+
+/// The recommendations list (or its empty/loading message), without a
+/// border of its own — the border now belongs to the whole Home area.
+fn draw_home_body(f: &mut Frame, app: &App, area: Rect) {
     if app.home.is_empty() {
         let text = if app.busy {
             format!("{} Loading recommendations…", app.spinner())
@@ -174,9 +201,7 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
         } else {
             "Sign in to see recommendations. Press ? for instructions.".to_string()
         };
-        let msg = Paragraph::new(text)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
+        let msg = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
         f.render_widget(msg, area);
         return;
     }
@@ -198,7 +223,84 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
             ]))
         })
         .collect();
-    render_list(f, app, area, block, items);
+    render_list_borderless(f, app, area, items);
+}
+
+/// Track title + real-time spectrum bars, or a placeholder when nothing is
+/// loaded. Paused playback keeps rendering bars — they just settle toward
+/// zero via `SpectrumAnalyzer::decay_idle`, so there's no separate branch.
+fn draw_player_panel(f: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    if app.current.is_none() {
+        let msg = Paragraph::new("Nothing playing — pick something below.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(msg, area);
+        return;
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    draw_panel_title(f, app, rows[0], theme);
+    draw_bars(f, app.visualizer.bars(), rows[1], theme);
+}
+
+/// Compact "▶ Title — Artist" line above the bars.
+fn draw_panel_title(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme) {
+    let Some(track) = &app.current else { return };
+    let glyph = if app.player.is_paused() { "⏸" } else { "▶" };
+    let text = format!("{glyph} {} — {}", track.title, track.artist);
+    let shown = crate::ui::truncate_chars(&text, area.width as usize);
+    let style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    f.render_widget(Paragraph::new(Span::styled(shown, style)), area);
+}
+
+/// Cava-style bars: one column per entry in `bars`, each a stack of Unicode
+/// eighth-block glyphs sized to that bar's smoothed height. Colored by the
+/// bar's own current height using the theme's existing palette (no new
+/// gradient helper) so quiet bars read as calmer and loud ones as louder.
+const BAR_GLYPHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let max_bars = (area.width / 2).max(1) as usize;
+    let visible = bars.len().min(max_bars);
+    let rows = area.height;
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows as usize);
+    for row in 0..rows {
+        let row_from_bottom = (rows - 1 - row) as f32;
+        let mut spans = Vec::with_capacity(visible);
+        for &height in &bars[..visible] {
+            let filled_rows = height * rows as f32;
+            let glyph = if row_from_bottom + 1.0 <= filled_rows {
+                '█'
+            } else if row_from_bottom < filled_rows {
+                let idx = ((filled_rows - row_from_bottom) * 8.0) as usize;
+                BAR_GLYPHS[idx.min(8)]
+            } else {
+                ' '
+            };
+            let color = if height > 0.66 {
+                theme.accent
+            } else if height > 0.33 {
+                theme.secondary
+            } else {
+                theme.player
+            };
+            spans.push(Span::styled(
+                format!("{glyph} "),
+                Style::default().fg(color),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
@@ -386,5 +488,41 @@ fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<Li
             horizontal: 0,
         });
         f.render_stateful_widget(scrollbar, scroll_area, &mut scrollbar_state);
+    }
+}
+
+/// Same as `render_list`, but for an area with no border of its own (used
+/// only by the Home player panel's list, where the border already belongs
+/// to the whole outer Home area). Kept separate rather than parameterizing
+/// `render_list` with a has-border flag, since that helper is shared by five
+/// other bordered call sites and this avoids touching their geometry math.
+fn render_list_borderless(f: &mut Frame, app: &App, area: Rect, items: Vec<ListItem>) {
+    let item_count = items.len();
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .bg(app.theme().highlight_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("");
+    let mut state = app.list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
+
+    let viewport_rows = area.height as usize;
+    if item_count > viewport_rows && area.height > 0 {
+        let mut scrollbar_state = ratatui::widgets::ScrollbarState::default()
+            .content_length(item_count)
+            .viewport_content_length(viewport_rows);
+        if let Some(selected) = state.selected() {
+            scrollbar_state = scrollbar_state.position(selected);
+        }
+
+        let scrollbar = ratatui::widgets::Scrollbar::default()
+            .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .thumb_symbol("█")
+            .track_symbol(Some("│"));
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }

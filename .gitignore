@@ -9,3 +9,6 @@
 # Arquivos de sistema
 .DS_Store
 *.swp
+
+# Local design mockups
+/.superpowers

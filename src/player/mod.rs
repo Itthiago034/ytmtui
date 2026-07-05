@@ -133,6 +133,10 @@ impl AudioPlayer {
             s.active = true;
             s.position = Duration::ZERO;
         }
+        // Discard any sample chunks still queued from the previous track so
+        // the visualizer doesn't briefly blend the old track's spectrum into
+        // the new one.
+        while self.sample_rx.try_recv().is_ok() {}
         let _ = self.tx.send(Cmd::Play(path));
         let _ = self.tx.send(Cmd::SetVolume(self.volume));
     }
@@ -254,17 +258,23 @@ fn audio_thread(
                         .and_then(|f| Decoder::new(BufReader::new(f)).map_err(|e| anyhow!(e)))
                 }))
                 .unwrap_or_else(|_| Err(anyhow!("falha ao decodificar o áudio")));
-                match decoded {
-                    Ok(source) => {
-                        if let Ok(new_sink) = Sink::try_new(&handle) {
-                            new_sink.set_volume(volume);
-                            let tapped = SpectrumTap::new(source, sample_tx.clone());
-                            new_sink.append(tapped);
-                            new_sink.play();
-                            sink = Some(new_sink);
-                        }
+                match decoded.and_then(|source| {
+                    Sink::try_new(&handle)
+                        .map_err(|e| anyhow!(e))
+                        .map(|s| (source, s))
+                }) {
+                    Ok((source, new_sink)) => {
+                        new_sink.set_volume(volume);
+                        let tapped = SpectrumTap::new(source, sample_tx.clone());
+                        new_sink.append(tapped);
+                        new_sink.play();
+                        sink = Some(new_sink);
                     }
                     Err(_) => {
+                        // Decode failure or no audio output device available:
+                        // mark the track as finished so the app advances or
+                        // surfaces an error instead of appearing stuck on
+                        // "playing" forever.
                         let mut s = state.lock().unwrap();
                         s.active = false;
                         s.finished = true;

@@ -65,8 +65,12 @@ fn smooth(prev: f32, raw: f32, attack: f32, release: f32) -> f32 {
 
 /// Builds `bar_count` log-spaced, non-overlapping, contiguous bin ranges
 /// `[start, end)` over the usable FFT bins (bin 0, the DC offset, is never
-/// included). Edges are forced strictly increasing so bars never collapse
-/// onto the exact same bin, even in the sparse low-bass region.
+/// included). Edges are nudged to stay strictly increasing where possible,
+/// so bars don't collapse onto the exact same bin in the sparse low-bass
+/// region; at the real `FFT_SIZE`/44.1kHz configuration there are enough
+/// bins for every bar. Only in a degenerate config with far fewer usable
+/// bins than `bar_count` can trailing edges still tie at `max_bin - 1` —
+/// `bucket_bins` treats an empty range as zero energy rather than panicking.
 fn build_bar_bins(fft_size: usize, sample_rate: u32, bar_count: usize) -> Vec<(usize, usize)> {
     let nyquist = sample_rate as f32 / 2.0;
     let max_bin = (fft_size / 2).max(2);
@@ -180,6 +184,14 @@ impl SpectrumAnalyzer {
     pub fn bars(&self) -> &[f32; BAR_COUNT] {
         &self.bars
     }
+
+    /// Clears the rolling sample window and bar heights. Called on track
+    /// change so the previous track's residual spectrum can't blend into
+    /// the next track's first frames.
+    pub fn reset(&mut self) {
+        self.ring.clear();
+        self.bars = [0.0; BAR_COUNT];
+    }
 }
 
 impl Default for SpectrumAnalyzer {
@@ -261,5 +273,15 @@ mod tests {
             analyzer.decay_idle();
         }
         assert!(analyzer.bars().iter().all(|&b| b < 0.01));
+    }
+
+    #[test]
+    fn reset_clears_bars_and_the_rolling_window() {
+        let mut analyzer = SpectrumAnalyzer::new();
+        analyzer.bars = [0.8; BAR_COUNT];
+        analyzer.ring.extend([0.1, 0.2, 0.3]);
+        analyzer.reset();
+        assert_eq!(*analyzer.bars(), [0.0; BAR_COUNT]);
+        assert!(analyzer.ring.is_empty());
     }
 }

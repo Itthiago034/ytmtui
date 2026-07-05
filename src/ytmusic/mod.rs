@@ -9,9 +9,9 @@ pub mod auth;
 pub mod models;
 mod parse;
 
+use std::fmt;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 pub use auth::Auth;
@@ -26,6 +26,70 @@ const CLIENT_VERSION: &str = "1.20240101.01.00";
 const FILTER_SONGS: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
 const FILTER_ARTISTS: &str = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D";
 const FILTER_PLAYLISTS: &str = "EgWKAQIoAWoKEAkQChAFEAMQBA%3D%3D";
+
+pub type YtMusicResult<T> = std::result::Result<T, YtMusicError>;
+
+#[derive(Debug)]
+pub enum YtMusicError {
+    AuthenticationRequired,
+    SessionExpired {
+        status: reqwest::StatusCode,
+        endpoint: String,
+    },
+    HttpStatus {
+        status: reqwest::StatusCode,
+        endpoint: String,
+    },
+    Transport(reqwest::Error),
+    InvalidResponse(reqwest::Error),
+}
+
+impl fmt::Display for YtMusicError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthenticationRequired => write!(f, "authentication is required"),
+            Self::SessionExpired { status, endpoint } => {
+                write!(f, "session expired while requesting {endpoint} ({status})")
+            }
+            Self::HttpStatus { status, endpoint } => {
+                write!(f, "request to {endpoint} failed with {status}")
+            }
+            Self::Transport(error) => write!(f, "request failed: {error}"),
+            Self::InvalidResponse(error) => write!(f, "invalid API response: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for YtMusicError {}
+
+impl From<reqwest::Error> for YtMusicError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Transport(error)
+    }
+}
+
+fn classify_status(
+    authenticated: bool,
+    status: reqwest::StatusCode,
+    endpoint: &str,
+) -> YtMusicError {
+    if authenticated
+        && matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        )
+    {
+        YtMusicError::SessionExpired {
+            status,
+            endpoint: endpoint.to_string(),
+        }
+    } else {
+        YtMusicError::HttpStatus {
+            status,
+            endpoint: endpoint.to_string(),
+        }
+    }
+}
 
 /// Cliente HTTP reutilizável para o YouTube Music.
 #[derive(Clone)]
@@ -51,10 +115,10 @@ impl YtMusicClient {
     /// Cria um cliente autenticado a partir de um arquivo de cookies (Netscape).
     ///
     /// Se os cookies forem inválidos/incompletos, retorna um cliente anônimo.
-    pub fn with_cookies(path: &str) -> Self {
+    pub fn with_cookies(path: &str) -> std::result::Result<Self, auth::AuthError> {
         let mut client = Self::new();
-        client.auth = Auth::from_cookie_file(path).ok().map(Arc::new);
-        client
+        client.auth = Some(Arc::new(Auth::from_cookie_file(path)?));
+        Ok(client)
     }
 
     /// Indica se o cliente está autenticado (login por cookies bem-sucedido).
@@ -75,7 +139,7 @@ impl YtMusicClient {
     }
 
     /// Executa uma chamada POST para um endpoint InnerTube.
-    async fn post(&self, endpoint: &str, body: Value) -> Result<Value> {
+    async fn post(&self, endpoint: &str, body: Value) -> YtMusicResult<Value> {
         let url = format!("{BASE}/{endpoint}?prettyPrint=false");
         let mut req = self
             .http
@@ -93,21 +157,23 @@ impl YtMusicClient {
                 .header("X-Origin", auth::ORIGIN);
         }
 
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("HTTP {} em {endpoint}", resp.status()));
+        let response = req.send().await.map_err(YtMusicError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(self.auth.is_some(), status, endpoint));
         }
-        Ok(resp.json::<Value>().await?)
+        response
+            .json::<Value>()
+            .await
+            .map_err(YtMusicError::InvalidResponse)
     }
 
     /// Lista as playlists da biblioteca do usuário logado.
     ///
     /// Requer autenticação (cookies). Retorna erro se o cliente for anônimo.
-    pub async fn get_library_playlists(&self) -> Result<Vec<Playlist>> {
+    pub async fn get_library_playlists(&self) -> YtMusicResult<Vec<Playlist>> {
         if !self.is_authenticated() {
-            return Err(anyhow!(
-                "não autenticado: configure YTM_COOKIES para ver a biblioteca"
-            ));
+            return Err(YtMusicError::AuthenticationRequired);
         }
 
         let body = json!({ "context": self.context(), "browseId": "FEmusic_liked_playlists" });
@@ -116,7 +182,10 @@ impl YtMusicClient {
         let mut renderers = Vec::new();
         collect_key(&data, "musicTwoRowItemRenderer", &mut renderers);
 
+        // Resposta da biblioteca costuma vir em grid; o primeiro item pode ser
+        // o botão "Nova playlist" — ignoramos entradas sem browseId VL*.
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for r in renderers {
             let browse_id = r
                 .get("navigationEndpoint")
@@ -124,11 +193,16 @@ impl YtMusicClient {
                 .and_then(|b| b.get("browseId"))
                 .and_then(|b| b.as_str())
                 .unwrap_or("");
-            // Só playlists reais (ignora o botão "Nova playlist" e afins).
             if !browse_id.starts_with("VL") {
                 continue;
             }
+            if !seen.insert(browse_id.to_string()) {
+                continue;
+            }
             let title = r.get("title").map(join_runs).unwrap_or_default();
+            if title.is_empty() {
+                continue;
+            }
             let subtitle = r.get("subtitle").map(join_runs).unwrap_or_default();
             out.push(Playlist {
                 browse_id: browse_id.to_string(),
@@ -143,7 +217,7 @@ impl YtMusicClient {
     /// Recomendações da tela inicial (`FEmusic_home`): playlists e álbuns.
     ///
     /// Funciona logado (personalizado) ou anônimo (recomendações genéricas).
-    pub async fn get_home(&self) -> Result<Vec<Playlist>> {
+    pub async fn get_home(&self) -> YtMusicResult<Vec<Playlist>> {
         let body = json!({ "context": self.context(), "browseId": "FEmusic_home" });
         let data = self.post("browse", body).await?;
 
@@ -179,7 +253,7 @@ impl YtMusicClient {
     }
 
     /// Obtém as principais faixas de um artista a partir do seu `browseId`.
-    pub async fn get_artist(&self, browse_id: &str) -> Result<Vec<Track>> {
+    pub async fn get_artist(&self, browse_id: &str) -> YtMusicResult<Vec<Track>> {
         let body = json!({ "context": self.context(), "browseId": browse_id });
         let data = self.post("browse", body).await?;
         let mut renderers = Vec::new();
@@ -194,7 +268,7 @@ impl YtMusicClient {
     }
 
     /// Monta uma "rádio" (fila de relacionadas) a partir de uma faixa semente.
-    pub async fn get_radio(&self, video_id: &str) -> Result<Vec<Track>> {
+    pub async fn get_radio(&self, video_id: &str) -> YtMusicResult<Vec<Track>> {
         let body = json!({
             "context": self.context(),
             "videoId": video_id,
@@ -218,11 +292,9 @@ impl YtMusicClient {
 
     /// Curte (`like`) ou remove a curtida (`removelike`) de uma faixa.
     /// Requer autenticação.
-    pub async fn rate_song(&self, video_id: &str, like: bool) -> Result<()> {
+    pub async fn rate_song(&self, video_id: &str, like: bool) -> YtMusicResult<()> {
         if !self.is_authenticated() {
-            return Err(anyhow!(
-                "não autenticado: conecte sua conta para curtir faixas"
-            ));
+            return Err(YtMusicError::AuthenticationRequired);
         }
         let endpoint = if like { "like/like" } else { "like/removelike" };
         let body = json!({ "context": self.context(), "target": { "videoId": video_id } });
@@ -233,19 +305,13 @@ impl YtMusicClient {
     /// Obtém o nome da conta logada (via `account/account_menu`).
     ///
     /// Retorna `None` se anônimo ou se o nome não puder ser extraído.
-    pub async fn get_account_name(&self) -> Result<Option<String>> {
+    pub async fn get_account_name(&self) -> YtMusicResult<Option<String>> {
         if !self.is_authenticated() {
             return Ok(None);
         }
         let body = json!({ "context": self.context() });
         let data = self.post("account/account_menu", body).await?;
-        if let Some(name) = find_key(&data, "accountName") {
-            let text = join_runs(name);
-            if !text.is_empty() {
-                return Ok(Some(text));
-            }
-        }
-        Ok(None)
+        Ok(parse::parse_account_name(&data))
     }
 
     /// Busca completa: músicas, artistas e playlists.
@@ -253,7 +319,7 @@ impl YtMusicClient {
     /// As três sub-buscas rodam em paralelo (`tokio::join!`), reduzindo bastante
     /// a latência total. Se as três falharem, o erro é propagado para a UI; caso
     /// contrário, cada parte que falhou retorna vazia (busca parcial).
-    pub async fn search(&self, query: &str) -> Result<SearchResults> {
+    pub async fn search(&self, query: &str) -> YtMusicResult<SearchResults> {
         let (songs, artists, playlists) = tokio::join!(
             self.search_songs(query),
             self.search_artists(query),
@@ -273,14 +339,14 @@ impl YtMusicClient {
     }
 
     /// Busca apenas músicas.
-    pub async fn search_songs(&self, query: &str) -> Result<Vec<Track>> {
+    pub async fn search_songs(&self, query: &str) -> YtMusicResult<Vec<Track>> {
         let body = json!({ "context": self.context(), "query": query, "params": FILTER_SONGS });
         let data = self.post("search", body).await?;
         Ok(self.parse_song_shelf(&data))
     }
 
     /// Busca apenas artistas.
-    pub async fn search_artists(&self, query: &str) -> Result<Vec<Artist>> {
+    pub async fn search_artists(&self, query: &str) -> YtMusicResult<Vec<Artist>> {
         let body = json!({ "context": self.context(), "query": query, "params": FILTER_ARTISTS });
         let data = self.post("search", body).await?;
         let mut out = Vec::new();
@@ -305,7 +371,7 @@ impl YtMusicClient {
     }
 
     /// Busca apenas playlists.
-    pub async fn search_playlists(&self, query: &str) -> Result<Vec<Playlist>> {
+    pub async fn search_playlists(&self, query: &str) -> YtMusicResult<Vec<Playlist>> {
         let body = json!({ "context": self.context(), "query": query, "params": FILTER_PLAYLISTS });
         let data = self.post("search", body).await?;
         let mut out = Vec::new();
@@ -403,19 +469,20 @@ impl YtMusicClient {
     }
 
     /// Baixa bytes de uma URL (usado para obter a imagem da capa).
-    pub async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = self.http.get(url).send().await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("HTTP {} ao baixar imagem", resp.status()));
+    pub async fn fetch_bytes(&self, url: &str) -> YtMusicResult<Vec<u8>> {
+        let response = self.http.get(url).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(false, status, "artwork"));
         }
-        Ok(resp.bytes().await?.to_vec())
+        Ok(response.bytes().await?.to_vec())
     }
 
     /// Obtém as faixas de uma playlist a partir do seu `browseId`.
     ///
     /// Segue *continuations* (paginação) para trazer também as faixas além da
     /// primeira página, até um limite de segurança de páginas/faixas.
-    pub async fn get_playlist_tracks(&self, browse_id: &str) -> Result<Vec<Track>> {
+    pub async fn get_playlist_tracks(&self, browse_id: &str) -> YtMusicResult<Vec<Track>> {
         // Limites de segurança para não paginar indefinidamente.
         const MAX_PAGES: usize = 8;
         const MAX_TRACKS: usize = 500;
@@ -475,7 +542,7 @@ impl YtMusicClient {
 
     /// Obtém a letra de uma música a partir do seu `videoId`.
     /// Retorna `None` quando não houver letra disponível.
-    pub async fn get_lyrics(&self, video_id: &str) -> Result<Option<String>> {
+    pub async fn get_lyrics(&self, video_id: &str) -> YtMusicResult<Option<String>> {
         // 1) endpoint "next" -> descobrir a aba de letras (browseId "MPLY...").
         let next_body = json!({ "context": self.context(), "videoId": video_id });
         let next = self.post("next", next_body).await?;
@@ -524,5 +591,23 @@ impl YtMusicClient {
 impl Default for YtMusicClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn authenticated_unauthorized_response_means_expired_session() {
+        let error = classify_status(true, StatusCode::UNAUTHORIZED, "browse");
+        assert!(matches!(error, YtMusicError::SessionExpired { .. }));
+    }
+
+    #[test]
+    fn anonymous_forbidden_response_remains_an_http_error() {
+        let error = classify_status(false, StatusCode::FORBIDDEN, "browse");
+        assert!(matches!(error, YtMusicError::HttpStatus { .. }));
     }
 }

@@ -235,7 +235,10 @@ impl App {
 
         // Cria o cliente: autenticado se houver cookies, senão anônimo.
         let client = match &cookies {
-            Some(path) => YtMusicClient::with_cookies(path),
+            Some(path) => match YtMusicClient::with_cookies(path) {
+                Ok(client) => client,
+                Err(_) => YtMusicClient::new(),
+            },
             None => YtMusicClient::new(),
         };
         let logged_in = client.is_authenticated();

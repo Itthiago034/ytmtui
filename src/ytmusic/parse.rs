@@ -66,6 +66,27 @@ pub fn join_runs(text_obj: &Value) -> String {
     }
 }
 
+/// Extrai o nome (ou handle) da conta a partir de `account/account_menu`.
+pub fn parse_account_name(data: &Value) -> Option<String> {
+    if let Some(header) = find_key(data, "activeAccountHeaderRenderer") {
+        for key in ["accountName", "channelHandle"] {
+            if let Some(field) = header.get(key) {
+                let text = join_runs(field);
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    if let Some(name) = find_key(data, "accountName") {
+        let text = join_runs(name);
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
 /// Extrai a URL da thumbnail em melhor resolução de um item.
 pub fn extract_thumbnail(item: &Value) -> Option<String> {
     let thumbs = find_key(item, "thumbnails")?.as_array()?;

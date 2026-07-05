@@ -25,8 +25,8 @@ usa o `yt-dlp` + `ffmpeg` + `rodio` para resolver e reproduzir o áudio.
                                  ▼                    │
         ┌────────────────────────────────┐   ┌───────┴───────────┐
         │             ui/                 │   │      event.rs     │
-        │ mod · sidebar · main_panel ·    │   │  teclas → ações   │
-        │ player  (render do App)         │   └───────┬───────────┘
+        │ mod · nav · main_panel ·        │   │  teclas → ações   │
+        │ now_playing  (render do App)    │   └───────┬───────────┘
         └────────────────┬───────────────┘           │ muta
                          ▲ lê estado                  ▼
                  ┌────────┴──────────────────────────────────────┐
@@ -57,16 +57,15 @@ usa o `yt-dlp` + `ffmpeg` + `rodio` para resolver e reproduzir o áudio.
 | `event.rs` | Traduz teclas (`crossterm::KeyEvent`) em chamadas de métodos do `App`. |
 | `config.rs` | Configuração persistente em JSON (`~/.config/ytmtui/config.json`). |
 | `theme.rs` | Temas de cores (presets de acento) e helpers de seleção por nome. |
-| `ascii_art.rs` | Converte a capa (imagem) em arte colorida com meio-blocos Unicode. |
 | `ytmusic/mod.rs` | Cliente HTTP da API InnerTube: busca, playlists, biblioteca, home, artista, rádio, letras, conta e curtir. |
 | `ytmusic/auth.rs` | Autenticação por cookies (formato Netscape) + cálculo do `SAPISIDHASH`. |
 | `ytmusic/models.rs` | Modelos de dados: `Track`, `Playlist`, `Artist`, `SearchResults`. |
 | `ytmusic/parse.rs` | Helpers de parsing do JSON aninhado (busca recursiva por chaves, runs, thumbnails, durações, continuações, panel video). |
 | `player/mod.rs` | Player de áudio (thread `rodio` dedicada) + download/remux via `yt-dlp`/`ffmpeg` + cache. |
-| `ui/mod.rs` | Layout raiz + barra de busca. |
-| `ui/sidebar.rs` | Cabeçalho (logo + conta) e menu de seções. |
+| `ui/mod.rs` | Root layout (wide/narrow responsive split), search input line and status/shortcut bar. |
+| `ui/nav.rs` | Navigation column: app identity, account state and section menu (wide layout). |
 | `ui/main_panel.rs` | Painel principal (listas de músicas/playlists/artistas/fila, letra, ajuda, início). |
-| `ui/player.rs` | Painel inferior do player (capa, progresso, volume, indicadores). |
+| `ui/now_playing.rs` | Compact two-line playback summary: track line and progress gauge. |
 
 ---
 
@@ -77,8 +76,9 @@ além de uma **thread dedicada** para áudio.
 
 - **Laço principal (`main::run`)** — síncrono. A cada iteração:
   1. `terminal.draw(ui::draw)` renderiza o estado atual.
-  2. `crossterm::event::poll` aguarda até 100 ms por uma tecla; se houver,
-     `event::handle_key` muta o `App`.
+  2. `crossterm::event::poll` waits up to 200 ms for a key while something is
+     animating (loading spinner, playback progress) and up to 800 ms when the
+     app is idle; a pressed key is handled immediately by `event::handle_key`.
   3. `app.drain_messages()` consome as mensagens das tasks.
   4. `app.tick()` faz tarefas periódicas (auto-avanço da faixa).
 
@@ -177,8 +177,9 @@ leem o `App` (recebem `&App`/`&mut App`). Destaques:
 - **Reprodução**: `queue`, `queue_index`, `current`, `next_index`, `shuffle`,
   `repeat`, `autoplay`, `liked`.
 - **Aparência**: `theme_index` (ver `theme.rs`), `account_name`.
-- **Capa**: `artwork_bytes` + `artwork_cache` `(w, h, linhas)` para não
-  reconverter a imagem a cada frame.
+- **Album art**: `picker` (terminal image protocol detected at startup —
+  Kitty/Sixel/iTerm2 or half-block fallback) + `artwork` (cover prepared for
+  the current track, rendered by `ratatui-image`).
 
 ---
 
@@ -233,5 +234,6 @@ existente e preserva o que já havia).
 | ALSA (Linux) | saída de áudio (CoreAudio/WASAPI no macOS/Windows) |
 
 Crates principais: `ratatui`+`crossterm` (TUI), `tokio` (async), `reqwest`
-(HTTP), `rodio` (áudio), `serde`/`serde_json` (JSON), `image` (capa),
+(HTTP), `rodio` (áudio), `serde`/`serde_json` (JSON), `image` +
+`ratatui-image` (capa via Kitty/Sixel/iTerm2 com fallback em meio-blocos),
 `sha1` (SAPISIDHASH), `dirs` (paths), `anyhow` (erros).

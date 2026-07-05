@@ -7,8 +7,9 @@ pub use authentication::AuthenticationState;
 
 use std::path::PathBuf;
 
-use ratatui::text::Line;
 use ratatui::widgets::ListState;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
@@ -41,17 +42,17 @@ impl Section {
         Section::Ajuda,
     ];
 
-    /// Rótulo exibido na barra lateral.
+    /// Label shown in the navigation column and the narrow-layout header.
     pub fn label(&self) -> &str {
         match self {
-            Section::Inicio => "🏠 Início",
-            Section::Buscar => "🔎 Buscar",
-            Section::Biblioteca => "📚 Biblioteca",
-            Section::Playlists => "💿 Playlists",
-            Section::Artistas => "🎤 Artistas",
-            Section::Fila => "🎶 Fila Atual",
-            Section::Letra => "📖 Letras",
-            Section::Ajuda => "💡 Ajuda",
+            Section::Inicio => "Home",
+            Section::Buscar => "Search",
+            Section::Biblioteca => "Library",
+            Section::Playlists => "Playlists",
+            Section::Artistas => "Artists",
+            Section::Fila => "Queue",
+            Section::Letra => "Lyrics",
+            Section::Ajuda => "Help",
         }
     }
 
@@ -196,9 +197,11 @@ pub struct App {
     // Extras.
     pub lyrics: Option<String>,
     pub lyrics_scroll: u16,
-    pub artwork_bytes: Option<Vec<u8>>,
-    /// Cache da arte já convertida: (largura, altura, linhas).
-    pub artwork_cache: Option<(u16, u16, Vec<Line<'static>>)>,
+    /// Terminal image support detected at startup (Kitty/Sixel/iTerm2, with
+    /// a Unicode half-block fallback). `None` until the main loop sets it.
+    pub picker: Option<Picker>,
+    /// Album art for the current track, prepared for the detected protocol.
+    pub artwork: Option<StatefulProtocol>,
 
     pub status: String,
     /// Caminho opcional para arquivo de cookies do yt-dlp.
@@ -278,7 +281,7 @@ impl App {
             input_mode: false,
             query: String::new(),
             songs: Vec::new(),
-            songs_title: "Resultados da busca".to_string(),
+            songs_title: "Search results".to_string(),
             playlists: Vec::new(),
             artists: Vec::new(),
             library: Vec::new(),
@@ -298,8 +301,8 @@ impl App {
             rng_state: seed,
             lyrics: None,
             lyrics_scroll: 0,
-            artwork_bytes: None,
-            artwork_cache: None,
+            picker: None,
+            artwork: None,
             status,
             cookies,
             loading_audio: false,
@@ -315,6 +318,13 @@ impl App {
     /// Há alguma tarefa de carregamento em andamento (rede ou áudio)?
     pub fn is_loading(&self) -> bool {
         self.busy || self.loading_audio
+    }
+
+    /// Whether the UI currently benefits from frequent redraws: a loading
+    /// spinner is animating or playback progress is advancing. Idle frames
+    /// can redraw far less often without losing feedback.
+    pub fn needs_animation(&self) -> bool {
+        self.is_loading() || (self.current.is_some() && !self.player.is_paused())
     }
 
     /// Glifo atual do spinner de carregamento (braille animado).
@@ -382,7 +392,7 @@ impl App {
         self.busy = true;
         let client = self.client.clone();
         let tx = self.tx.clone();
-        let title = format!("Artista: {}", artist.name);
+        let title = format!("Artist: {}", artist.name);
         tokio::spawn(async move {
             match client.get_artist(&artist.browse_id).await {
                 Ok(tracks) => {
@@ -482,7 +492,6 @@ impl App {
     /// Alterna para o próximo tema de cores e salva a preferência.
     pub fn cycle_theme(&mut self) {
         self.theme_index = (self.theme_index + 1) % crate::theme::THEMES.len();
-        self.artwork_cache = None; // recolore o placeholder na próxima renderização
         self.status = format!("🎨 Tema: {}", self.theme().name);
         self.save_config();
     }
@@ -727,8 +736,7 @@ impl App {
         self.current = Some(track.clone());
         self.lyrics = None;
         self.lyrics_scroll = 0;
-        self.artwork_bytes = None;
-        self.artwork_cache = None;
+        self.artwork = None;
         self.loading_audio = true;
         self.status = format!("Baixando \"{}\"...", track.title);
 
@@ -849,6 +857,7 @@ impl App {
                 // Sem autoplay/semente: encerra a reprodução.
                 self.player.stop();
                 self.current = None;
+                self.artwork = None;
                 self.loading_audio = false;
                 self.status = "Fila concluída.".to_string();
             }
@@ -862,7 +871,7 @@ impl App {
                 Msg::SearchResults(res) => {
                     self.busy = false;
                     self.songs = res.songs;
-                    self.songs_title = "Resultados da busca".to_string();
+                    self.songs_title = "Search results".to_string();
                     self.playlists = res.playlists;
                     self.artists = res.artists;
                     self.status = format!(
@@ -879,7 +888,7 @@ impl App {
                     self.busy = false;
                     self.library = pls;
                     self.status = format!(
-                        "📚 Biblioteca: {} playlist(s). Acesse '📚 Biblioteca' no menu.",
+                        "Library loaded: {} playlist(s). Open Library in the menu.",
                         self.library.len()
                     );
                 }
@@ -894,6 +903,7 @@ impl App {
                     if tracks.is_empty() {
                         self.player.stop();
                         self.current = None;
+                        self.artwork = None;
                         self.loading_audio = false;
                         self.status = "Fila concluída.".to_string();
                     } else {
@@ -933,8 +943,13 @@ impl App {
                     self.lyrics = lyr;
                 }
                 Msg::ArtworkBytes(bytes) => {
-                    self.artwork_bytes = Some(bytes);
-                    self.artwork_cache = None;
+                    // Decode the cover and prepare it for the terminal's
+                    // image protocol; without a picker no art is shown.
+                    self.artwork = self.picker.as_mut().and_then(|picker| {
+                        image::load_from_memory(&bytes)
+                            .ok()
+                            .map(|img| picker.new_resize_protocol(img))
+                    });
                 }
                 Msg::AudioReady(path) => {
                     self.loading_audio = false;
@@ -965,10 +980,103 @@ impl App {
 }
 
 #[cfg(test)]
+impl App {
+    /// Builds an `App` with fixed defaults for rendering tests.
+    ///
+    /// Unlike [`App::new`], this constructor never reads configuration files,
+    /// environment variables, or cookie files, so tests are deterministic on
+    /// any machine.
+    pub(crate) fn new_for_tests() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+
+        Self {
+            running: true,
+            client: YtMusicClient::new(),
+            player: AudioPlayer::new().expect("audio thread should start"),
+            tx,
+            rx,
+            focus: Focus::Sidebar,
+            section: Section::Inicio,
+            sidebar_index: 0,
+            input_mode: false,
+            query: String::new(),
+            songs: Vec::new(),
+            songs_title: "Search results".to_string(),
+            playlists: Vec::new(),
+            artists: Vec::new(),
+            library: Vec::new(),
+            home: Vec::new(),
+            liked: std::collections::HashSet::new(),
+            autoplay: true,
+            authentication: AuthenticationState::Anonymous,
+            account_name: None,
+            theme_index: 0,
+            list_state,
+            queue: Vec::new(),
+            queue_index: None,
+            current: None,
+            next_index: None,
+            shuffle: false,
+            repeat: RepeatMode::Off,
+            rng_state: 0x9E3779B97F4A7C15,
+            lyrics: None,
+            lyrics_scroll: 0,
+            picker: None,
+            artwork: None,
+            status: "Ready.".to_string(),
+            cookies: None,
+            loading_audio: false,
+            busy: false,
+            spinner_frame: 0,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ytmusic::YtMusicError;
     use reqwest::StatusCode;
+
+    #[test]
+    fn animation_is_only_needed_while_loading_or_playing() {
+        let mut app = App::new_for_tests();
+        assert!(!app.needs_animation(), "idle app needs no animation");
+
+        app.busy = true;
+        assert!(app.needs_animation(), "loading shows the spinner");
+        app.busy = false;
+
+        app.current = Some(crate::ytmusic::Track::default());
+        assert!(app.needs_animation(), "playback progress animates");
+    }
+
+    #[test]
+    fn finishing_the_queue_clears_the_album_art() {
+        let mut app = App::new_for_tests();
+        let mut picker = ratatui_image::picker::Picker::from_fontsize((8, 16));
+        let cover = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([1, 2, 3]),
+        ));
+        app.artwork = Some(picker.new_resize_protocol(cover));
+        app.current = Some(Track::default());
+        app.queue = vec![Track::default()];
+        app.queue_index = Some(0);
+
+        // An empty radio batch ends playback; the cover must not linger.
+        app.tx.send(Msg::RadioTracks(Vec::new())).unwrap();
+        app.drain_messages();
+
+        assert!(app.current.is_none(), "playback ended");
+        assert!(
+            app.artwork.is_none(),
+            "stale cover must not outlive playback"
+        );
+    }
 
     #[test]
     fn session_expiry_maps_to_the_dedicated_message() {

@@ -1,4 +1,6 @@
-//! Painel principal: exibe músicas, playlists, artistas, fila, letra ou ajuda.
+//! Main content panel: tracks, playlists, artists, queue, lyrics or help.
+//! This is the only panel that keeps a rounded border and a scrollbar; both
+//! aid orientation in long lists.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -19,14 +21,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let title = match app.section {
-        Section::Inicio => "Início · recomendados".to_string(),
+        Section::Inicio => "Home".to_string(),
         Section::Buscar => app.songs_title.clone(),
-        Section::Biblioteca => "Minhas playlists".to_string(),
+        Section::Biblioteca => "Library".to_string(),
         Section::Playlists => "Playlists".to_string(),
-        Section::Artistas => "Artistas".to_string(),
-        Section::Fila => "Fila de reprodução".to_string(),
-        Section::Letra => "Letra".to_string(),
-        Section::Ajuda => "Ajuda".to_string(),
+        Section::Artistas => "Artists".to_string(),
+        Section::Fila => "Queue".to_string(),
+        Section::Letra => "Lyrics".to_string(),
+        Section::Ajuda => "Help".to_string(),
     };
 
     let block = Block::default()
@@ -42,7 +44,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
     match app.section {
         Section::Inicio => draw_home(f, app, area, block),
-        Section::Buscar => draw_songs(f, app, area, block, &app.songs.clone()),
+        Section::Buscar => draw_songs(f, app, area, block, &app.songs),
         Section::Fila => draw_queue(f, app, area, block),
         Section::Biblioteca => draw_library(f, app, area, block),
         Section::Playlists => draw_playlists(f, app, area, block),
@@ -91,7 +93,7 @@ fn track_line(
 
 fn draw_songs(f: &mut Frame, app: &App, area: Rect, block: Block, songs: &[crate::ytmusic::Track]) {
     if songs.is_empty() {
-        let msg = Paragraph::new("Nenhuma música. Use '/' para buscar.")
+        let msg = Paragraph::new("No tracks yet. Press / to search.")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(msg, area);
@@ -114,7 +116,7 @@ fn draw_songs(f: &mut Frame, app: &App, area: Rect, block: Block, songs: &[crate
 
 fn draw_queue(f: &mut Frame, app: &App, area: Rect, block: Block) {
     if app.queue.is_empty() {
-        let msg = Paragraph::new("A fila está vazia. Toque uma música para preenchê-la.")
+        let msg = Paragraph::new("The queue is empty. Play a track to fill it.")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(msg, area);
@@ -136,19 +138,17 @@ fn draw_queue(f: &mut Frame, app: &App, area: Rect, block: Block) {
 
 fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
     if app.playlists.is_empty() {
-        let msg = Paragraph::new("Nenhuma playlist. Busque algo para ver playlists.")
+        let msg = Paragraph::new("No playlists yet. Search to find some.")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(msg, area);
         return;
     }
-    let accent = app.theme().accent;
     let items: Vec<ListItem> = app
         .playlists
         .iter()
         .map(|p| {
             ListItem::new(Line::from(vec![
-                Span::styled("🎵 ", Style::default().fg(accent)),
                 Span::styled(
                     p.title.clone(),
                     Style::default()
@@ -168,11 +168,11 @@ fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
 fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
     if app.home.is_empty() {
         let text = if app.busy {
-            format!("{} Carregando recomendações...", app.spinner())
+            format!("{} Loading recommendations…", app.spinner())
         } else if app.is_authenticated() {
             "No recommendations are available. Press / to search.".to_string()
         } else {
-            "Faça login para ver recomendações. Pressione '?' para instruções.".to_string()
+            "Sign in to see recommendations. Press ? for instructions.".to_string()
         };
         let msg = Paragraph::new(text)
             .style(Style::default().fg(Color::DarkGray))
@@ -180,13 +180,11 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
         f.render_widget(msg, area);
         return;
     }
-    let accent = app.theme().accent;
     let items: Vec<ListItem> = app
         .home
         .iter()
         .map(|p| {
             ListItem::new(Line::from(vec![
-                Span::styled("★ ", Style::default().fg(accent)),
                 Span::styled(
                     p.title.clone(),
                     Style::default()
@@ -219,9 +217,9 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
     }
     if app.library.is_empty() {
         let text = if app.busy {
-            format!("{} Carregando sua biblioteca...", app.spinner())
+            format!("{} Loading your library…", app.spinner())
         } else {
-            "Nenhuma playlist na biblioteca.".to_string()
+            "No playlists in your library.".to_string()
         };
         let msg = Paragraph::new(text)
             .style(Style::default().fg(Color::DarkGray))
@@ -229,13 +227,11 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
         f.render_widget(msg, area);
         return;
     }
-    let accent = app.theme().accent;
     let items: Vec<ListItem> = app
         .library
         .iter()
         .map(|p| {
             ListItem::new(Line::from(vec![
-                Span::styled("📚 ", Style::default().fg(accent)),
                 Span::styled(
                     p.title.clone(),
                     Style::default()
@@ -254,19 +250,17 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
 
 fn draw_artists(f: &mut Frame, app: &App, area: Rect, block: Block) {
     if app.artists.is_empty() {
-        let msg = Paragraph::new("Nenhum artista. Busque algo para ver artistas.")
+        let msg = Paragraph::new("No artists yet. Search to find some.")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(msg, area);
         return;
     }
-    let secondary = app.theme().secondary;
     let items: Vec<ListItem> = app
         .artists
         .iter()
         .map(|a| {
             ListItem::new(Line::from(vec![
-                Span::styled("👤 ", Style::default().fg(secondary)),
                 Span::styled(
                     a.name.clone(),
                     Style::default()
@@ -286,12 +280,12 @@ fn draw_artists(f: &mut Frame, app: &App, area: Rect, block: Block) {
 fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
     let text = match &app.lyrics {
         Some(l) if !l.is_empty() => l.clone(),
-        Some(_) => "Letra indisponível para esta música.".to_string(),
+        Some(_) => "Lyrics are not available for this track.".to_string(),
         None => {
             if app.current.is_some() {
-                "Buscando letra...".to_string()
+                "Fetching lyrics…".to_string()
             } else {
-                "Toque uma música para ver a letra.".to_string()
+                "Play a track to see its lyrics.".to_string()
             }
         }
     };
@@ -305,37 +299,37 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
 
 fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: Color) {
     let rows = [
-        ("Navegação", ""),
-        ("  ↑/↓  ou  k/j", "mover seleção"),
-        ("  ←/→  ou  h/l", "alternar entre menu e lista"),
-        ("  Tab", "alternar foco menu/lista"),
-        ("  Enter", "tocar / abrir playlist / abrir artista"),
-        ("  a", "adicionar faixa à fila"),
+        ("Navigation", ""),
+        ("  ↑/↓  or  k/j", "move selection"),
+        ("  ←/→  or  h/l", "switch between menu and list"),
+        ("  Tab", "toggle focus menu/list"),
+        ("  Enter", "play / open playlist / open artist"),
+        ("  a", "add track to the queue"),
         ("", ""),
-        ("Busca", ""),
-        ("  /", "abrir campo de busca"),
-        ("  Esc", "cancelar busca"),
+        ("Search", ""),
+        ("  /", "open the search input"),
+        ("  Esc", "cancel the search"),
         ("", ""),
-        ("Conta / Biblioteca", ""),
-        ("  📚 Biblioteca", "suas playlists da conta conectada"),
-        ("  cookies.txt", "em ~/.config/ytmtui/ (login automático)"),
+        ("Account / Library", ""),
+        ("  Library", "playlists from your signed-in account"),
+        ("  cookies.txt", "in ~/.config/ytmtui/ (automatic sign-in)"),
         ("", ""),
-        ("Reprodução", ""),
-        ("  Espaço", "play / pause"),
-        ("  n / p", "próxima / anterior"),
-        ("  [ / ]", "retroceder / avançar 5s"),
-        ("  s", "parar"),
+        ("Playback", ""),
+        ("  Space", "play / pause"),
+        ("  n / p", "next / previous"),
+        ("  [ / ]", "seek back / forward 5s"),
+        ("  s", "stop"),
         ("  + / -", "volume"),
-        ("  z", "alternar aleatório (shuffle)"),
-        ("  r", "modo de repetição (off/todos/1)"),
-        ("  f", "curtir / descurtir a faixa atual"),
+        ("  z", "toggle shuffle"),
+        ("  r", "repeat mode (off/all/one)"),
+        ("  f", "like / unlike the current track"),
         ("", ""),
-        ("Aparência", ""),
-        ("  t", "trocar tema de cores"),
+        ("Appearance", ""),
+        ("  t", "cycle the color theme"),
         ("", ""),
-        ("Geral", ""),
-        ("  ?", "esta ajuda"),
-        ("  q  ou  Ctrl+C", "sair"),
+        ("General", ""),
+        ("  ?", "this help"),
+        ("  q  or  Ctrl+C", "quit"),
     ];
     let lines: Vec<Line> = rows
         .iter()
@@ -369,10 +363,12 @@ fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<Li
     let mut state = app.list_state.clone();
     f.render_stateful_widget(list, area, &mut state);
 
-    if item_count > 0 && area.height > 2 {
+    // The scrollbar only appears when the list actually overflows the panel.
+    let viewport_rows = area.height.saturating_sub(2) as usize;
+    if item_count > viewport_rows && area.height > 2 {
         let mut scrollbar_state = ratatui::widgets::ScrollbarState::default()
             .content_length(item_count)
-            .viewport_content_length(area.height.saturating_sub(2) as usize);
+            .viewport_content_length(viewport_rows);
         if let Some(selected) = state.selected() {
             scrollbar_state = scrollbar_state.position(selected);
         }

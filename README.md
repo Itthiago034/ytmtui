@@ -50,7 +50,7 @@ músicas do YouTube Music direto do terminal**, sem precisar de login.
 - ⏯️ **Controles de player**: play/pause, próxima, anterior, parar, **seek (±5s)**, volume.
 - 🔀 **Shuffle** e 🔁 **repeat** (off / todos / uma faixa).
 - 📊 **Barra de progresso** com tempo atual/total.
-- 🖼️ **Capa do álbum** renderizada em arte colorida (caracteres de meio-bloco Unicode).
+- 🖼️ **Album art** rendered natively in the terminal (Kitty/Sixel/iTerm2 image protocols), with a Unicode half-block fallback elsewhere.
 - 📃 **Fila de reprodução** com avanço automático e **paginação** de playlists longas.
 - 📝 **Letras** exibidas quando disponíveis.
 - ⚙️ **Configuração persistente** (volume, shuffle e repeat são lembrados entre sessões).
@@ -251,7 +251,6 @@ src/
 ├── config.rs          # Configuração persistente (volume, shuffle, repeat, cookies, tema)
 ├── theme.rs           # Temas de cores (presets de acento) da interface
 ├── event.rs           # Tratamento das teclas → ações
-├── ascii_art.rs       # Conversão da capa em arte colorida (meio-blocos)
 ├── ytmusic/
 │   ├── mod.rs         # Cliente da API interna (InnerTube), busca, biblioteca e conta
 │   ├── auth.rs        # Autenticação por cookies (SAPISIDHASH)
@@ -260,10 +259,10 @@ src/
 ├── player/
 │   └── mod.rs         # Player de áudio (rodio) + download via yt-dlp
 └── ui/
-    ├── mod.rs         # Layout geral + barra de busca
-    ├── sidebar.rs     # Menu lateral de navegação
-    ├── main_panel.rs  # Lista principal (músicas/playlists/artistas/fila/letra/ajuda)
-    └── player.rs      # Painel do player (capa, progresso, volume)
+    ├── mod.rs         # Root layout (wide/narrow), search input and status bar
+    ├── nav.rs         # Navigation column (identity, account, sections)
+    ├── main_panel.rs  # Main list panel (tracks/playlists/artists/queue/lyrics/help)
+    └── now_playing.rs # Compact playback summary (track line + progress)
 ```
 
 ### Detalhes técnicos

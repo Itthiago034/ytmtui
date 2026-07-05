@@ -36,6 +36,10 @@ async fn main() -> Result<()> {
     let mut terminal = setup_terminal()?;
     let mut app = App::new()?;
 
+    // Album-art support: real image protocols on terminals known to answer
+    // the capability query, Unicode half-blocks everywhere else.
+    app.picker = Some(build_picker());
+
     // Avisa (uma vez) se faltar alguma ferramenta essencial de reprodução.
     let missing = player::missing_dependencies();
     if missing.iter().any(|(_, essential)| *essential) {
@@ -79,8 +83,15 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
     while app.running {
         terminal.draw(|f| ui::draw(f, app))?;
 
-        // Aguarda eventos por até 50ms; caso contrário, redesenha a tela.
-        if cevent::poll(Duration::from_millis(50))? {
+        // Adaptive redraw timing: redraw quickly only while something is
+        // animating (loading spinner or playback progress); idle frames wait
+        // longer. Key presses interrupt the poll immediately either way.
+        let poll_timeout = if app.needs_animation() {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_millis(800)
+        };
+        if cevent::poll(poll_timeout)? {
             if let Event::Key(key) = cevent::read()? {
                 // Ignora eventos de "release" (relevante no Windows).
                 if key.kind == KeyEventKind::Press {
@@ -111,4 +122,110 @@ fn restore_terminal() -> Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     Ok(())
+}
+
+/// Whether the environment identifies a terminal known to answer image
+/// protocol and font-size queries (Kitty, Ghostty, WezTerm, iTerm2, foot,
+/// Konsole). Unknown terminals must not be queried: one that never answers
+/// leaves ratatui-image's reader thread blocked on stdin, where it steals
+/// key presses from the event loop.
+fn env_reports_image_support(
+    term: Option<&str>,
+    term_program: Option<&str>,
+    has_kitty_window: bool,
+    has_konsole_version: bool,
+) -> bool {
+    if has_kitty_window || has_konsole_version {
+        return true;
+    }
+    let term = term.unwrap_or_default().to_ascii_lowercase();
+    let program = term_program.unwrap_or_default().to_ascii_lowercase();
+    term.contains("kitty")
+        || term.contains("ghostty")
+        || term.contains("foot")
+        || program.contains("wezterm")
+        || program.contains("iterm")
+        || program.contains("ghostty")
+}
+
+/// Builds the album-art picker. Capable terminals are queried for their
+/// real protocol (Kitty graphics, Sixel, iTerm2) and font size; everywhere
+/// else half-blocks are used with the cell size reported by the windowing
+/// system, or a conservative guess when unavailable.
+fn build_picker() -> ratatui_image::picker::Picker {
+    use ratatui_image::picker::Picker;
+
+    let supported = env_reports_image_support(
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        std::env::var_os("KONSOLE_VERSION").is_some(),
+    );
+    if supported {
+        if let Ok(picker) = Picker::from_query_stdio() {
+            return picker;
+        }
+    }
+    let font_size = crossterm::terminal::window_size()
+        .ok()
+        .and_then(|s| cell_size_from(s.columns, s.rows, s.width, s.height))
+        .unwrap_or((8, 16));
+    Picker::from_fontsize(font_size)
+}
+
+/// Cell size in pixels derived from the reported window size; `None` when
+/// the terminal does not report usable pixel dimensions. A zero-sized cell
+/// must never reach the picker: it would break image scaling.
+fn cell_size_from(columns: u16, rows: u16, width: u16, height: u16) -> Option<(u16, u16)> {
+    if columns == 0 || rows == 0 {
+        return None;
+    }
+    let cell = (width / columns, height / rows);
+    (cell.0 > 0 && cell.1 > 0).then_some(cell)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_size_requires_sane_pixel_reports() {
+        assert_eq!(cell_size_from(80, 24, 640, 384), Some((8, 16)));
+        // Missing or nonsensical pixel reports must fall back, never
+        // produce a zero-sized font that breaks image scaling.
+        assert_eq!(cell_size_from(80, 24, 0, 0), None);
+        assert_eq!(cell_size_from(80, 24, 40, 384), None);
+        assert_eq!(cell_size_from(0, 0, 640, 384), None);
+    }
+
+    #[test]
+    fn image_protocol_query_is_gated_by_terminal_identity() {
+        assert!(env_reports_image_support(
+            Some("xterm-kitty"),
+            None,
+            true,
+            false
+        ));
+        assert!(env_reports_image_support(
+            Some("xterm-256color"),
+            Some("WezTerm"),
+            false,
+            false
+        ));
+        assert!(env_reports_image_support(
+            Some("xterm-256color"),
+            None,
+            false,
+            true
+        ));
+        // Unknown terminals must not be queried: a terminal that never
+        // answers would leave a reader thread stealing key presses.
+        assert!(!env_reports_image_support(
+            Some("xterm-256color"),
+            None,
+            false,
+            false
+        ));
+        assert!(!env_reports_image_support(None, None, false, false));
+    }
 }

@@ -1,5 +1,9 @@
 # 🎵 ytmtui
 
+[![CI](https://github.com/Itthiago034/ytmtui/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/ytmtui/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Itthiago034/ytmtui?include_prereleases&sort=semver)](https://github.com/Itthiago034/ytmtui/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **ytmtui** é um cliente de terminal (TUI – *Terminal User Interface*) para o
 **YouTube Music**, escrito em **Rust** com a biblioteca **[Ratatui](https://ratatui.rs)**.
 Inspirado em clientes como o *spotify-tui*, ele permite **buscar, navegar e ouvir
@@ -29,6 +33,41 @@ músicas do YouTube Music direto do terminal**, sem precisar de login.
 
 ---
 
+## Sumário
+
+- [Instalação rápida](#-instalação-rápida)
+- [Funcionalidades](#-funcionalidades)
+- [Requisitos](#-requisitos)
+- [Compilar do código-fonte](#-compilar-do-código-fonte)
+- [Atalhos de teclado](#️-atalhos-de-teclado)
+- [Como usar](#-como-usar)
+- [Autenticação e cookies](#-autenticação-e-cookies)
+- [Personalização](#-personalização)
+- [Arquitetura do projeto](#️-arquitetura-do-projeto)
+- [Desenvolvimento](#-desenvolvimento)
+- [Aviso legal e licença](#️-aviso-legal)
+
+---
+
+## 🚀 Instalação rápida
+
+A forma mais rápida de instalar, sem precisar do Rust instalado — baixa o
+binário pronto da [última release](https://github.com/Itthiago034/ytmtui/releases)
+para Linux (x86_64) ou macOS (Apple Silicon):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Itthiago034/ytmtui/master/scripts/install.sh | bash
+```
+
+O script detecta seu sistema, instala o binário em `~/.local/bin`, e avisa se
+faltar alguma dependência de tempo de execução (`yt-dlp`, `ffmpeg`, `deno` —
+veja [Requisitos](#-requisitos)). Depois é só rodar `ytmtui`.
+
+> Outro sistema, ou prefere compilar você mesmo? Veja
+> [Compilar do código-fonte](#-compilar-do-código-fonte).
+
+---
+
 ## ✨ Funcionalidades
 
 - 🔍 **Busca** de músicas, artistas e playlists no YouTube Music (sem autenticação).
@@ -38,7 +77,9 @@ músicas do YouTube Music direto do terminal**, sem precisar de login.
   confiável e rápido.
 - 🔐 **Login automático**: detecta os cookies em `~/.config/ytmtui/cookies.txt`,
   mostra o **nome da sua conta** e as **suas playlists** (seção 📚 Biblioteca).
-- 🏠 **Início/Recomendados** (feed `FEmusic_home`) personalizado ao seu perfil.
+- 🏠 **Início/Recomendados** (feed `FEmusic_home`) personalizado ao seu perfil,
+  com um **visualizador de espectro em tempo real** (FFT real sobre o áudio
+  tocando, estilo *Cava*) acima da lista de recomendações.
 - 👤 **Página do artista**: `Enter` em um artista lista suas principais faixas.
 - 📻 **Rádio/autoplay**: ao terminar a fila, continua com faixas relacionadas.
 - ➕ **Fila**: `a` adiciona a faixa selecionada à fila sem interromper a atual.
@@ -78,11 +119,14 @@ Antes de compilar/rodar, você precisa ter instalado:
 
 ---
 
-## 🚀 Instalação e execução
+## 🔧 Compilar do código-fonte
+
+Precisa de outra plataforma (Windows, Linux ARM), quer testar uma mudança, ou
+simplesmente prefere compilar você mesmo:
 
 ```bash
 # 1. Clone o repositório
-git clone <url-do-repo> ytmtui
+git clone https://github.com/Itthiago034/ytmtui.git
 cd ytmtui
 
 # 2. Compile em modo release (recomendado)
@@ -103,9 +147,7 @@ Para instalar o binário no seu `PATH` (`~/.cargo/bin`):
 cargo install --path .
 ```
 
-Depois é só rodar `ytmtui` de qualquer lugar. Binários prontos por versão
-também são publicados em **Releases** (veja abaixo) sempre que uma tag `v*`
-é criada.
+Depois é só rodar `ytmtui` de qualquer lugar.
 
 ---
 
@@ -168,49 +210,46 @@ também são publicados em **Releases** (veja abaixo) sempre que uma tag `v*`
 
 ---
 
-## 🔑 Authentication and library access
+## 🔑 Autenticação e cookies
 
-ytmtui accesses your YouTube Music library through a Netscape cookie file. It
-does not ask for or store your account password. Cookie paths are checked in
-this order: `YTM_COOKIES`, the `cookies` path in `config.json`, then
-`~/.config/ytmtui/cookies.txt`.
+O ytmtui acessa sua biblioteca do YouTube Music através de um arquivo de
+cookies (formato Netscape). Ele **nunca** pede ou armazena sua senha. O
+caminho do arquivo é resolvido nesta ordem: variável `YTM_COOKIES` → campo
+`cookies` do `config.json` → `~/.config/ytmtui/cookies.txt` (padrão).
 
-1. Sign in to [music.youtube.com](https://music.youtube.com) in a supported
-   browser.
-2. Refresh the local cookie file:
+### Entrar com sua conta (playlists, curtidas, recomendações)
 
-```bash
-./scripts/refresh-cookies.sh brave
-```
+1. Faça login em [music.youtube.com](https://music.youtube.com) no seu
+   navegador.
+2. Gere/atualize o arquivo local de cookies:
 
-   The script writes the new file atomically with mode `600`. If export fails,
-   the previous file remains unchanged. Firefox can be selected by passing its
-   yt-dlp browser name instead of `brave`.
-3. Restart ytmtui and open **Library**. A valid session displays the account
-   name and private playlists.
+   ```bash
+   ./scripts/refresh-cookies.sh brave   # ou: firefox
+   ```
 
-An invalid cookie file starts ytmtui in anonymous mode. An HTTP `401` or `403`
-from an authenticated endpoint marks the session as expired and clears only
-account-specific data; public search and other anonymous features remain
-available. Run the refresh script and restart to sign in again.
+   O script escreve o novo arquivo de forma atômica, com permissão `600`. Se
+   a exportação falhar, o arquivo anterior permanece intacto.
+3. Reinicie o ytmtui e abra **📚 Biblioteca** — uma sessão válida mostra o
+   nome da conta e as playlists privadas.
 
----
+Um arquivo de cookies inválido inicia o app em modo anônimo. Um erro HTTP
+`401`/`403` numa chamada autenticada marca a sessão como expirada e limpa só
+os dados da conta — busca, playlists públicas e letras continuam funcionando
+normalmente. Rode o script de novo e reinicie para entrar de novo.
 
-## 🍪 Contornando o bloqueio anti-bot do YouTube (cookies)
+### Contornando o bloqueio anti-bot do YouTube
 
 Em alguns ambientes/IPs (por exemplo, servidores em *datacenters*), o YouTube
 pode exigir verificação ("*Sign in to confirm you're not a bot*") e bloquear a
-resolução do stream pelo `yt-dlp`. Para contornar, exporte um arquivo de cookies
-do seu navegador (formato Netscape) e informe o caminho pela variável de
-ambiente `YTM_COOKIES`:
+resolução do stream pelo `yt-dlp`. O mesmo arquivo de cookies resolve isso —
+basta apontar para ele com `YTM_COOKIES`, mesmo sem usar a conta pra biblioteca:
 
 ```bash
-# Ex.: usando a extensão "Get cookies.txt" no navegador
 export YTM_COOKIES="/caminho/para/cookies.txt"
 ./target/release/ytmtui
 ```
 
-> A **busca, playlists e letras funcionam normalmente sem cookies** — apenas a
+> **Busca, playlists e letras funcionam normalmente sem cookies** — só a
 > reprodução do áudio pode exigi-los em ambientes bloqueados. Em máquinas
 > pessoais (IP residencial), geralmente **não** é necessário.
 
@@ -248,16 +287,20 @@ src/
 ├── main.rs            # Ponto de entrada: terminal + laço de eventos
 ├── lib.rs             # Exposição dos módulos (permite testes/examples)
 ├── app.rs             # Estado central e coordenação das tasks assíncronas
+├── app/
+│   └── authentication.rs # Resolução do caminho de cookies e estado de sessão
 ├── config.rs          # Configuração persistente (volume, shuffle, repeat, cookies, tema)
 ├── theme.rs           # Temas de cores (presets de acento) da interface
 ├── event.rs           # Tratamento das teclas → ações
+├── visualizer.rs       # Analisador de espectro (FFT) do visualizador da tela Início
 ├── ytmusic/
 │   ├── mod.rs         # Cliente da API interna (InnerTube), busca, biblioteca e conta
 │   ├── auth.rs        # Autenticação por cookies (SAPISIDHASH)
 │   ├── models.rs      # Modelos: Track, Playlist, Artist, SearchResults
 │   └── parse.rs       # Helpers de parsing do JSON aninhado da API
 ├── player/
-│   └── mod.rs         # Player de áudio (rodio) + download via yt-dlp
+│   ├── mod.rs         # Player de áudio (rodio) + download via yt-dlp
+│   └── tap.rs         # Intercepta amostras decodificadas para o visualizador
 └── ui/
     ├── mod.rs         # Root layout (wide/narrow), search input and status bar
     ├── nav.rs         # Navigation column (identity, account, sections)

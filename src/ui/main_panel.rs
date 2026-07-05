@@ -72,8 +72,8 @@ fn track_line(
     // Espaço reservado para número + duração + margens.
     let avail = width.saturating_sub(num.len() + dur.len() + 6);
     let main = format!("{} — {}", t.title, t.artist);
-    let main: String = main.chars().take(avail).collect();
-    let pad = " ".repeat(avail.saturating_sub(main.chars().count()) + 2);
+    let main = crate::ui::take_width(&main, avail);
+    let pad = " ".repeat(avail.saturating_sub(crate::ui::display_width(&main)) + 2);
 
     let marker_style = if playing {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
@@ -262,7 +262,10 @@ fn draw_panel_title(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme)
 /// eighth-block glyphs sized to that bar's smoothed height. Colored by the
 /// bar's own current height using the theme's existing palette (no new
 /// gradient helper) so quiet bars read as calmer and loud ones as louder.
-const BAR_GLYPHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+// Precomputed "glyph + trailing space" static slices: with the Home screen's
+// fast (~60ms) redraw tier, this function runs often, so each cell is a
+// `&'static str` lookup rather than a fresh `format!()` allocation.
+const BAR_GLYPHS: [&str; 9] = ["  ", "▁ ", "▂ ", "▃ ", "▄ ", "▅ ", "▆ ", "▇ ", "█ "];
 
 fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
     if area.width == 0 || area.height == 0 {
@@ -279,12 +282,12 @@ fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
         for &height in &bars[..visible] {
             let filled_rows = height * rows as f32;
             let glyph = if row_from_bottom + 1.0 <= filled_rows {
-                '█'
+                BAR_GLYPHS[8]
             } else if row_from_bottom < filled_rows {
                 let idx = ((filled_rows - row_from_bottom) * 8.0) as usize;
                 BAR_GLYPHS[idx.min(8)]
             } else {
-                ' '
+                BAR_GLYPHS[0]
             };
             let color = if height > 0.66 {
                 theme.accent
@@ -293,10 +296,7 @@ fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
             } else {
                 theme.player
             };
-            spans.push(Span::styled(
-                format!("{glyph} "),
-                Style::default().fg(color),
-            ));
+            spans.push(Span::styled(glyph, Style::default().fg(color)));
         }
         lines.push(Line::from(spans));
     }

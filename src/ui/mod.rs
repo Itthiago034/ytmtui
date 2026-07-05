@@ -23,6 +23,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, Section};
 
@@ -230,7 +231,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         width.saturating_sub(used + 1)
     };
     let status = truncate_chars(&app.status, status_room);
-    let status_len = status.chars().count();
+    let status_len = display_width(&status);
     spans.push(Span::styled(status, Style::default().fg(Color::Gray)));
 
     if show_shortcuts {
@@ -260,27 +261,74 @@ fn contextual_shortcuts(app: &App) -> &'static str {
     }
 }
 
-/// Truncates `s` to at most `max` characters, ending with an ellipsis when
-/// anything was cut.
+/// Display width (terminal columns) of `s`. Unlike `.chars().count()`, this
+/// accounts for wide characters (CJK, many emoji) that occupy two columns
+/// each — track titles and artist names routinely contain these.
+pub(crate) fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Truncates `s` to at most `max` display columns, ending with an ellipsis
+/// (1 column) when anything was cut. Stops before a character that would
+/// overflow the budget rather than splitting it, so wide characters are
+/// never rendered partially.
 pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if display_width(s) <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let mut out: String = s.chars().take(max - 1).collect();
+    let budget = max - 1;
+    let mut out = String::new();
+    let mut width = 0;
+    for c in s.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + w > budget {
+            break;
+        }
+        width += w;
+        out.push(c);
+    }
     out.push('…');
     out
 }
 
-/// Keeps the last `max` characters of `s` (used so the search cursor and the
-/// end of long queries stay visible).
-fn tail_chars(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        s.to_string()
-    } else {
-        s.chars().skip(count - max).collect()
+/// Hard-truncates `s` to at most `max` display columns, with no ellipsis
+/// (used where the caller pads the remainder itself, e.g. a fixed-width
+/// list column).
+pub(crate) fn take_width(s: &str, max: usize) -> String {
+    if display_width(s) <= max {
+        return s.to_string();
     }
+    let mut out = String::new();
+    let mut width = 0;
+    for c in s.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + w > max {
+            break;
+        }
+        width += w;
+        out.push(c);
+    }
+    out
+}
+
+/// Keeps the last `max` display columns of `s` (used so the search cursor
+/// and the end of long queries stay visible).
+fn tail_chars(s: &str, max: usize) -> String {
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    let mut reversed = String::new();
+    let mut width = 0;
+    for c in s.chars().rev() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + w > max {
+            break;
+        }
+        width += w;
+        reversed.push(c);
+    }
+    reversed.chars().rev().collect()
 }

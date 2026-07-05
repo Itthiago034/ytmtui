@@ -51,6 +51,9 @@ ratatui-image = "3.0.0"
 # FFT for the Home screen's real-time audio spectrum visualizer
 rustfft = "6"
 
+# Column-width-aware text truncation/padding (CJK/emoji occupy 2 columns)
+unicode-width = "0.2"
+
 [profile.release]
 opt-level = 3
 lto = true

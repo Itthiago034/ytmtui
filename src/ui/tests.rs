@@ -316,3 +316,27 @@ fn nav_column_shows_album_art_when_available() {
     let found = (0..buffer.area.height).any(|y| (0..18u16).any(|x| buffer[(x, y)].symbol() == "▀"));
     assert!(found, "album art half-blocks in the nav column");
 }
+
+#[test]
+fn display_width_counts_wide_characters_as_two_columns() {
+    // "ミク" is two CJK characters, 2 columns each: 4 columns, not 2.
+    assert_eq!(super::display_width("ミク"), 4);
+    assert_eq!(super::display_width("abc"), 3);
+}
+
+#[test]
+fn truncate_chars_never_splits_a_wide_character() {
+    // Each character is 2 columns wide; a budget of 5 only fits two of them
+    // plus the 1-column ellipsis (2 + 2 + 1 = 5), not a third half-rendered
+    // character.
+    let out = super::truncate_chars("初音ミク", 5);
+    assert_eq!(out, "初音…");
+    assert!(super::display_width(&out) <= 5);
+}
+
+#[test]
+fn take_width_hard_truncates_by_display_width_without_an_ellipsis() {
+    let out = super::take_width("初音ミク", 5);
+    assert_eq!(out, "初音");
+    assert!(super::display_width(&out) <= 5);
+}

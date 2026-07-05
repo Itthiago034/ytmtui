@@ -130,17 +130,27 @@ Em `advance_auto`, quando a fila termina sem repetição e `autoplay` está liga
 usa a última faixa como semente: `YtMusicClient::get_radio` (endpoint `next` com
 `playlistId = RDAMVM<videoId>`) → `Msg::RadioTracks` → anexa à fila e continua.
 
-### 4.4 Autenticação (login por cookies)
-Na inicialização, `App::new` resolve o caminho dos cookies nesta ordem:
-`YTM_COOKIES` (se o arquivo existir) → `config.cookies` → **descoberta
-automática** de `~/.config/ytmtui/cookies.txt`. Com o caminho,
-`YtMusicClient::with_cookies` cria `Auth::from_cookie_file`, que:
-- lê o arquivo Netscape, mantendo **apenas cookies de `youtube.com`** e
-  **desduplicando** nomes (evita HTTP 413 e sessão tratada como anônima);
-- extrai o `SAPISID`/`__Secure-3PAPISID`.
+### 4.4 Cookie authentication
 
-Cada `POST` autenticado adiciona `Cookie`, `Authorization: SAPISIDHASH <ts>_<sha1>`
-(recalculado por requisição), `X-Goog-AuthUser` e `X-Origin`.
+At startup, `App::new` resolves cookie paths in this order: `YTM_COOKIES`,
+`config.cookies`, then `~/.config/ytmtui/cookies.txt`. Invalid files produce
+`AuthenticationState::InvalidCookies` and leave the public client available in
+anonymous mode.
+
+`YtMusicClient::with_cookies` parses the Netscape file, prefers YouTube-domain
+values when cookie names overlap Google domains, deduplicates names, and
+extracts `SAPISID` or `__Secure-3PAPISID`. Authenticated requests add `Cookie`,
+`Authorization: SAPISIDHASH <timestamp>_<sha1>`, `X-Goog-AuthUser`, and
+`X-Origin` headers.
+
+The client classifies authenticated HTTP `401` and `403` responses as
+`YtMusicError::SessionExpired`. The application transitions to
+`AuthenticationState::Expired`, clears account-only state, and retains public
+search. Other HTTP and transport failures remain ordinary recoverable errors.
+
+`scripts/refresh-cookies.sh` exports into a temporary mode-`600` file and moves
+it into place only after a successful non-empty export. A failed export leaves
+the previous cookie file untouched.
 
 ### 4.5 Início, biblioteca e conta
 No boot, três tasks populam: `get_home` (`FEmusic_home`), `get_library_playlists`
@@ -187,6 +197,9 @@ existente e preserva o que já havia).
 
 ## 7. Resiliência
 
+- **Typed authentication failures**: cookie parsing, session expiry, HTTP
+  status, transport, and response errors are distinct values; application
+  behavior never depends on matching formatted error strings.
 - **Panic de áudio isolado**: a thread de áudio tem nome (`ytmtui-audio`); o
   hook global de panic em `main.rs` a ignora, e `Decoder::new` é envolto em
   `catch_unwind` — um arquivo problemático não derruba o app nem bagunça o

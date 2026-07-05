@@ -168,32 +168,31 @@ também são publicados em **Releases** (veja abaixo) sempre que uma tag `v*`
 
 ---
 
-## 🔑 Login (ver suas playlists)
+## 🔑 Authentication and library access
 
-O ytmtui pode acessar a **sua biblioteca** (suas playlists) usando os cookies do
-navegador onde você já está logado no YouTube Music. Não há login por
-usuário/senha — a autenticação usa o cabeçalho `SAPISIDHASH` derivado dos
-cookies (mesmo mecanismo do site).
+ytmtui accesses your YouTube Music library through a Netscape cookie file. It
+does not ask for or store your account password. Cookie paths are checked in
+this order: `YTM_COOKIES`, the `cookies` path in `config.json`, then
+`~/.config/ytmtui/cookies.txt`.
 
-1. No navegador logado no [music.youtube.com](https://music.youtube.com), exporte
-   os cookies em **formato Netscape** (ex.: extensão *"Get cookies.txt"*).
-2. Salve o arquivo em **`~/.config/ytmtui/cookies.txt`**. O app **descobre o
-   arquivo automaticamente** na próxima vez que abrir — não é preciso configurar
-   nada. Ao conectar, o **nome da sua conta** aparece na barra lateral.
+1. Sign in to [music.youtube.com](https://music.youtube.com) in a supported
+   browser.
+2. Refresh the local cookie file:
 
 ```bash
-mkdir -p ~/.config/ytmtui
-cp /caminho/do/download/cookies.txt ~/.config/ytmtui/cookies.txt
-./target/release/ytmtui
+./scripts/refresh-cookies.sh brave
 ```
 
-3. Abra a seção **📚 Biblioteca** no menu lateral e pressione `Enter` em uma
-   playlist para carregar as faixas.
+   The script writes the new file atomically with mode `600`. If export fails,
+   the previous file remains unchanged. Firefox can be selected by passing its
+   yt-dlp browser name instead of `brave`.
+3. Restart ytmtui and open **Library**. A valid session displays the account
+   name and private playlists.
 
-> Alternativamente, você pode apontar a variável `YTM_COOKIES` para outro caminho.
-> O mesmo arquivo é usado na reprodução (contorna o bloqueio anti-bot). Os cookies
-> expiram de tempos em tempos; se a biblioteca parar de carregar, basta
-> reexportá-los. Sem login, busca/playlists públicas/letras continuam funcionando.
+An invalid cookie file starts ytmtui in anonymous mode. An HTTP `401` or `403`
+from an authenticated endpoint marks the session as expired and clears only
+account-specific data; public search and other anonymous features remain
+available. Run the refresh script and restart to sign in again.
 
 ---
 

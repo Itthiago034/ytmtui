@@ -44,6 +44,13 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.
 - Cache + prefetch da próxima faixa para transições mais rápidas.
 
 ### Corrigido
+- Cookie authentication now has explicit anonymous, authenticated, invalid, and
+  expired states. Authenticated HTTP `401/403` responses no longer depend on
+  formatted-string matching and do not disable public search.
+- Cookie path precedence is now deterministic: `YTM_COOKIES`, configured path,
+  then `~/.config/ytmtui/cookies.txt`.
+- `scripts/refresh-cookies.sh` now replaces cookies atomically with mode `600`
+  and preserves the existing file when browser export fails.
 - *Panic* de *seek* do `symphonia` (rodio 0.20) ao decodificar `m4a`: resolvido
   pelo remux, com `catch_unwind` na thread de áudio e hook de panic que ignora
   essa thread (não bagunça mais o terminal).

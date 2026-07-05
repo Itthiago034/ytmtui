@@ -86,13 +86,13 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
     let avail = width.saturating_sub(fixed + right);
 
     let title_shown = crate::ui::truncate_chars(&title, avail);
-    let remaining = avail.saturating_sub(title_shown.chars().count());
+    let remaining = avail.saturating_sub(crate::ui::display_width(&title_shown));
     let subtitle_shown = if remaining >= 4 {
         crate::ui::truncate_chars(&subtitle, remaining)
     } else {
         String::new()
     };
-    let used = title_shown.chars().count() + subtitle_shown.chars().count();
+    let used = crate::ui::display_width(&title_shown) + crate::ui::display_width(&subtitle_shown);
     let pad = avail.saturating_sub(used) + 1;
 
     let mut spans = vec![

@@ -6,4 +6,5 @@ pub mod event;
 pub mod player;
 pub mod theme;
 pub mod ui;
+pub mod visualizer;
 pub mod ytmusic;

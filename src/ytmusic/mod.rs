@@ -279,12 +279,17 @@ impl YtMusicClient {
         let mut renderers = Vec::new();
         collect_key(&data, "playlistPanelVideoRenderer", &mut renderers);
         let mut out = Vec::new();
+        let mut skipped_seed = false;
         for r in renderers {
             if let Some(t) = parse_panel_video(r) {
-                // Ignora a própria semente (costuma ser o primeiro item).
-                if t.video_id != video_id {
-                    out.push(t);
+                // Ignora apenas a primeira ocorrência (a própria semente,
+                // que costuma vir como o primeiro item); uma repetição
+                // legítima mais adiante na fila da rádio é mantida.
+                if !skipped_seed && t.video_id == video_id {
+                    skipped_seed = true;
+                    continue;
                 }
+                out.push(t);
             }
         }
         Ok(out)
@@ -450,10 +455,14 @@ impl YtMusicClient {
         let duration = fixed_duration(r)
             .or_else(|| segments.iter().rev().find(|s| s.contains(':')).cloned())
             .unwrap_or_default();
+        // Mesmo filtro de `parse_panel_video` (parse.rs): descarta a duração
+        // e o texto de contagem de visualizações (comum em uploads de
+        // usuários, sem álbum), senão eles são exibidos como se fossem o
+        // álbum da faixa.
         let album = segments
             .iter()
             .skip(1)
-            .find(|s| !s.contains(':'))
+            .find(|s| !s.contains(':') && !s.ends_with("views") && !s.contains("visualiz"))
             .cloned()
             .unwrap_or_default();
 

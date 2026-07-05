@@ -14,6 +14,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
 use crate::player::{self, AudioPlayer};
+use crate::visualizer::SpectrumAnalyzer;
 use crate::ytmusic::{Artist, Playlist, SearchResults, Track, YtMusicClient, YtMusicError};
 
 /// Seções da barra lateral (também define o conteúdo do painel principal).
@@ -125,9 +126,26 @@ pub enum Msg {
         title: String,
         tracks: Vec<Track>,
     },
-    Lyrics(Option<String>),
-    ArtworkBytes(Vec<u8>),
-    AudioReady(PathBuf),
+    /// Lyrics for the track whose `video_id` is carried alongside them, so a
+    /// slow fetch from a track the user has since skipped past can be told
+    /// apart from the currently playing one and discarded.
+    Lyrics {
+        video_id: String,
+        lyrics: Option<String>,
+    },
+    /// Same rationale as `Lyrics`: the cover art is tagged with the track it
+    /// belongs to.
+    ArtworkBytes {
+        video_id: String,
+        bytes: Vec<u8>,
+    },
+    /// Same rationale as `Lyrics`: the downloaded audio is tagged with the
+    /// track it belongs to, so a slow download for a track the user has
+    /// since skipped past never gets played over the current one.
+    AudioReady {
+        video_id: String,
+        path: PathBuf,
+    },
     Status(String),
     Error(String),
     /// Cookies are present, but the API session is no longer valid.
@@ -146,6 +164,8 @@ pub struct App {
     pub running: bool,
     pub client: YtMusicClient,
     pub player: AudioPlayer,
+    /// Real-time FFT spectrum feeding the Home screen's visualizer bars.
+    pub visualizer: SpectrumAnalyzer,
 
     // Canais de comunicação com tasks assíncronas.
     pub tx: UnboundedSender<Msg>,
@@ -202,6 +222,12 @@ pub struct App {
     pub picker: Option<Picker>,
     /// Album art for the current track, prepared for the detected protocol.
     pub artwork: Option<StatefulProtocol>,
+    /// Set when the album art changed and the terminal needs a full clear
+    /// before the next draw. Kitty/Sixel graphics live outside ratatui's
+    /// cell buffer, so terminals (Konsole included) can leave the previous
+    /// cover's pixels on screen when the widget briefly stops drawing there;
+    /// only an explicit screen erase reliably removes them.
+    pub clear_screen: bool,
 
     pub status: String,
     /// Caminho opcional para arquivo de cookies do yt-dlp.
@@ -273,6 +299,7 @@ impl App {
             running: true,
             client,
             player,
+            visualizer: SpectrumAnalyzer::new(),
             tx,
             rx,
             focus: Focus::Sidebar,
@@ -303,6 +330,7 @@ impl App {
             lyrics_scroll: 0,
             picker: None,
             artwork: None,
+            clear_screen: false,
             status,
             cookies,
             loading_audio: false,
@@ -325,6 +353,22 @@ impl App {
     /// can redraw far less often without losing feedback.
     pub fn needs_animation(&self) -> bool {
         self.is_loading() || (self.current.is_some() && !self.player.is_paused())
+    }
+
+    /// Whether the Home screen's spectrum visualizer is actively animating:
+    /// only true while that section is open and a track is audibly playing.
+    /// The main loop uses this to redraw faster than the general animation
+    /// tier, since a spectrum needs to look like continuous motion.
+    pub fn needs_fast_animation(&self) -> bool {
+        self.section == Section::Inicio && self.current.is_some() && !self.player.is_paused()
+    }
+
+    /// Consumes the pending full-clear flag set by [`Self::clear_artwork`].
+    /// The main loop calls this right before drawing and, if set, erases the
+    /// whole terminal so leftover Kitty/Sixel graphics from the previous
+    /// cover don't linger behind the next frame.
+    pub fn take_clear_screen(&mut self) -> bool {
+        std::mem::take(&mut self.clear_screen)
     }
 
     /// Glifo atual do spinner de carregamento (braille animado).
@@ -359,8 +403,16 @@ impl App {
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Ok(pls) = client.get_home().await {
-                let _ = tx.send(Msg::HomePlaylists(pls));
+            match client.get_home().await {
+                Ok(pls) => {
+                    let _ = tx.send(Msg::HomePlaylists(pls));
+                }
+                Err(error) => {
+                    let _ = tx.send(client_error_message(
+                        "Could not load recommendations",
+                        error,
+                    ));
+                }
             }
         });
     }
@@ -711,7 +763,13 @@ impl App {
                 if self.songs.is_empty() {
                     return;
                 }
-                let idx = self.list_state.selected().unwrap_or(0);
+                // A stale selection (e.g. left over from a longer list shown
+                // before this one) must not index past the current list.
+                let idx = self
+                    .list_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(self.songs.len() - 1);
                 self.queue = self.songs.clone();
                 self.queue_index = Some(idx);
             }
@@ -719,12 +777,33 @@ impl App {
                 if self.queue.is_empty() {
                     return;
                 }
-                let idx = self.list_state.selected().unwrap_or(0);
+                let idx = self
+                    .list_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(self.queue.len() - 1);
                 self.queue_index = Some(idx);
             }
             _ => return,
         }
         self.start_current();
+    }
+
+    /// Whether `video_id` matches the currently playing track. Used to
+    /// discard results from a slow async fetch (audio download, lyrics,
+    /// artwork) started for a track the user has since skipped past.
+    fn is_current_track(&self, video_id: &str) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|t| t.video_id == video_id)
+    }
+
+    /// Clears the current album art and flags the terminal for a full clear
+    /// on the next draw, so Kitty/Sixel graphics left over by the previous
+    /// cover don't linger behind whatever gets drawn next.
+    fn clear_artwork(&mut self) {
+        self.artwork = None;
+        self.clear_screen = true;
     }
 
     /// Inicia a reprodução da faixa apontada por `queue_index`.
@@ -736,7 +815,8 @@ impl App {
         self.current = Some(track.clone());
         self.lyrics = None;
         self.lyrics_scroll = 0;
-        self.artwork = None;
+        self.clear_artwork();
+        self.visualizer.reset();
         self.loading_audio = true;
         self.status = format!("Baixando \"{}\"...", track.title);
 
@@ -748,7 +828,10 @@ impl App {
         tokio::task::spawn_blocking(move || {
             match player::download_audio(&url, &vid_audio, cookies.as_deref()) {
                 Ok(path) => {
-                    let _ = tx.send(Msg::AudioReady(path));
+                    let _ = tx.send(Msg::AudioReady {
+                        video_id: vid_audio,
+                        path,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(Msg::Error(format!("Falha ao obter áudio: {e}")));
@@ -768,7 +851,10 @@ impl App {
         let vid = track.video_id.clone();
         tokio::spawn(async move {
             if let Ok(lyr) = client.get_lyrics(&vid).await {
-                let _ = tx2.send(Msg::Lyrics(lyr));
+                let _ = tx2.send(Msg::Lyrics {
+                    video_id: vid,
+                    lyrics: lyr,
+                });
             }
         });
 
@@ -776,9 +862,13 @@ impl App {
         if let Some(url) = track.thumbnail.clone() {
             let tx3 = self.tx.clone();
             let http = self.client.clone();
+            let vid_art = track.video_id.clone();
             tokio::spawn(async move {
                 if let Ok(bytes) = http.fetch_bytes(&url).await {
-                    let _ = tx3.send(Msg::ArtworkBytes(bytes));
+                    let _ = tx3.send(Msg::ArtworkBytes {
+                        video_id: vid_art,
+                        bytes,
+                    });
                 }
             });
         }
@@ -846,8 +936,16 @@ impl App {
                             let client = self.client.clone();
                             let tx = self.tx.clone();
                             tokio::spawn(async move {
-                                if let Ok(tracks) = client.get_radio(&seed).await {
-                                    let _ = tx.send(Msg::RadioTracks(tracks));
+                                match client.get_radio(&seed).await {
+                                    Ok(tracks) => {
+                                        let _ = tx.send(Msg::RadioTracks(tracks));
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.send(client_error_message(
+                                            "Could not load radio",
+                                            error,
+                                        ));
+                                    }
                                 }
                             });
                             return;
@@ -857,7 +955,7 @@ impl App {
                 // Sem autoplay/semente: encerra a reprodução.
                 self.player.stop();
                 self.current = None;
-                self.artwork = None;
+                self.clear_artwork();
                 self.loading_audio = false;
                 self.status = "Fila concluída.".to_string();
             }
@@ -880,9 +978,12 @@ impl App {
                         self.playlists.len(),
                         self.artists.len()
                     );
-                    if self.section == Section::Buscar {
-                        self.list_state.select(Some(0));
-                    }
+                    // `songs`/`playlists`/`artists` were all just replaced,
+                    // so any list_state selection now refers to whichever of
+                    // them is visible — reset it regardless of section, or a
+                    // stale index from a longer previous list survives and
+                    // desyncs Enter-key handling from what's on screen.
+                    self.list_state.select(Some(0));
                 }
                 Msg::LibraryPlaylists(pls) => {
                     self.busy = false;
@@ -903,7 +1004,7 @@ impl App {
                     if tracks.is_empty() {
                         self.player.stop();
                         self.current = None;
-                        self.artwork = None;
+                        self.clear_artwork();
                         self.loading_audio = false;
                         self.status = "Fila concluída.".to_string();
                     } else {
@@ -939,24 +1040,34 @@ impl App {
                     self.list_state.select(Some(0));
                     self.status = format!("{} faixas carregadas.", self.songs.len());
                 }
-                Msg::Lyrics(lyr) => {
-                    self.lyrics = lyr;
-                }
-                Msg::ArtworkBytes(bytes) => {
-                    // Decode the cover and prepare it for the terminal's
-                    // image protocol; without a picker no art is shown.
-                    self.artwork = self.picker.as_mut().and_then(|picker| {
-                        image::load_from_memory(&bytes)
-                            .ok()
-                            .map(|img| picker.new_resize_protocol(img))
-                    });
-                }
-                Msg::AudioReady(path) => {
-                    self.loading_audio = false;
-                    if let Some(t) = &self.current {
-                        self.status = format!("▶ Tocando: {} — {}", t.title, t.artist);
+                Msg::Lyrics { video_id, lyrics } => {
+                    // A slow fetch for a track the user has since skipped
+                    // past must not overwrite the current track's lyrics.
+                    if self.is_current_track(&video_id) {
+                        self.lyrics = lyrics;
                     }
-                    self.player.play_file(path);
+                }
+                Msg::ArtworkBytes { video_id, bytes } => {
+                    if self.is_current_track(&video_id) {
+                        // Decode the cover and prepare it for the terminal's
+                        // image protocol; without a picker no art is shown.
+                        self.artwork = self.picker.as_mut().and_then(|picker| {
+                            image::load_from_memory(&bytes)
+                                .ok()
+                                .map(|img| picker.new_resize_protocol(img))
+                        });
+                    }
+                }
+                Msg::AudioReady { video_id, path } => {
+                    // A slow download for a track the user has since skipped
+                    // past must never start playing over the current one.
+                    if self.is_current_track(&video_id) {
+                        self.loading_audio = false;
+                        if let Some(t) = &self.current {
+                            self.status = format!("▶ Tocando: {} — {}", t.title, t.artist);
+                        }
+                        self.player.play_file(path);
+                    }
                 }
                 Msg::Status(s) => self.status = s,
                 Msg::Error(e) => {
@@ -975,6 +1086,21 @@ impl App {
         }
         if self.player.take_finished() && !self.loading_audio {
             self.advance_auto();
+        }
+
+        // Spectrum analysis only matters while it's visible (Home) and
+        // audible (a track is loaded and not paused); elsewhere tapped
+        // chunks are simply left to be dropped by the tap's backpressure,
+        // and the bars settle toward zero instead of freezing.
+        if self.section == Section::Inicio {
+            let audible = self.current.is_some() && !self.player.is_paused();
+            if audible {
+                for chunk in self.player.drain_sample_chunks() {
+                    self.visualizer.push_samples(&chunk);
+                }
+            } else {
+                self.visualizer.decay_idle();
+            }
         }
     }
 }
@@ -995,6 +1121,7 @@ impl App {
             running: true,
             client: YtMusicClient::new(),
             player: AudioPlayer::new().expect("audio thread should start"),
+            visualizer: SpectrumAnalyzer::new(),
             tx,
             rx,
             focus: Focus::Sidebar,
@@ -1025,6 +1152,7 @@ impl App {
             lyrics_scroll: 0,
             picker: None,
             artwork: None,
+            clear_screen: false,
             status: "Ready.".to_string(),
             cookies: None,
             loading_audio: false,

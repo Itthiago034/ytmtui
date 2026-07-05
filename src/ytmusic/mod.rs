@@ -53,7 +53,7 @@ impl YtMusicClient {
     /// Se os cookies forem inválidos/incompletos, retorna um cliente anônimo.
     pub fn with_cookies(path: &str) -> Self {
         let mut client = Self::new();
-        client.auth = Auth::from_cookie_file(path).map(Arc::new);
+        client.auth = Auth::from_cookie_file(path).ok().map(Arc::new);
         client
     }
 

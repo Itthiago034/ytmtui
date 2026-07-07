@@ -239,6 +239,64 @@ fn selection_highlight_and_scrollbar_stay_visible() {
 }
 
 #[test]
+fn home_section_highlight_lands_on_the_right_item_despite_header_rows() {
+    use crate::ytmusic::{HomeSection, Playlist};
+
+    let mut app = App::new_for_tests();
+    app.focus = Focus::Main;
+    app.home = vec![
+        HomeSection {
+            title: "Quick picks".to_string(),
+            items: vec![Playlist {
+                browse_id: "VL1".to_string(),
+                title: "First pick".to_string(),
+                subtitle: "Some artist".to_string(),
+                thumbnail: None,
+            }],
+        },
+        HomeSection {
+            title: "Mixed for you".to_string(),
+            items: vec![Playlist {
+                browse_id: "VL2".to_string(),
+                title: "Second pick".to_string(),
+                subtitle: "Another artist".to_string(),
+                thumbnail: None,
+            }],
+        },
+    ];
+    // Flattened index 1: the *second* section's only item — the header rows
+    // in between must not throw off which rendered row gets highlighted.
+    app.list_state.select(Some(1));
+
+    let buffer = render(&mut app, 100, 30);
+    let highlight = app.theme().highlight_bg;
+
+    let row_of = |needle: &str| -> u16 {
+        let buffer_rows = rows(&buffer);
+        buffer_rows
+            .iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("'{needle}' not found:\n{}", buffer_rows.join("\n")))
+            as u16
+    };
+
+    let second_pick_row = row_of("Second pick");
+    let first_pick_row = row_of("First pick");
+
+    let row_is_highlighted =
+        |y: u16| -> bool { (0..buffer.area.width).any(|x| buffer[(x, y)].bg == highlight) };
+
+    assert!(
+        row_is_highlighted(second_pick_row),
+        "the selected item's row should be highlighted"
+    );
+    assert!(
+        !row_is_highlighted(first_pick_row),
+        "the non-selected item's row should not be highlighted"
+    );
+}
+
+#[test]
 fn search_input_line_appears_while_typing() {
     let mut app = App::new_for_tests();
     app.input_mode = true;
@@ -339,4 +397,69 @@ fn take_width_hard_truncates_by_display_width_without_an_ellipsis() {
     let out = super::take_width("初音ミク", 5);
     assert_eq!(out, "初音");
     assert!(super::display_width(&out) <= 5);
+}
+
+#[test]
+fn synced_lyrics_highlight_only_the_active_line() {
+    let mut app = playing_app();
+    app.section = Section::Letra;
+    app.focus = Focus::Main;
+    let theme = app.theme();
+    let (accent, secondary) = (theme.accent, theme.secondary);
+    app.lyrics = crate::lyrics::LyricsState::Synced {
+        lines: vec![
+            crate::ytmusic::LyricLine {
+                text: "First line".to_string(),
+                start_ms: 0,
+                end_ms: 1000,
+            },
+            crate::ytmusic::LyricLine {
+                text: "Second line".to_string(),
+                start_ms: 1000,
+                end_ms: 2000,
+            },
+            crate::ytmusic::LyricLine {
+                text: "Third line".to_string(),
+                start_ms: 2000,
+                end_ms: 3000,
+            },
+        ],
+        active: Some(1),
+    };
+
+    let buffer = render(&mut app, 100, 30);
+
+    // Finds the (x, y) of the first cell where `needle` starts, by matching
+    // consecutive cells directly (not byte-offsets into a joined String,
+    // which would misalign with columns whenever a preceding cell is
+    // multi-byte, and not just the first character, which could
+    // false-positive against unrelated text like the sidebar's "Search").
+    let find_cell = |needle: &str| -> (u16, u16) {
+        let chars: Vec<char> = needle.chars().collect();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let matches = chars.iter().enumerate().all(|(i, c)| {
+                    let cx = x + i as u16;
+                    cx < buffer.area.width && buffer[(cx, y)].symbol() == c.to_string()
+                });
+                if matches {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("'{needle}' not found in rendered buffer");
+    };
+
+    let (x, y) = find_cell("Second line");
+    assert_eq!(
+        buffer[(x, y)].fg,
+        accent,
+        "active line should use theme.accent"
+    );
+    let (x, y) = find_cell("First line");
+    assert_eq!(
+        buffer[(x, y)].fg,
+        secondary,
+        "non-active line should use theme.secondary"
+    );
 }

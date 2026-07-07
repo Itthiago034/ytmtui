@@ -15,12 +15,18 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 pub use auth::Auth;
-pub use models::{Artist, Playlist, SearchResults, Track};
+pub use models::{Artist, HomeSection, LyricLine, Lyrics, Playlist, SearchResults, Track};
 use parse::*;
 
 const BASE: &str = "https://music.youtube.com/youtubei/v1";
 const CLIENT_NAME: &str = "WEB_REMIX";
 const CLIENT_VERSION: &str = "1.20240101.01.00";
+/// Only used for the lyrics browse call: the WEB_REMIX client only ever
+/// returns plain Musixmatch text, but the exact same browseId returns
+/// per-line timestamped lyrics (`timedLyricsData`) when queried with the
+/// Android app's client identity. Verified live against a real track.
+const CLIENT_NAME_ANDROID: &str = "ANDROID_MUSIC";
+const CLIENT_VERSION_ANDROID: &str = "6.51.53";
 
 // Parâmetros de filtro de busca (identificados na API do YouTube Music).
 const FILTER_SONGS: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
@@ -138,8 +144,39 @@ impl YtMusicClient {
         })
     }
 
-    /// Executa uma chamada POST para um endpoint InnerTube.
+    /// Client context for the Android app identity — see `CLIENT_NAME_ANDROID`.
+    fn context_android(&self) -> Value {
+        json!({
+            "client": {
+                "clientName": CLIENT_NAME_ANDROID,
+                "clientVersion": CLIENT_VERSION_ANDROID,
+                "hl": "pt",
+                "gl": "BR"
+            }
+        })
+    }
+
+    /// Executa uma chamada POST para um endpoint InnerTube, com autenticação
+    /// por cookies quando logado.
     async fn post(&self, endpoint: &str, body: Value) -> YtMusicResult<Value> {
+        self.post_with_auth(endpoint, body, true).await
+    }
+
+    /// Same as `post`, but never attaches this client's cookie-based auth
+    /// headers, even when signed in. Needed for the ANDROID_MUSIC lyrics
+    /// call: InnerTube rejects it with `400 Bad Request` when WEB-style
+    /// `SAPISIDHASH` auth headers are combined with the Android client
+    /// identity — a mismatched client/auth-mechanism combination.
+    async fn post_anonymous(&self, endpoint: &str, body: Value) -> YtMusicResult<Value> {
+        self.post_with_auth(endpoint, body, false).await
+    }
+
+    async fn post_with_auth(
+        &self,
+        endpoint: &str,
+        body: Value,
+        use_auth: bool,
+    ) -> YtMusicResult<Value> {
         let url = format!("{BASE}/{endpoint}?prettyPrint=false");
         let mut req = self
             .http
@@ -148,8 +185,12 @@ impl YtMusicClient {
             .header("Origin", auth::ORIGIN)
             .json(&body);
 
-        // Adiciona cabeçalhos de autenticação quando logado.
-        if let Some(a) = &self.auth {
+        let authenticated = use_auth && self.auth.is_some();
+        if authenticated {
+            let a = self
+                .auth
+                .as_ref()
+                .expect("checked by `authenticated` above");
             req = req
                 .header("Cookie", a.cookie_header.clone())
                 .header("Authorization", a.authorization_header())
@@ -160,7 +201,7 @@ impl YtMusicClient {
         let response = req.send().await.map_err(YtMusicError::Transport)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(classify_status(self.auth.is_some(), status, endpoint));
+            return Err(classify_status(authenticated, status, endpoint));
         }
         response
             .json::<Value>()
@@ -217,39 +258,13 @@ impl YtMusicClient {
     /// Recomendações da tela inicial (`FEmusic_home`): playlists e álbuns.
     ///
     /// Funciona logado (personalizado) ou anônimo (recomendações genéricas).
-    pub async fn get_home(&self) -> YtMusicResult<Vec<Playlist>> {
+    /// Fetches the Home feed, grouped into the same named shelves YouTube
+    /// Music itself shows ("Quick picks", "Mixed for you", "Listen again",
+    /// ...) instead of one flattened list.
+    pub async fn get_home(&self) -> YtMusicResult<Vec<HomeSection>> {
         let body = json!({ "context": self.context(), "browseId": "FEmusic_home" });
         let data = self.post("browse", body).await?;
-
-        let mut renderers = Vec::new();
-        collect_key(&data, "musicTwoRowItemRenderer", &mut renderers);
-
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for r in renderers {
-            let browse_id = r
-                .get("navigationEndpoint")
-                .and_then(|n| n.get("browseEndpoint"))
-                .and_then(|b| b.get("browseId"))
-                .and_then(|b| b.as_str())
-                .unwrap_or("");
-            // Apenas playlists (VL) e álbuns (MPRE) navegáveis; sem duplicatas.
-            if !(browse_id.starts_with("VL") || browse_id.starts_with("MPRE")) {
-                continue;
-            }
-            if !seen.insert(browse_id.to_string()) {
-                continue;
-            }
-            let title = r.get("title").map(join_runs).unwrap_or_default();
-            let subtitle = r.get("subtitle").map(join_runs).unwrap_or_default();
-            out.push(Playlist {
-                browse_id: browse_id.to_string(),
-                title,
-                subtitle,
-                thumbnail: extract_thumbnail(r),
-            });
-        }
-        Ok(out)
+        Ok(parse_home_sections(&data))
     }
 
     /// Obtém as principais faixas de um artista a partir do seu `browseId`.
@@ -551,7 +566,7 @@ impl YtMusicClient {
 
     /// Obtém a letra de uma música a partir do seu `videoId`.
     /// Retorna `None` quando não houver letra disponível.
-    pub async fn get_lyrics(&self, video_id: &str) -> YtMusicResult<Option<String>> {
+    pub async fn get_lyrics(&self, video_id: &str) -> YtMusicResult<Option<Lyrics>> {
         // 1) endpoint "next" -> descobrir a aba de letras (browseId "MPLY...").
         let next_body = json!({ "context": self.context(), "videoId": video_id });
         let next = self.post("next", next_body).await?;
@@ -584,13 +599,24 @@ impl YtMusicClient {
             return Ok(None);
         };
 
-        // 2) browse na aba de letras.
+        // 2a) Tenta letras sincronizadas (timestamps por linha), disponíveis
+        // apenas com a identidade de cliente do app Android — o WEB_REMIX
+        // só retorna o texto plano do Musixmatch para esse mesmo browseId.
+        let android_body = json!({ "context": self.context_android(), "browseId": lyrics_id });
+        if let Ok(data) = self.post_anonymous("browse", android_body).await {
+            let lines = parse_timed_lyrics(&data);
+            if !lines.is_empty() {
+                return Ok(Some(Lyrics::Synced(lines)));
+            }
+        }
+
+        // 2b) Sem letras sincronizadas: volta para o texto plano (WEB_REMIX).
         let body = json!({ "context": self.context(), "browseId": lyrics_id });
         let data = self.post("browse", body).await?;
         if let Some(desc) = find_key(&data, "description") {
             let text = join_runs(desc);
             if !text.is_empty() {
-                return Ok(Some(text));
+                return Ok(Some(Lyrics::Plain(text)));
             }
         }
         Ok(None)

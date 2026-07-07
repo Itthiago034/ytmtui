@@ -119,7 +119,7 @@ impl RepeatMode {
 pub enum Msg {
     SearchResults(SearchResults),
     LibraryPlaylists(Vec<Playlist>),
-    HomePlaylists(Vec<Playlist>),
+    HomeSections(Vec<crate::ytmusic::HomeSection>),
     RadioTracks(Vec<Track>),
     AccountName(Option<String>),
     PlaylistTracks {
@@ -131,7 +131,7 @@ pub enum Msg {
     /// apart from the currently playing one and discarded.
     Lyrics {
         video_id: String,
-        lyrics: Option<String>,
+        lyrics: Option<crate::ytmusic::Lyrics>,
     },
     /// Same rationale as `Lyrics`: the cover art is tagged with the track it
     /// belongs to.
@@ -187,8 +187,9 @@ pub struct App {
     pub artists: Vec<Artist>,
     /// Playlists da biblioteca do usuário logado.
     pub library: Vec<Playlist>,
-    /// Recomendações da tela inicial (playlists/álbuns).
-    pub home: Vec<Playlist>,
+    /// Recomendações da tela inicial, agrupadas nas mesmas seções nomeadas
+    /// que o YouTube Music usa ("Quick picks", "Mixed for you", ...).
+    pub home: Vec<crate::ytmusic::HomeSection>,
     /// videoIds curtidos nesta sessão (para alternar curtir/descurtir).
     pub liked: std::collections::HashSet<String>,
     /// Autoplay: continuar com uma rádio quando a fila termina.
@@ -215,7 +216,7 @@ pub struct App {
     rng_state: u64,
 
     // Extras.
-    pub lyrics: Option<String>,
+    pub lyrics: crate::lyrics::LyricsState,
     pub lyrics_scroll: u16,
     /// Terminal image support detected at startup (Kitty/Sixel/iTerm2, with
     /// a Unicode half-block fallback). `None` until the main loop sets it.
@@ -238,6 +239,10 @@ pub struct App {
     pub busy: bool,
     /// Quadro atual do spinner de carregamento (avança a cada tick).
     pub spinner_frame: usize,
+    /// How often background sync (Home + Library) re-fetches.
+    pub sync_interval: std::time::Duration,
+    /// When the last background sync fired.
+    pub last_synced: std::time::Instant,
 }
 
 impl App {
@@ -326,7 +331,7 @@ impl App {
             shuffle: config.shuffle,
             repeat: RepeatMode::from_config(&config.repeat),
             rng_state: seed,
-            lyrics: None,
+            lyrics: crate::lyrics::LyricsState::None,
             lyrics_scroll: 0,
             picker: None,
             artwork: None,
@@ -336,6 +341,10 @@ impl App {
             loading_audio: false,
             busy: false,
             spinner_frame: 0,
+            // Defends against a hand-edited config value of 0 creating a
+            // hot loop of re-fetches.
+            sync_interval: std::time::Duration::from_secs(config.sync_interval_secs.max(30)),
+            last_synced: std::time::Instant::now(),
         })
     }
 
@@ -404,8 +413,8 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             match client.get_home().await {
-                Ok(pls) => {
-                    let _ = tx.send(Msg::HomePlaylists(pls));
+                Ok(sections) => {
+                    let _ = tx.send(Msg::HomeSections(sections));
                 }
                 Err(error) => {
                     let _ = tx.send(client_error_message(
@@ -417,12 +426,57 @@ impl App {
         });
     }
 
+    /// Periodic background refresh of Home and Library, called from
+    /// `tick()`. Reuses the existing one-shot loaders — no new HTTP call
+    /// shapes — so the only user-visible effect while browsing is the small
+    /// spinner glyph blinking briefly; selection is preserved in
+    /// `drain_messages` rather than reset to the top.
+    pub fn sync_home_and_library(&mut self) {
+        self.load_home();
+        self.load_library(); // already a no-op when unauthenticated.
+    }
+
+    /// Flattened selectable-item count across all Home sections; section
+    /// header rows aren't counted since they aren't selectable.
+    pub fn home_item_count(&self) -> usize {
+        self.home.iter().map(|s| s.items.len()).sum()
+    }
+
+    /// Maps a flattened selection index (as used by `list_state`) back to
+    /// the `Playlist` it refers to.
+    pub fn home_item_at(&self, index: usize) -> Option<&Playlist> {
+        let mut remaining = index;
+        for section in &self.home {
+            if remaining < section.items.len() {
+                return section.items.get(remaining);
+            }
+            remaining -= section.items.len();
+        }
+        None
+    }
+
+    /// Finds the flattened index of the item with the given `browse_id`, if
+    /// still present after a Home refresh. Used to preserve the selection
+    /// across a background sync.
+    pub fn home_flat_index_of(&self, browse_id: &str) -> Option<usize> {
+        let mut flat = 0;
+        for section in &self.home {
+            for item in &section.items {
+                if item.browse_id == browse_id {
+                    return Some(flat);
+                }
+                flat += 1;
+            }
+        }
+        None
+    }
+
     /// Abre a recomendação selecionada na tela inicial.
     pub fn open_selected_home(&mut self) {
         let Some(idx) = self.list_state.selected() else {
             return;
         };
-        let Some(pl) = self.home.get(idx).cloned() else {
+        let Some(pl) = self.home_item_at(idx).cloned() else {
             return;
         };
         self.load_playlist(pl);
@@ -564,6 +618,9 @@ impl App {
             cookies,
             theme: self.theme().name.to_string(),
             username,
+            // Not editable at runtime yet; preserve whatever's on disk
+            // rather than overwriting it with the in-memory Duration.
+            sync_interval_secs: saved.sync_interval_secs,
         }
         .save();
     }
@@ -661,7 +718,7 @@ impl App {
     /// Número de itens na lista principal da seção atual.
     pub fn main_len(&self) -> usize {
         match self.section {
-            Section::Inicio => self.home.len(),
+            Section::Inicio => self.home_item_count(),
             Section::Buscar => self.songs.len(),
             Section::Biblioteca => self.library.len(),
             Section::Playlists => self.playlists.len(),
@@ -813,7 +870,7 @@ impl App {
             return;
         };
         self.current = Some(track.clone());
-        self.lyrics = None;
+        self.lyrics = crate::lyrics::LyricsState::None;
         self.lyrics_scroll = 0;
         self.clear_artwork();
         self.visualizer.reset();
@@ -987,17 +1044,56 @@ impl App {
                 }
                 Msg::LibraryPlaylists(pls) => {
                     self.busy = false;
+                    // A background sync (Feature 3) re-runs this same load
+                    // periodically; preserve the current selection by
+                    // `browse_id` instead of always resetting to the top, or
+                    // background refreshes would jerk the list back to
+                    // index 0 while the user is mid-browse.
+                    let was_empty = self.library.is_empty();
+                    let previous_id = (self.section == Section::Biblioteca)
+                        .then(|| self.list_state.selected())
+                        .flatten()
+                        .and_then(|i| self.library.get(i))
+                        .map(|p| p.browse_id.clone());
                     self.library = pls;
+                    if self.section == Section::Biblioteca {
+                        let new_index = previous_id
+                            .and_then(|id| self.library.iter().position(|p| p.browse_id == id))
+                            .or(if was_empty {
+                                Some(0)
+                            } else {
+                                self.list_state.selected()
+                            })
+                            .map(|i| i.min(self.library.len().saturating_sub(1)));
+                        self.list_state
+                            .select((!self.library.is_empty()).then_some(new_index).flatten());
+                    }
                     self.status = format!(
                         "Library loaded: {} playlist(s). Open Library in the menu.",
                         self.library.len()
                     );
                 }
-                Msg::HomePlaylists(pls) => {
+                Msg::HomeSections(sections) => {
                     self.busy = false;
-                    self.home = pls;
+                    let was_empty = self.home.is_empty();
+                    let previous_id = (self.section == Section::Inicio)
+                        .then(|| self.list_state.selected())
+                        .flatten()
+                        .and_then(|i| self.home_item_at(i))
+                        .map(|p| p.browse_id.clone());
+                    self.home = sections;
                     if self.section == Section::Inicio {
-                        self.list_state.select(Some(0));
+                        let count = self.home_item_count();
+                        let new_index = previous_id
+                            .and_then(|id| self.home_flat_index_of(&id))
+                            .or(if was_empty {
+                                Some(0)
+                            } else {
+                                self.list_state.selected()
+                            })
+                            .map(|i| i.min(count.saturating_sub(1)));
+                        self.list_state
+                            .select((count > 0).then_some(new_index).flatten());
                     }
                 }
                 Msg::RadioTracks(tracks) => {
@@ -1044,7 +1140,16 @@ impl App {
                     // A slow fetch for a track the user has since skipped
                     // past must not overwrite the current track's lyrics.
                     if self.is_current_track(&video_id) {
-                        self.lyrics = lyrics;
+                        use crate::lyrics::LyricsState;
+                        use crate::ytmusic::Lyrics;
+                        self.lyrics = match lyrics {
+                            Some(Lyrics::Synced(lines)) => LyricsState::Synced {
+                                lines,
+                                active: None,
+                            },
+                            Some(Lyrics::Plain(text)) => LyricsState::Plain(text),
+                            None => LyricsState::NotAvailable,
+                        };
                     }
                 }
                 Msg::ArtworkBytes { video_id, bytes } => {
@@ -1102,6 +1207,21 @@ impl App {
                 self.visualizer.decay_idle();
             }
         }
+
+        // Advances the synced-lyrics active line every tick regardless of
+        // section: this is a cheap O(1)/O(log n) index bump (unlike the
+        // visualizer's per-chunk FFT work above), so the Lyrics section is
+        // already showing the right line the instant the user switches to
+        // it mid-song instead of needing one extra tick to catch up.
+        if let crate::lyrics::LyricsState::Synced { lines, active } = &mut self.lyrics {
+            let position_ms = self.player.position().as_millis() as u64;
+            *active = crate::lyrics::advance_active_line(lines, *active, position_ms);
+        }
+
+        if self.last_synced.elapsed() >= self.sync_interval {
+            self.last_synced = std::time::Instant::now();
+            self.sync_home_and_library();
+        }
     }
 }
 
@@ -1148,7 +1268,7 @@ impl App {
             shuffle: false,
             repeat: RepeatMode::Off,
             rng_state: 0x9E3779B97F4A7C15,
-            lyrics: None,
+            lyrics: crate::lyrics::LyricsState::None,
             lyrics_scroll: 0,
             picker: None,
             artwork: None,
@@ -1158,6 +1278,8 @@ impl App {
             loading_audio: false,
             busy: false,
             spinner_frame: 0,
+            sync_interval: std::time::Duration::from_secs(300),
+            last_synced: std::time::Instant::now(),
         }
     }
 }
@@ -1167,6 +1289,150 @@ mod tests {
     use super::*;
     use crate::ytmusic::YtMusicError;
     use reqwest::StatusCode;
+
+    #[test]
+    fn background_home_refresh_preserves_selection_by_browse_id() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.home = vec![crate::ytmusic::HomeSection {
+            title: "Quick picks".to_string(),
+            items: vec![
+                Playlist {
+                    browse_id: "VL1".to_string(),
+                    ..Default::default()
+                },
+                Playlist {
+                    browse_id: "VL2".to_string(),
+                    ..Default::default()
+                },
+            ],
+        }];
+        // Selects "VL2" (flattened index 1).
+        app.list_state.select(Some(1));
+
+        // A background refresh reorders VL2 ahead of VL1.
+        app.tx
+            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+                title: "Quick picks".to_string(),
+                items: vec![
+                    Playlist {
+                        browse_id: "VL2".to_string(),
+                        ..Default::default()
+                    },
+                    Playlist {
+                        browse_id: "VL1".to_string(),
+                        ..Default::default()
+                    },
+                ],
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "selection follows VL2 to its new position"
+        );
+    }
+
+    #[test]
+    fn background_home_refresh_clamps_when_the_selected_item_is_gone() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.home = vec![crate::ytmusic::HomeSection {
+            title: "Quick picks".to_string(),
+            items: vec![
+                Playlist {
+                    browse_id: "VL1".to_string(),
+                    ..Default::default()
+                },
+                Playlist {
+                    browse_id: "VL2".to_string(),
+                    ..Default::default()
+                },
+            ],
+        }];
+        app.list_state.select(Some(1)); // VL2
+
+        // VL2 is gone from the refreshed data.
+        app.tx
+            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+                title: "Quick picks".to_string(),
+                items: vec![Playlist {
+                    browse_id: "VL1".to_string(),
+                    ..Default::default()
+                }],
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "clamps to the nearest valid index instead of resetting to the top"
+        );
+    }
+
+    #[test]
+    fn background_library_refresh_preserves_selection_by_browse_id() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Biblioteca;
+        app.library = vec![
+            Playlist {
+                browse_id: "L1".to_string(),
+                ..Default::default()
+            },
+            Playlist {
+                browse_id: "L2".to_string(),
+                ..Default::default()
+            },
+        ];
+        app.list_state.select(Some(1)); // L2
+
+        app.tx
+            .send(Msg::LibraryPlaylists(vec![
+                Playlist {
+                    browse_id: "L2".to_string(),
+                    ..Default::default()
+                },
+                Playlist {
+                    browse_id: "L1".to_string(),
+                    ..Default::default()
+                },
+            ]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "selection follows L2 to its new position"
+        );
+    }
+
+    #[test]
+    fn first_home_load_still_selects_the_top_item() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        assert!(app.home.is_empty());
+
+        app.tx
+            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+                title: "Quick picks".to_string(),
+                items: vec![Playlist {
+                    browse_id: "VL1".to_string(),
+                    ..Default::default()
+                }],
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "the very first load still selects the top item"
+        );
+    }
 
     #[test]
     fn animation_is_only_needed_while_loading_or_playing() {
@@ -1204,6 +1470,69 @@ mod tests {
             app.artwork.is_none(),
             "stale cover must not outlive playback"
         );
+    }
+
+    fn home_sections() -> Vec<crate::ytmusic::HomeSection> {
+        vec![
+            crate::ytmusic::HomeSection {
+                title: "Quick picks".to_string(),
+                items: vec![
+                    Playlist {
+                        browse_id: "VL1".to_string(),
+                        title: "First".to_string(),
+                        ..Default::default()
+                    },
+                    Playlist {
+                        browse_id: "VL2".to_string(),
+                        title: "Second".to_string(),
+                        ..Default::default()
+                    },
+                ],
+            },
+            crate::ytmusic::HomeSection {
+                title: "Mixed for you".to_string(),
+                items: vec![Playlist {
+                    browse_id: "VL3".to_string(),
+                    title: "Third".to_string(),
+                    ..Default::default()
+                }],
+            },
+        ]
+    }
+
+    #[test]
+    fn home_item_count_sums_across_sections_excluding_headers() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        assert_eq!(app.home_item_count(), 3);
+    }
+
+    #[test]
+    fn home_item_at_flattens_across_section_boundaries() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        assert_eq!(
+            app.home_item_at(0).map(|p| p.browse_id.as_str()),
+            Some("VL1")
+        );
+        assert_eq!(
+            app.home_item_at(1).map(|p| p.browse_id.as_str()),
+            Some("VL2")
+        );
+        assert_eq!(
+            app.home_item_at(2).map(|p| p.browse_id.as_str()),
+            Some("VL3")
+        );
+        assert!(app.home_item_at(3).is_none());
+    }
+
+    #[test]
+    fn home_flat_index_of_finds_items_regardless_of_section() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        assert_eq!(app.home_flat_index_of("VL1"), Some(0));
+        assert_eq!(app.home_flat_index_of("VL3"), Some(2));
+        assert_eq!(app.home_flat_index_of("missing"), None);
     }
 
     #[test]

@@ -57,11 +57,14 @@ usa o `yt-dlp` + `ffmpeg` + `rodio` para resolver e reproduzir o áudio.
 | `event.rs` | Traduz teclas (`crossterm::KeyEvent`) em chamadas de métodos do `App`. |
 | `config.rs` | Configuração persistente em JSON (`~/.config/ytmtui/config.json`). |
 | `theme.rs` | Temas de cores (presets de acento) e helpers de seleção por nome. |
-| `ytmusic/mod.rs` | Cliente HTTP da API InnerTube: busca, playlists, biblioteca, home, artista, rádio, letras, conta e curtir. |
+| `ytmusic/mod.rs` | Cliente HTTP da API InnerTube: busca, playlists, biblioteca, home (em seções), artista, rádio, letras (sincronizadas ou não), conta e curtir. |
 | `ytmusic/auth.rs` | Autenticação por cookies (formato Netscape) + cálculo do `SAPISIDHASH`. |
-| `ytmusic/models.rs` | Modelos de dados: `Track`, `Playlist`, `Artist`, `SearchResults`. |
-| `ytmusic/parse.rs` | Helpers de parsing do JSON aninhado (busca recursiva por chaves, runs, thumbnails, durações, continuações, panel video). |
+| `ytmusic/models.rs` | Modelos de dados: `Track`, `Playlist`, `Artist`, `HomeSection`, `LyricLine`, `Lyrics`, `SearchResults`. |
+| `ytmusic/parse.rs` | Helpers de parsing do JSON aninhado (busca recursiva por chaves, runs, thumbnails, durações, continuações, panel video, letras sincronizadas, seções da Home). |
+| `visualizer.rs` | Analisador de espectro (FFT via `rustfft`) para o visualizador em tempo real da tela Início. |
+| `lyrics.rs` | Estado das letras exibidas na UI (`LyricsState`) e avanço eficiente da linha ativa em letras sincronizadas. |
 | `player/mod.rs` | Player de áudio (thread `rodio` dedicada) + download/remux via `yt-dlp`/`ffmpeg` + cache. |
+| `player/tap.rs` | Intercepta as amostras decodificadas durante a reprodução e as encaminha (sem alterar o áudio) para o `visualizer.rs`. |
 | `ui/mod.rs` | Root layout (wide/narrow responsive split), search input line and status/shortcut bar. |
 | `ui/nav.rs` | Navigation column: app identity, account state and section menu (wide layout). |
 | `ui/main_panel.rs` | Painel principal (listas de músicas/playlists/artistas/fila, letra, ajuda, início). |
@@ -94,9 +97,12 @@ além de uma **thread dedicada** para áudio.
 
 ### Mensagens (`Msg`)
 
-`SearchResults`, `LibraryPlaylists`, `HomePlaylists`, `RadioTracks`,
+`SearchResults`, `LibraryPlaylists`, `HomeSections`, `RadioTracks`,
 `AccountName`, `PlaylistTracks`, `Lyrics`, `ArtworkBytes`, `AudioReady`,
 `Status`, `Error`. Cada task de background termina enviando uma dessas.
+`Lyrics`, `ArtworkBytes` e `AudioReady` carregam o `video_id` da faixa junto
+com o payload, para que uma resposta atrasada de uma faixa já pulada seja
+descartada em vez de sobrescrever o estado da faixa atual.
 
 ---
 
@@ -162,6 +168,55 @@ No boot, três tasks populam: `get_home` (`FEmusic_home`), `get_library_playlist
 `f` → `App::like_current` alterna com base no conjunto `liked` da sessão →
 `YtMusicClient::rate_song` (`like/like` ou `like/removelike`). Requer login.
 
+### 4.7 Letras sincronizadas
+
+`get_lyrics` primeiro descobre o `browseId` da aba de letras via o endpoint
+`next` (cliente `WEB_REMIX`, igual às demais chamadas). Em seguida:
+
+1. Tenta o `browse` desse mesmo `browseId` com a identidade de cliente do
+   app **Android** (`ANDROID_MUSIC`) — a única forma conhecida de obter
+   letras com timestamp por linha (`timedLyricsData`, com
+   `startTimeMilliseconds`/`endTimeMilliseconds`). Se presentes, retorna
+   `Lyrics::Synced(Vec<LyricLine>)`.
+2. Caso contrário, cai para o caminho original: `browse` com `WEB_REMIX`,
+   extraindo o texto plano (`musicDescriptionShelfRenderer.description`,
+   geralmente via Musixmatch) como `Lyrics::Plain(String)`.
+
+Na UI, `App::tick()` avança a linha ativa (`lyrics::advance_active_line`) a
+cada iteração, comparando `player.position()` com os timestamps — o cursor
+só anda para frente no caso comum (reprodução monótona) e usa busca binária
+apenas ao detectar um retrocesso (seek ou repetição da faixa). `draw_lyrics`
+em `ui/main_panel.rs` despacha para o renderizador certo conforme o
+`LyricsState` atual.
+
+### 4.8 Início em seções
+
+`get_home()` não achata mais a resposta do `FEmusic_home` numa lista só:
+agrupa por `musicCarouselShelfRenderer` (as mesmas prateleiras nomeadas que
+o próprio YouTube Music mostra — "Quick picks", "Mixed for you" etc.),
+descartando prateleiras sem título ou que fiquem vazias após o filtro de
+itens navegáveis. A deduplicação de itens é **por prateleira**, não global:
+o mesmo álbum/playlist pode aparecer legitimamente em mais de uma seção.
+
+Na UI, `draw_home_sections` (em `ui/main_panel.rs`) intercala uma linha de
+cabeçalho (não selecionável) por seção com os itens dela numa única lista
+rolável; como isso desloca o índice real de seleção, um `ListState`
+"sombra" remapeia a seleção (`app.list_state`, sobre itens apenas) para a
+linha correta nessa lista intercalada antes de renderizar.
+
+### 4.9 Sincronização em segundo plano
+
+`App::tick()` verifica a cada iteração se `last_synced.elapsed() >=
+sync_interval` (configurável via `sync_interval_secs`, mínimo efetivo de
+30s); quando vence, chama `sync_home_and_library()`, que apenas reexecuta
+`load_home()`/`load_library()` — as mesmas chamadas do carregamento inicial,
+sem endpoints novos. Como isso pode disparar enquanto o usuário navega a
+própria seção, `drain_messages()` procura o `browse_id` do item selecionado
+antes de substituir a lista e tenta reencontrá-lo na lista nova, só caindo
+para o topo (índice 0) no primeiríssimo carregamento (lista antes vazia) ou
+recuando para o índice válido mais próximo se o item selecionado tiver
+desaparecido.
+
 ---
 
 ## 5. Estado da UI
@@ -172,14 +227,22 @@ leem o `App` (recebem `&App`/`&mut App`). Destaques:
 - **Seções** (`Section`): Início, Buscar, Biblioteca, Playlists, Artistas, Fila,
   Letra, Ajuda — a ordem é a exibida no menu.
 - **Foco** (`Focus`): `Sidebar` ou `Main`, controla para onde vão as setas.
-- **Listas**: `songs`, `playlists`, `artists`, `library`, `home`, `queue` +
-  `list_state` (seleção) reaproveitado entre seções.
+- **Listas**: `songs`, `playlists`, `artists`, `library`, `home` (agora
+  `Vec<HomeSection>`, não mais uma lista achatada), `queue` + `list_state`
+  (seleção) reaproveitado entre seções. Helpers `home_item_count`,
+  `home_item_at` e `home_flat_index_of` traduzem entre o índice achatado
+  usado por `list_state` e a estrutura em seções.
 - **Reprodução**: `queue`, `queue_index`, `current`, `next_index`, `shuffle`,
   `repeat`, `autoplay`, `liked`.
+- **Letras**: `lyrics: lyrics::LyricsState` (`None`/`NotAvailable`/
+  `Plain(String)`/`Synced { lines, active }`) + `lyrics_scroll` (rolagem
+  manual, usada só no caso `Plain`).
 - **Aparência**: `theme_index` (ver `theme.rs`), `account_name`.
 - **Album art**: `picker` (terminal image protocol detected at startup —
   Kitty/Sixel/iTerm2 or half-block fallback) + `artwork` (cover prepared for
   the current track, rendered by `ratatui-image`).
+- **Sincronização**: `sync_interval` (`Duration`, de `config.sync_interval_secs`)
+  e `last_synced` (`Instant`), verificados a cada `tick()`.
 
 ---
 
@@ -187,7 +250,8 @@ leem o `App` (recebem `&App`/`&mut App`). Destaques:
 
 ```json
 { "volume": 0.8, "shuffle": false, "repeat": "off",
-  "cookies": null, "theme": "Roxo", "username": null }
+  "cookies": null, "theme": "Roxo", "username": null,
+  "sync_interval_secs": 300 }
 ```
 
 `save_config` é chamado ao sair e ao trocar de tema. Ele **nunca sobrescreve**
@@ -236,4 +300,6 @@ existente e preserva o que já havia).
 Crates principais: `ratatui`+`crossterm` (TUI), `tokio` (async), `reqwest`
 (HTTP), `rodio` (áudio), `serde`/`serde_json` (JSON), `image` +
 `ratatui-image` (capa via Kitty/Sixel/iTerm2 com fallback em meio-blocos),
-`sha1` (SAPISIDHASH), `dirs` (paths), `anyhow` (erros).
+`rustfft` (FFT do visualizador de espectro), `unicode-width` (truncamento e
+alinhamento cientes de largura visual, para CJK/emoji), `sha1` (SAPISIDHASH),
+`dirs` (paths), `anyhow` (erros).

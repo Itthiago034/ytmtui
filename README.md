@@ -4,261 +4,292 @@
 [![Release](https://img.shields.io/github/v/release/Itthiago034/ytmtui?include_prereleases&sort=semver)](https://github.com/Itthiago034/ytmtui/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**ytmtui** é um cliente de terminal (TUI – *Terminal User Interface*) para o
-**YouTube Music**, escrito em **Rust** com a biblioteca **[Ratatui](https://ratatui.rs)**.
-Inspirado em clientes como o *spotify-tui*, ele permite **buscar, navegar e ouvir
-músicas do YouTube Music direto do terminal**, sem precisar de login.
+**English** · [Português](README.pt-BR.md)
+
+**ytmtui** is a terminal client (TUI – *Terminal User Interface*) for
+**YouTube Music**, written in **Rust** with the **[Ratatui](https://ratatui.rs)**
+library. Inspired by clients like *spotify-tui*, it lets you **search,
+browse, and play music from YouTube Music straight from the terminal**,
+without needing to sign in.
 
 ```
- ♫ ytmtui        ┌ Buscar ─────────────────────────────────────────────┐
+ ♫ ytmtui        ┌ Search ─────────────────────────────────────────────┐
 ─────────────────│ 🔍 coldplay yellow                                  │
   T  Thiago S.   └─────────────────────────────────────────────────────┘
-                 ┌ Resultados da busca ────────────────────────────────┐
+                 ┌ Search results ─────────────────────────────────────┐
 ┌ Menu ─────────┐│ ▶  1  Yellow — Coldplay                        4:27 │
-│ 🔍 Buscar     ││    2  Viva La Vida — Coldplay                  4:03 │
-│ 📚 Biblioteca ││    3  The Scientist — Coldplay                 5:10 │
+│ 🔍 Search     ││    2  Viva La Vida — Coldplay                  4:03 │
+│ 📚 Library    ││    3  The Scientist — Coldplay                 5:10 │
 │ 🎵 Playlists  ││                                                     │
-│ 👤 Artistas   ││                                                     │
-│ 📃 Fila       ││                                                     │
-│ 📝 Letra      ││                                                     │
-│ ❓ Ajuda      ││                                                     │
+│ 👤 Artists    ││                                                     │
+│ 📃 Queue      ││                                                     │
+│ 📝 Lyrics     ││                                                     │
+│ ❓ Help       ││                                                     │
 └───────────────┘└─────────────────────────────────────────────────────┘
 ┌ ▶ Player ───────────────────────────────────────────────────────────────┐
 │ ▀▀▀▀▀  Yellow                                                            │
 │ ▀▀▀▀▀  Coldplay  •  Parachutes                                           │
 │ ▀▀▀▀▀  ██████████░░░░░░░░░░░░  1:45 / 4:27                                │
-│        ▶ tocando  🔊 ████████░░ 80%  🔀 off  🔁 off  🎨 Roxo             │
+│        ▶ playing  🔊 ████████░░ 80%  🔀 off  🔁 off  🎨 Purple           │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Sumário
+## Table of Contents
 
-- [Instalação rápida](#-instalação-rápida)
-- [Funcionalidades](#-funcionalidades)
-- [Requisitos](#-requisitos)
-- [Compilar do código-fonte](#-compilar-do-código-fonte)
-- [Atalhos de teclado](#️-atalhos-de-teclado)
-- [Como usar](#-como-usar)
-- [Autenticação e cookies](#-autenticação-e-cookies)
-- [Personalização](#-personalização)
-- [Arquitetura do projeto](#️-arquitetura-do-projeto)
-- [Desenvolvimento](#-desenvolvimento)
-- [Aviso legal e licença](#️-aviso-legal)
+- [Screenshots](#-screenshots)
+- [Quick install](#-quick-install)
+- [Features](#-features)
+- [Requirements](#-requirements)
+- [Building from source](#-building-from-source)
+- [Keyboard shortcuts](#️-keyboard-shortcuts)
+- [How to use](#-how-to-use)
+- [Authentication and cookies](#-authentication-and-cookies)
+- [Customization](#-customization)
+- [Troubleshooting](#-troubleshooting)
+- [Project architecture](#️-project-architecture)
+- [Development](#-development)
+- [Legal notice and license](#️-legal-notice)
 
 ---
 
-## 🚀 Instalação rápida
+## 📸 Screenshots
 
-A forma mais rápida de instalar, sem precisar do Rust instalado — baixa o
-binário pronto da [última release](https://github.com/Itthiago034/ytmtui/releases)
-para Linux (x86_64) ou macOS (Apple Silicon):
+| Home (visualizer + sections) | Synced lyrics |
+|---|---|
+| ![ytmtui's home screen with the spectrum visualizer and sections](docs/screenshots/home.png) | ![Synced lyrics highlighting the current line](docs/screenshots/lyrics-synced.png) |
+
+| Search | Help |
+|---|---|
+| ![Search results for songs, artists, and playlists](docs/screenshots/search.png) | ![Help screen with all keyboard shortcuts](docs/screenshots/help.png) |
+
+---
+
+## 🚀 Quick install
+
+The fastest way to install, no Rust toolchain required — downloads the
+prebuilt binary from the [latest release](https://github.com/Itthiago034/ytmtui/releases)
+for Linux (x86_64) or macOS (Apple Silicon):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Itthiago034/ytmtui/master/scripts/install.sh | bash
 ```
 
-O script detecta seu sistema, instala o binário em `~/.local/bin`, e avisa se
-faltar alguma dependência de tempo de execução (`yt-dlp`, `ffmpeg`, `deno` —
-veja [Requisitos](#-requisitos)). Depois é só rodar `ytmtui`.
+The script detects your system, installs the binary to `~/.local/bin`, and
+warns about any missing runtime dependency (`yt-dlp`, `ffmpeg`, `deno` — see
+[Requirements](#-requirements)). Then just run `ytmtui`.
 
-> Outro sistema, ou prefere compilar você mesmo? Veja
-> [Compilar do código-fonte](#-compilar-do-código-fonte).
-
----
-
-## ✨ Funcionalidades
-
-- 🔍 **Busca** de músicas, artistas e playlists no YouTube Music (sem autenticação).
-  As três sub-buscas rodam **em paralelo** para menor latência.
-- 🎵 **Reprodução** de músicas com streaming (via `yt-dlp`). O áudio `m4a`/AAC é
-  **remuxado** para ADTS (`ffmpeg -c copy`, sem re-encode), garantindo playback
-  confiável e rápido.
-- 🔐 **Login automático**: detecta os cookies em `~/.config/ytmtui/cookies.txt`,
-  mostra o **nome da sua conta** e as **suas playlists** (seção 📚 Biblioteca).
-- 🏠 **Início/Recomendados** (feed `FEmusic_home`) personalizado ao seu perfil,
-  com um **visualizador de espectro em tempo real** (FFT real sobre o áudio
-  tocando, estilo *Cava*) acima da lista de recomendações.
-- 👤 **Página do artista**: `Enter` em um artista lista suas principais faixas.
-- 📻 **Rádio/autoplay**: ao terminar a fila, continua com faixas relacionadas.
-- ➕ **Fila**: `a` adiciona a faixa selecionada à fila sem interromper a atual.
-- 💚 **Curtir/descurtir** a faixa atual (`f`) na sua conta.
-- 🎨 **Temas de cores** (Roxo, YT Vermelho, Verde, Oceano, Âmbar, Rosa) trocáveis
-  em tempo real com a tecla `t`; a escolha é lembrada entre sessões.
-- ⚡ **Cache + prefetch**: a próxima faixa da fila é pré-baixada e faixas já ouvidas
-  tocam instantaneamente ao repetir.
-- ⏯️ **Controles de player**: play/pause, próxima, anterior, parar, **seek (±5s)**, volume.
-- 🔀 **Shuffle** e 🔁 **repeat** (off / todos / uma faixa).
-- 📊 **Barra de progresso** com tempo atual/total.
-- 🖼️ **Album art** rendered natively in the terminal (Kitty/Sixel/iTerm2 image protocols), with a Unicode half-block fallback elsewhere.
-- 📃 **Fila de reprodução** com avanço automático e **paginação** de playlists longas.
-- 📝 **Letras** exibidas quando disponíveis.
-- ⚙️ **Configuração persistente** (volume, shuffle e repeat são lembrados entre sessões).
-- ⌨️ **Navegação por teclado** no estilo *vim* (`h/j/k/l`) ou setas.
-- 🧩 **Interface em painéis** (menu lateral, lista principal e player).
-- ⏳ **Spinner de carregamento** durante buscas, playlists e downloads.
-- 🩺 **Checagem de dependências** no início, avisando se faltar `yt-dlp`/`ffmpeg`.
+> On a different platform, or want to build it yourself? See
+> [Building from source](#-building-from-source).
 
 ---
 
-## 📦 Requisitos
+## ✨ Features
 
-Antes de compilar/rodar, você precisa ter instalado:
+- 🔍 **Search** for songs, artists, and playlists on YouTube Music (no
+  authentication needed). The three sub-searches run **in parallel** for
+  lower latency.
+- 🎵 **Playback** with streaming (via `yt-dlp`). `m4a`/AAC audio is
+  **remuxed** to ADTS (`ffmpeg -c copy`, no re-encode), for reliable, fast
+  playback.
+- 🔐 **Automatic sign-in**: detects cookies at `~/.config/ytmtui/cookies.txt`,
+  shows your **account name** and **your playlists** (📚 Library section).
+- 🏠 **Home organized into sections** — "Quick picks", "Mixed for you", and
+  others, exactly as YouTube Music itself groups your recommendations —
+  with a **real-time spectrum visualizer** (real FFT over the audio
+  playing, Cava-style) above the sections.
+- 🎤 **Synced lyrics** (karaoke-style): when available, the current line is
+  highlighted and the view auto-scrolls with the song. When YouTube Music
+  only has untimed lyrics (Musixmatch), the app shows plain text with
+  manual scroll (`j`/`k`).
+- 🔄 **Background sync**: Home and Library refresh themselves periodically
+  (every 5 minutes by default, configurable) — whatever you like/follow on
+  another device shows up without restarting.
+- 👤 **Artist page**: `Enter` on an artist lists their top tracks.
+- 📻 **Radio/autoplay**: continues with related tracks once the queue ends.
+- ➕ **Queue**: `a` adds the selected track to the queue without
+  interrupting the current one.
+- 💚 **Like/unlike** the current track (`f`) on your account.
+- 🎨 **Color themes** (Purple, YT Red, Green, Ocean, Amber, Pink) switchable
+  in real time with `t`; the choice is remembered across sessions.
+- ⚡ **Cache + prefetch**: the queue's next track is pre-downloaded, and
+  already-played tracks play back instantly on repeat.
+- ⏯️ **Player controls**: play/pause, next, previous, stop, **seek (±5s)**,
+  volume.
+- 🔀 **Shuffle** and 🔁 **repeat** (off / all / one track).
+- 📊 **Progress bar** with current/total time.
+- 🖼️ **Album art** rendered natively in the terminal (Kitty/Sixel/iTerm2
+  image protocols), with a Unicode half-block fallback elsewhere.
+- 📃 **Playback queue** with automatic advance and **pagination** of long
+  playlists.
+- ⚙️ **Persistent configuration** (volume, shuffle, repeat, and the sync
+  interval are remembered across sessions).
+- ⌨️ **Keyboard navigation** in *vim* style (`h/j/k/l`) or arrow keys.
+- 🧩 **Panel-based interface** (sidebar menu, main list, and player).
+- ⏳ **Loading spinner** during searches, playlists, and downloads.
+- 🩺 **Dependency check** at startup, warning if `yt-dlp`/`ffmpeg` is missing.
 
-| Dependência | Para quê | Instalação |
+---
+
+## 📦 Requirements
+
+Before building/running, you'll need:
+
+| Dependency | For | Install |
 |-------------|----------|------------|
-| **Rust** (1.75+) e Cargo | compilar o projeto | https://rustup.rs |
-| **yt-dlp** | resolver/baixar o áudio das músicas | `pip install yt-dlp` |
-| **deno** | runtime JS exigido por versões recentes do yt-dlp | https://deno.land |
-| **ffmpeg** | remuxa o `m4a`/AAC para ADTS antes de tocar (playback confiável) | `apt install ffmpeg` / `brew install ffmpeg` |
-| **ALSA** (Linux) | saída de áudio | `apt install libasound2-dev` |
+| **Rust** (1.75+) and Cargo | building the project | https://rustup.rs |
+| **yt-dlp** | resolving/downloading song audio | `pip install yt-dlp` |
+| **deno** | JS runtime required by recent yt-dlp versions | https://deno.land |
+| **ffmpeg** | remuxes `m4a`/AAC to ADTS before playback (reliability) | `apt install ffmpeg` / `brew install ffmpeg` |
+| **ALSA** (Linux) | audio output | `apt install libasound2-dev` |
 
-> No macOS e Windows a saída de áudio funciona nativamente (CoreAudio / WASAPI),
-> não sendo necessário o ALSA.
+> On macOS and Windows, audio output works natively (CoreAudio / WASAPI), so
+> ALSA isn't needed.
 
 ---
 
-## 🔧 Compilar do código-fonte
+## 🔧 Building from source
 
-Precisa de outra plataforma (Windows, Linux ARM), quer testar uma mudança, ou
-simplesmente prefere compilar você mesmo:
+Need another platform (Windows, Linux ARM), want to test a change, or simply
+prefer to build it yourself:
 
 ```bash
-# 1. Clone o repositório
+# 1. Clone the repository
 git clone https://github.com/Itthiago034/ytmtui.git
 cd ytmtui
 
-# 2. Compile em modo release (recomendado)
+# 2. Build in release mode (recommended)
 cargo build --release
 
-# 3. Execute
+# 3. Run
 ./target/release/ytmtui
 
-# — ou, para desenvolvimento —
+# — or, for development —
 cargo run
 ```
 
-### Instalar como comando (`ytmtui`)
+### Install as a command (`ytmtui`)
 
-Para instalar o binário no seu `PATH` (`~/.cargo/bin`):
+To install the binary onto your `PATH` (`~/.cargo/bin`):
 
 ```bash
 cargo install --path .
 ```
 
-Depois é só rodar `ytmtui` de qualquer lugar.
+Then just run `ytmtui` from anywhere.
 
 ---
 
-## ⌨️ Atalhos de teclado
+## ⌨️ Keyboard shortcuts
 
-### Navegação
-| Tecla | Ação |
+### Navigation
+| Key | Action |
 |-------|------|
-| `↑` / `↓` ou `k` / `j` | Mover seleção para cima/baixo |
-| `←` / `→` ou `h` / `l` | Alternar entre o menu lateral e a lista |
-| `Tab` | Alternar o foco (menu ↔ lista) |
-| `Enter` | Tocar a música / abrir a playlist / abrir o artista |
-| `a` | Adicionar a faixa selecionada à fila |
+| `↑` / `↓` or `k` / `j` | Move selection up/down |
+| `←` / `→` or `h` / `l` | Switch between the sidebar menu and the list |
+| `Tab` | Toggle focus (menu ↔ list) |
+| `Enter` | Play the song / open the playlist / open the artist |
+| `a` | Add the selected track to the queue |
 
-### Busca
-| Tecla | Ação |
+### Search
+| Key | Action |
 |-------|------|
-| `/` | Abrir o campo de busca |
-| *(digite)* + `Enter` | Executar a busca |
-| `Esc` | Cancelar a busca |
+| `/` | Open the search field |
+| *(type)* + `Enter` | Run the search |
+| `Esc` | Cancel the search |
 
-### Reprodução
-| Tecla | Ação |
+### Playback
+| Key | Action |
 |-------|------|
-| `Espaço` | Play / Pause |
-| `n` | Próxima faixa |
-| `p` | Faixa anterior |
-| `[` / `]` | Retroceder / avançar 5 segundos |
-| `z` | Alternar reprodução aleatória (shuffle) |
-| `r` | Alternar modo de repetição (off / todos / uma) |
-| `f` | Curtir / descurtir a faixa atual (requer conta conectada) |
-| `s` | Parar |
-| `+` / `=` | Aumentar volume |
-| `-` / `_` | Diminuir volume |
+| `Space` | Play / Pause |
+| `n` | Next track |
+| `p` | Previous track |
+| `[` / `]` | Seek back / forward 5 seconds |
+| `z` | Toggle shuffle |
+| `r` | Cycle repeat mode (off / all / one) |
+| `f` | Like / unlike the current track (requires a signed-in account) |
+| `s` | Stop |
+| `+` / `=` | Volume up |
+| `-` / `_` | Volume down |
 
-### Aparência
-| Tecla | Ação |
+### Appearance
+| Key | Action |
 |-------|------|
-| `t` | Trocar o tema de cores (salvo automaticamente) |
+| `t` | Cycle the color theme (saved automatically) |
 
-### Geral
-| Tecla | Ação |
+### General
+| Key | Action |
 |-------|------|
-| `?` | Abrir a tela de ajuda |
-| `q` ou `Ctrl+C` | Sair |
+| `?` | Open the help screen |
+| `q` or `Ctrl+C` | Quit |
 
 ---
 
-## 🧭 Como usar
+## 🧭 How to use
 
-1. Pressione `/`, digite o nome de uma música ou artista e tecle `Enter`.
-2. Use `j`/`k` (ou setas) para navegar pelos resultados e `Enter` para tocar.
-   A lista de resultados vira a **fila de reprodução** e a próxima música toca
-   automaticamente ao final.
-3. Acesse **🎵 Playlists** ou **👤 Artistas** no menu lateral para ver esses
-   resultados. Em *Playlists*, pressione `Enter` para carregar as faixas.
-4. Veja a **📝 Letra** da música atual na seção correspondente
-   (use `j`/`k` para rolar).
-5. Acompanhe a música na barra inferior do **Player**, com capa, progresso e volume.
+1. Press `/`, type a song or artist name, and hit `Enter`.
+2. Use `j`/`k` (or arrows) to navigate results and `Enter` to play. The
+   results list becomes the **playback queue**, and the next song plays
+   automatically once one ends.
+3. Access **🎵 Playlists** or **👤 Artists** in the sidebar to see those
+   results. In *Playlists*, press `Enter` to load the tracks.
+4. See the current track's **📝 Lyrics** in its section (use `j`/`k` to
+   scroll the plain-text fallback; synced lyrics auto-scroll on their own).
+5. Follow along on the **Player** bar at the bottom, with cover art,
+   progress, and volume.
 
 ---
 
-## 🔑 Autenticação e cookies
+## 🔑 Authentication and cookies
 
-O ytmtui acessa sua biblioteca do YouTube Music através de um arquivo de
-cookies (formato Netscape). Ele **nunca** pede ou armazena sua senha. O
-caminho do arquivo é resolvido nesta ordem: variável `YTM_COOKIES` → campo
-`cookies` do `config.json` → `~/.config/ytmtui/cookies.txt` (padrão).
+ytmtui accesses your YouTube Music library through a cookie file (Netscape
+format). It **never** asks for or stores your password. The file path is
+resolved in this order: `YTM_COOKIES` env var → `cookies` field in
+`config.json` → `~/.config/ytmtui/cookies.txt` (default).
 
-### Entrar com sua conta (playlists, curtidas, recomendações)
+### Signing in (playlists, likes, recommendations)
 
-1. Faça login em [music.youtube.com](https://music.youtube.com) no seu
-   navegador.
-2. Gere/atualize o arquivo local de cookies:
+1. Sign in at [music.youtube.com](https://music.youtube.com) in your
+   browser.
+2. Generate/refresh the local cookie file:
 
    ```bash
-   ./scripts/refresh-cookies.sh brave   # ou: firefox
+   ./scripts/refresh-cookies.sh brave   # or: firefox
    ```
 
-   O script escreve o novo arquivo de forma atômica, com permissão `600`. Se
-   a exportação falhar, o arquivo anterior permanece intacto.
-3. Reinicie o ytmtui e abra **📚 Biblioteca** — uma sessão válida mostra o
-   nome da conta e as playlists privadas.
+   The script writes the new file atomically, with `600` permissions. If
+   the export fails, the previous file stays intact.
+3. Restart ytmtui and open **📚 Library** — a valid session shows your
+   account name and private playlists.
 
-Um arquivo de cookies inválido inicia o app em modo anônimo. Um erro HTTP
-`401`/`403` numa chamada autenticada marca a sessão como expirada e limpa só
-os dados da conta — busca, playlists públicas e letras continuam funcionando
-normalmente. Rode o script de novo e reinicie para entrar de novo.
+An invalid cookie file starts the app in anonymous mode. An HTTP `401`/`403`
+on an authenticated call marks the session as expired and clears only
+account data — search, public playlists, and lyrics keep working normally.
+Run the script again and restart to sign in again.
 
-### Contornando o bloqueio anti-bot do YouTube
+### Working around YouTube's anti-bot block
 
-Em alguns ambientes/IPs (por exemplo, servidores em *datacenters*), o YouTube
-pode exigir verificação ("*Sign in to confirm you're not a bot*") e bloquear a
-resolução do stream pelo `yt-dlp`. O mesmo arquivo de cookies resolve isso —
-basta apontar para ele com `YTM_COOKIES`, mesmo sem usar a conta pra biblioteca:
+In some environments/IPs (e.g. datacenter servers), YouTube may require
+verification ("*Sign in to confirm you're not a bot*") and block `yt-dlp`
+from resolving the stream. The same cookie file fixes this — just point to
+it with `YTM_COOKIES`, even without using the account for the library:
 
 ```bash
-export YTM_COOKIES="/caminho/para/cookies.txt"
+export YTM_COOKIES="/path/to/cookies.txt"
 ./target/release/ytmtui
 ```
 
-> **Busca, playlists e letras funcionam normalmente sem cookies** — só a
-> reprodução do áudio pode exigi-los em ambientes bloqueados. Em máquinas
-> pessoais (IP residencial), geralmente **não** é necessário.
+> **Search, playlists, and lyrics work normally without cookies** — only
+> audio playback may require them in blocked environments. On personal
+> machines (residential IP), it's usually **not** needed.
 
 ---
 
-## 🎨 Personalização
+## 🎨 Customization
 
-As preferências ficam em **`~/.config/ytmtui/config.json`** (Linux) e podem ser
-editadas à mão:
+Preferences live in **`~/.config/ytmtui/config.json`** (Linux) and can be
+hand-edited:
 
 ```json
 {
@@ -267,93 +298,117 @@ editadas à mão:
   "repeat": "off",
   "cookies": null,
   "theme": "Roxo",
-  "username": null
+  "username": null,
+  "sync_interval_secs": 300
 }
 ```
 
-- **`theme`** — tema de cores. Valores: `Roxo`, `YT Vermelho`, `Verde Spotify`,
-  `Oceano`, `Âmbar`, `Rosa`. Também alternável com a tecla `t` dentro do app.
-- **`username`** — nome de exibição personalizado na barra lateral. Se `null`, o
-  app usa o nome real da sua conta do YouTube Music.
-- **`cookies`** — caminho do arquivo de cookies (opcional; por padrão o app usa
+- **`theme`** — color theme. Values: `Roxo`, `YT Vermelho`, `Verde Spotify`,
+  `Oceano`, `Âmbar`, `Rosa`. Also switchable with `t` inside the app.
+- **`username`** — custom display name in the sidebar. If `null`, the app
+  uses your real YouTube Music account name.
+- **`cookies`** — path to the cookie file (optional; the app defaults to
   `~/.config/ytmtui/cookies.txt`).
+- **`sync_interval_secs`** — interval, in seconds, between automatic
+  background refreshes of Home and Library (default: `300` = 5 minutes).
+  Very low values are raised to a 30s minimum.
 
 ---
 
-## 🏗️ Arquitetura do projeto
+## 🩺 Troubleshooting
+
+Installation, expired cookies, YouTube's anti-bot block, no audio output,
+album art not showing — full step-by-step guide in
+**[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)**.
+
+---
+
+## 🏗️ Project architecture
 
 ```
 src/
-├── main.rs            # Ponto de entrada: terminal + laço de eventos
-├── lib.rs             # Exposição dos módulos (permite testes/examples)
-├── app.rs             # Estado central e coordenação das tasks assíncronas
+├── main.rs            # Entry point: terminal setup + event loop
+├── lib.rs             # Module exposure (enables tests/examples)
+├── app.rs              # Central state and async task coordination
 ├── app/
-│   └── authentication.rs # Resolução do caminho de cookies e estado de sessão
-├── config.rs          # Configuração persistente (volume, shuffle, repeat, cookies, tema)
-├── theme.rs           # Temas de cores (presets de acento) da interface
-├── event.rs           # Tratamento das teclas → ações
-├── visualizer.rs       # Analisador de espectro (FFT) do visualizador da tela Início
+│   └── authentication.rs # Cookie path resolution and session state
+├── config.rs           # Persistent configuration (volume, shuffle, repeat, cookies, theme)
+├── theme.rs             # Color themes (accent presets) for the UI
+├── event.rs             # Key handling → actions
+├── visualizer.rs        # Spectrum analyzer (FFT) for the Home visualizer
+├── lyrics.rs             # UI-facing lyrics state and synced-line advance
 ├── ytmusic/
-│   ├── mod.rs         # Cliente da API interna (InnerTube), busca, biblioteca e conta
-│   ├── auth.rs        # Autenticação por cookies (SAPISIDHASH)
-│   ├── models.rs      # Modelos: Track, Playlist, Artist, SearchResults
-│   └── parse.rs       # Helpers de parsing do JSON aninhado da API
+│   ├── mod.rs          # Internal API client (InnerTube): search, library, account
+│   ├── auth.rs          # Cookie-based authentication (SAPISIDHASH)
+│   ├── models.rs        # Models: Track, Playlist, Artist, HomeSection, Lyrics, SearchResults
+│   └── parse.rs         # Parsing helpers for the API's nested JSON
 ├── player/
-│   ├── mod.rs         # Player de áudio (rodio) + download via yt-dlp
-│   └── tap.rs         # Intercepta amostras decodificadas para o visualizador
+│   ├── mod.rs           # Audio player (rodio) + download via yt-dlp
+│   └── tap.rs            # Intercepts decoded samples for the visualizer
 └── ui/
-    ├── mod.rs         # Root layout (wide/narrow), search input and status bar
-    ├── nav.rs         # Navigation column (identity, account, sections)
-    ├── main_panel.rs  # Main list panel (tracks/playlists/artists/queue/lyrics/help)
-    └── now_playing.rs # Compact playback summary (track line + progress)
+    ├── mod.rs           # Root layout (wide/narrow), search input and status bar
+    ├── nav.rs            # Navigation column (identity, account, sections)
+    ├── main_panel.rs     # Main list panel (tracks/playlists/artists/queue/lyrics/help)
+    └── now_playing.rs    # Compact playback summary (track line + progress)
 ```
 
-### Detalhes técnicos
-- **API InnerTube**: as chamadas usam a API interna
-  (`music.youtube.com/youtubei/v1/*`) com o cliente `WEB_REMIX`. Busca/letras
-  funcionam sem cookies; a biblioteca e o nome da conta usam autenticação por
-  cookies (`SAPISIDHASH`).
-- **Concorrência**: a interface roda no laço principal (síncrono, via `crossterm`),
-  enquanto buscas, letras, download de capas e resolução de áudio rodam em
-  *tasks* do **Tokio**, comunicando-se com a UI por um canal `mpsc`.
-- **Áudio**: a `OutputStream` do **rodio** (que não é `Send`) roda em uma thread
-  dedicada; o `yt-dlp` baixa a melhor faixa de áudio, que é **remuxada** para
-  ADTS antes de ser decodificada e reproduzida.
+### Technical details
+- **InnerTube API**: calls use the internal API
+  (`music.youtube.com/youtubei/v1/*`) with the `WEB_REMIX` client.
+  Search/lyrics work without cookies; the library and account name use
+  cookie-based authentication (`SAPISIDHASH`).
+- **Synced lyrics**: the same lyrics call is repeated with the Android
+  app's client identity (`ANDROID_MUSIC`), which exposes per-line
+  timestamps when available; without them, it falls back to plain text
+  (`WEB_REMIX`, via Musixmatch).
+- **Sectioned Home**: `get_home()` groups the response by the named
+  shelves (`musicCarouselShelfRenderer`) YouTube Music itself uses, instead
+  of flattening everything into one list.
+- **Background sync**: `App::tick()` re-runs the same Home/Library loads
+  every `sync_interval_secs`, preserving the current selection by
+  `browse_id` instead of resetting the list.
+- **Concurrency**: the UI runs on the main loop (synchronous, via
+  `crossterm`), while searches, lyrics, cover downloads, and audio
+  resolution run in **Tokio** tasks, communicating with the UI over an
+  `mpsc` channel.
+- **Audio**: rodio's `OutputStream` (which isn't `Send`) runs on a
+  dedicated thread; `yt-dlp` downloads the best audio track, which is
+  **remuxed** to ADTS before being decoded and played.
 
-> 📐 Uma descrição completa da arquitetura (módulos, fluxos, threading e pontos
-> de extensão) está em **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**.
+> 📐 A full description of the architecture (modules, flows, threading, and
+> extension points) is in **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**.
 
 ---
 
-## 🧪 Desenvolvimento
+## 🧪 Development
 
 ```bash
-# Testes unitários (parsing, durações, temas, etc.)
+# Unit tests (parsing, durations, themes, etc.)
 cargo test
 
-# Formatação e lints (o CI exige ambos limpos)
+# Formatting and lints (CI requires both clean)
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 
-# Documentação da API interna (rustdoc), abre no navegador
+# Internal API documentation (rustdoc), opens in the browser
 cargo doc --no-deps --open
 ```
 
-O CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) roda `fmt`,
-`clippy` e `test` a cada push/PR. Ao criar uma tag `v*`, o workflow de release
-([`.github/workflows/release.yml`](.github/workflows/release.yml)) compila e
-publica binários para Linux e macOS.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `fmt`,
+`clippy`, and `test` on every push/PR. When a `v*` tag is created, the
+release workflow ([`.github/workflows/release.yml`](.github/workflows/release.yml))
+builds and publishes binaries for Linux and macOS.
 
-O histórico de mudanças fica em **[`CHANGELOG.md`](CHANGELOG.md)**.
+Change history lives in **[`CHANGELOG.md`](CHANGELOG.md)**.
 
 ---
 
-## ⚠️ Aviso legal
+## ⚠️ Legal notice
 
-Este projeto é para fins **educacionais**. O uso do YouTube Music deve respeitar
-os [Termos de Serviço](https://www.youtube.com/t/terms) do YouTube. Os autores
-não se responsabilizam pelo uso indevido.
+This project is for **educational** purposes. Use of YouTube Music must
+comply with YouTube's [Terms of Service](https://www.youtube.com/t/terms).
+The authors are not responsible for misuse.
 
-## 📄 Licença
+## 📄 License
 
-MIT — veja **[`LICENSE`](LICENSE)**.
+MIT — see **[`LICENSE`](LICENSE)**.

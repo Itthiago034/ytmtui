@@ -56,3 +56,28 @@ pub struct SearchResults {
     pub playlists: Vec<Playlist>,
     pub artists: Vec<Artist>,
 }
+
+/// One karaoke-style timed line of lyrics.
+#[derive(Debug, Clone, Default)]
+pub struct LyricLine {
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// Result of a lyrics fetch: real per-line timestamps when the API exposes
+/// them for the track (see `YtMusicClient::get_lyrics`), or the plain
+/// Musixmatch-sourced text otherwise.
+#[derive(Debug, Clone)]
+pub enum Lyrics {
+    Synced(Vec<LyricLine>),
+    Plain(String),
+}
+
+/// A named shelf on the Home screen (e.g. "Quick picks", "Mixed for you"),
+/// as YouTube Music itself groups recommendations.
+#[derive(Debug, Clone, Default)]
+pub struct HomeSection {
+    pub title: String,
+    pub items: Vec<Playlist>,
+}

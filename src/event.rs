@@ -40,7 +40,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.input_mode = true;
             app.query.clear();
             app.section = Section::Buscar;
-            app.sidebar_index = 0;
+            // Must match Buscar's real position, or a later sidebar move
+            // (k/j) computes its next index from the wrong base and jumps
+            // to an unrelated section instead of the adjacent one.
+            app.sidebar_index = Section::Buscar.index();
             app.focus = Focus::Main;
             // Otherwise a selection left over from whatever list was open
             // before (e.g. index 4 of a 5-item queue) stays applied to the
@@ -97,11 +100,14 @@ fn navigate(app: &mut App, delta: isize) {
         Focus::Sidebar => app.move_sidebar(delta),
         Focus::Main => {
             if app.section == Section::Letra {
-                // Rola a letra.
-                if delta > 0 {
-                    app.lyrics_scroll = app.lyrics_scroll.saturating_add(1);
-                } else {
-                    app.lyrics_scroll = app.lyrics_scroll.saturating_sub(1);
+                // Manual scroll only applies to the plain-text fallback;
+                // synced lyrics auto-follow playback and ignore it.
+                if matches!(app.lyrics, crate::lyrics::LyricsState::Plain(_)) {
+                    if delta > 0 {
+                        app.lyrics_scroll = app.lyrics_scroll.saturating_add(1);
+                    } else {
+                        app.lyrics_scroll = app.lyrics_scroll.saturating_sub(1);
+                    }
                 }
             } else {
                 app.move_selection(delta);
@@ -125,5 +131,40 @@ fn activate(app: &mut App) {
             Section::Artistas => app.open_selected_artist(),
             _ => {}
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn slash_keeps_sidebar_index_in_sync_with_the_search_section() {
+        let mut app = App::new_for_tests();
+        // Start somewhere else in the sidebar, as if the user had been
+        // browsing the Queue before pressing "/".
+        app.sidebar_index = Section::Fila.index();
+        app.section = Section::Fila;
+
+        handle_key(&mut app, key(KeyCode::Char('/')));
+        assert_eq!(app.section, Section::Buscar);
+        assert_eq!(app.sidebar_index, Section::Buscar.index());
+
+        // Confirm the search, then move the sidebar selection: it must land
+        // on the section adjacent to Search, not jump somewhere unrelated
+        // because sidebar_index was left stale.
+        app.input_mode = false;
+        app.focus = Focus::Sidebar;
+        handle_key(&mut app, key(KeyCode::Char('k'))); // up: Search -> Home
+        assert_eq!(app.section, Section::Inicio);
+
+        app.focus = Focus::Sidebar;
+        handle_key(&mut app, key(KeyCode::Char('j'))); // down: Home -> Search
+        handle_key(&mut app, key(KeyCode::Char('j'))); // down: Search -> Library
+        assert_eq!(app.section, Section::Biblioteca);
     }
 }

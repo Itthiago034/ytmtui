@@ -5,7 +5,7 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Focus, Section};
@@ -179,7 +179,7 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
     f.render_widget(block, area);
 
     if inner.height < PLAYER_PANEL_HEIGHT + 3 {
-        draw_home_body(f, app, inner);
+        draw_home_sections(f, app, inner);
         return;
     }
     let rows = Layout::default()
@@ -187,12 +187,16 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
         .constraints([Constraint::Length(PLAYER_PANEL_HEIGHT), Constraint::Min(1)])
         .split(inner);
     draw_player_panel(f, app, rows[0]);
-    draw_home_body(f, app, rows[1]);
+    draw_home_sections(f, app, rows[1]);
 }
 
 /// The recommendations list (or its empty/loading message), without a
 /// border of its own — the border now belongs to the whole Home area.
-fn draw_home_body(f: &mut Frame, app: &App, area: Rect) {
+/// Sections are shown as non-selectable header rows interleaved with their
+/// items in one flat scrollable list (v1 scope: full section contents, no
+/// per-section cap/"show more" — overflow uses the existing scrollbar,
+/// exactly like the old flat list did).
+fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     if app.home.is_empty() {
         let text = if app.busy {
             format!("{} Loading recommendations…", app.spinner())
@@ -205,11 +209,24 @@ fn draw_home_body(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(msg, area);
         return;
     }
-    let items: Vec<ListItem> = app
-        .home
-        .iter()
-        .map(|p| {
-            ListItem::new(Line::from(vec![
+
+    let selected = app.list_state.selected();
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut shadow_selected: Option<usize> = None;
+    let mut flat_idx = 0usize;
+
+    for section in &app.home {
+        items.push(ListItem::new(Line::from(Span::styled(
+            section.title.clone(),
+            Style::default()
+                .fg(app.theme().accent)
+                .add_modifier(Modifier::BOLD),
+        ))));
+        for p in &section.items {
+            if selected == Some(flat_idx) {
+                shadow_selected = Some(items.len());
+            }
+            items.push(ListItem::new(Line::from(vec![
                 Span::styled(
                     p.title.clone(),
                     Style::default()
@@ -220,10 +237,17 @@ fn draw_home_body(f: &mut Frame, app: &App, area: Rect) {
                     format!("  ·  {}", p.subtitle),
                     Style::default().fg(Color::DarkGray),
                 ),
-            ]))
-        })
-        .collect();
-    render_list_borderless(f, app, area, items);
+            ])));
+            flat_idx += 1;
+        }
+    }
+
+    // The real selection index (over selectable items only) doesn't match
+    // this list's row index once section headers are interleaved in — a
+    // "shadow" ListState remaps it to the right row before rendering.
+    let mut shadow_state = app.list_state.clone();
+    shadow_state.select(shadow_selected);
+    render_list_borderless(f, app, area, items, &shadow_state);
 }
 
 /// Track title + real-time spectrum bars, or a placeholder when nothing is
@@ -380,22 +404,86 @@ fn draw_artists(f: &mut Frame, app: &App, area: Rect, block: Block) {
 }
 
 fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
-    let text = match &app.lyrics {
-        Some(l) if !l.is_empty() => l.clone(),
-        Some(_) => "Lyrics are not available for this track.".to_string(),
-        None => {
-            if app.current.is_some() {
-                "Fetching lyrics…".to_string()
-            } else {
-                "Play a track to see its lyrics.".to_string()
-            }
+    match &app.lyrics {
+        crate::lyrics::LyricsState::Synced { lines, active } => {
+            draw_synced_lyrics(f, app, area, block, lines, *active)
         }
-    };
-    let p = Paragraph::new(text)
+        crate::lyrics::LyricsState::Plain(text) => draw_plain_lyrics(f, app, area, block, text),
+        crate::lyrics::LyricsState::NotAvailable => {
+            let p = Paragraph::new("Lyrics are not available for this track.")
+                .style(Style::default().fg(Color::Gray))
+                .block(block)
+                .wrap(Wrap { trim: false });
+            f.render_widget(p, area);
+        }
+        crate::lyrics::LyricsState::None => {
+            let text = if app.current.is_some() {
+                "Fetching lyrics…"
+            } else {
+                "Play a track to see its lyrics."
+            };
+            let p = Paragraph::new(text)
+                .style(Style::default().fg(Color::Gray))
+                .block(block)
+                .wrap(Wrap { trim: false });
+            f.render_widget(p, area);
+        }
+    }
+}
+
+/// Plain-text lyrics (Musixmatch fallback, no timestamps): manual scroll via
+/// `app.lyrics_scroll`, exactly as before this section supported synced
+/// lyrics.
+fn draw_plain_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block, text: &str) {
+    let p = Paragraph::new(text.to_string())
         .style(Style::default().fg(Color::Gray))
         .block(block)
         .wrap(Wrap { trim: false })
         .scroll((app.lyrics_scroll, 0));
+    f.render_widget(p, area);
+}
+
+/// Karaoke-style synced lyrics: the active line is highlighted in the
+/// theme's accent color, and the view auto-scrolls to keep it roughly
+/// centered (approximate — a single logical line that wraps to 2+ terminal
+/// rows will throw off exact centering, which is an acceptable v1 tradeoff).
+fn draw_synced_lyrics(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    block: Block,
+    lines: &[crate::ytmusic::LyricLine],
+    active: Option<usize>,
+) {
+    let theme = app.theme();
+    let rendered: Vec<Line> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let style = if Some(i) == active {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.secondary)
+            };
+            Line::from(Span::styled(l.text.clone(), style))
+        })
+        .collect();
+
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let scroll = active
+        .map(|i| {
+            let half = visible_rows / 2;
+            i.saturating_sub(half)
+                .min(lines.len().saturating_sub(visible_rows.max(1)))
+        })
+        .unwrap_or(0) as u16;
+
+    let p = Paragraph::new(rendered)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(p, area);
 }
 
@@ -496,7 +584,13 @@ fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<Li
 /// to the whole outer Home area). Kept separate rather than parameterizing
 /// `render_list` with a has-border flag, since that helper is shared by five
 /// other bordered call sites and this avoids touching their geometry math.
-fn render_list_borderless(f: &mut Frame, app: &App, area: Rect, items: Vec<ListItem>) {
+fn render_list_borderless(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    items: Vec<ListItem>,
+    list_state: &ListState,
+) {
     let item_count = items.len();
     let list = List::new(items)
         .highlight_style(
@@ -505,7 +599,7 @@ fn render_list_borderless(f: &mut Frame, app: &App, area: Rect, items: Vec<ListI
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("");
-    let mut state = app.list_state.clone();
+    let mut state = list_state.clone();
     f.render_stateful_widget(list, area, &mut state);
 
     let viewport_rows = area.height as usize;

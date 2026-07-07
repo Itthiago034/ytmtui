@@ -24,6 +24,9 @@ pub struct Config {
     pub theme: String,
     /// Nome de exibição personalizado (sobrepõe o nome vindo da conta).
     pub username: Option<String>,
+    /// Intervalo (segundos) entre atualizações automáticas de Início e
+    /// Biblioteca em segundo plano, enquanto o app está aberto.
+    pub sync_interval_secs: u64,
 }
 
 impl Default for Config {
@@ -35,6 +38,7 @@ impl Default for Config {
             cookies: None,
             theme: "Roxo".to_string(),
             username: None,
+            sync_interval_secs: 300,
         }
     }
 }

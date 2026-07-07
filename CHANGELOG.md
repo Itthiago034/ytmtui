@@ -7,6 +7,35 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.
 ## [Não lançado]
 
 ### Adicionado
+- **Login in-app** (`g`): importa a sessão do navegador instalado (Brave,
+  Chrome, Chromium, Edge, Vivaldi, Opera ou Firefox) via
+  `yt-dlp --cookies-from-browser`, salva em `~/.config/ytmtui/cookies.txt` e
+  reconecta o cliente **sem reiniciar o app**. Também renova sessão expirada.
+- **Busca unificada**: a seção Buscar agora mostra os resultados agrupados
+  por tipo — Músicas, Artistas, **Álbuns** (novo filtro) e Playlists — em uma
+  única lista; `Enter` toca a música, abre o artista ou carrega o
+  álbum/playlist conforme o tipo do item selecionado.
+- **Tela Início reformulada**: saudação por horário com o nome da conta
+  ("Good evening, …" + data) e seção **Recently played** com as últimas 8
+  faixas tocadas (histórico local em `recent.json`), tocáveis com `Enter` —
+  disponível até sem login.
+- **Identidade visual**: wordmark bicolor `♪ ytmtui` na barra lateral, logo em
+  blocos + tagline na tela Início vazia, e ícones Unicode por seção (`⌂ ⌕ ♪ ♫
+  ◆ ≡ ¶ ?`) na navegação, nos títulos dos painéis e no cabeçalho compacto.
+- **Escala de neutros por tema**: cada tema agora define `text`, `subtext`,
+  `muted` e `border` tingidos pelo matiz do destaque — a interface inteira
+  muda de personalidade junto com o tema, sem cinzas genéricos do terminal.
+- **Contador de itens** no canto inferior direito dos painéis de lista.
+- **Empty states** centralizados com glifo decorativo em Buscar, Fila,
+  Playlists, Artistas, Biblioteca e Letra.
+
+### Alterado (visual)
+- **Barra de progresso** redesenhada no mesmo estilo do slider de volume
+  (`0:42 ━━●──── 4:27`), com trilha apagada e sem knob quando ocioso.
+- **Barra lateral** com separadores agrupando navegação, reprodução e ajuda.
+- **Cabeçalhos de seção** da tela Início ganham régua até a borda.
+- **Barra de status**: teclas dos atalhos destacadas das descrições.
+- **Scrollbar** discreta (trilha e setas na cor da borda do tema).
 - **Tela Início/Recomendados** (`🏠 Início`) com o feed `FEmusic_home`
   personalizado à conta.
 - **Página do artista**: `Enter` em `👤 Artistas` lista as principais faixas.

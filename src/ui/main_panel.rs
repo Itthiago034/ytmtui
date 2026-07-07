@@ -3,7 +3,7 @@
 //! aid orientation in long lists.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
@@ -15,11 +15,7 @@ use crate::theme::Theme;
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     let focused = app.focus == Focus::Main;
-    let border_color = if focused {
-        theme.accent
-    } else {
-        Color::DarkGray
-    };
+    let border_color = if focused { theme.accent } else { theme.border };
 
     let title = match app.section {
         Section::Inicio => "Home".to_string(),
@@ -32,27 +28,90 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Ajuda => "Help".to_string(),
     };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
-            format!(" {title} "),
+            format!(" {} {} ", app.section.icon(), title),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
 
+    // Item count badge in the bottom-right corner of list sections.
+    let count = match app.section {
+        Section::Buscar if app.search_mixed => app.search_item_count(),
+        Section::Buscar => app.songs.len(),
+        Section::Fila => app.queue.len(),
+        Section::Biblioteca => app.library.len(),
+        Section::Playlists => app.playlists.len(),
+        Section::Artistas => app.artists.len(),
+        _ => 0,
+    };
+    if count > 0 {
+        let noun = if count == 1 { "item" } else { "items" };
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {count} {noun} "),
+                Style::default().fg(theme.muted),
+            ))
+            .right_aligned(),
+        );
+    }
+
     match app.section {
         Section::Inicio => draw_home(f, app, area, block),
+        Section::Buscar if app.search_mixed && app.search_item_count() > 0 => {
+            draw_search_mixed(f, app, area, block)
+        }
         Section::Buscar => draw_songs(f, app, area, block, &app.songs),
         Section::Fila => draw_queue(f, app, area, block),
         Section::Biblioteca => draw_library(f, app, area, block),
         Section::Playlists => draw_playlists(f, app, area, block),
         Section::Artistas => draw_artists(f, app, area, block),
         Section::Letra => draw_lyrics(f, app, area, block),
-        Section::Ajuda => draw_help(f, area, block, app.theme().accent, app.theme().secondary),
+        Section::Ajuda => draw_help(f, area, block, app.theme()),
     }
+}
+
+/// Centered empty-state: a large dim glyph above a short hint. Keeps every
+/// message text intact; only presentation changes. Falls back to the plain
+/// message when the panel is too short for the decoration.
+fn draw_empty_state(
+    f: &mut Frame,
+    area: Rect,
+    block: Block,
+    icon: &str,
+    message: &str,
+    theme: &'static Theme,
+) {
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    if inner.height >= 7 {
+        let pad = (inner.height as usize - 4) / 3;
+        for _ in 0..pad {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            icon.to_string(),
+            Style::default().fg(theme.border),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        message.to_string(),
+        Style::default().fg(theme.muted),
+    )));
+    let p = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, inner);
 }
 
 /// Formata uma linha de faixa: "01  Título  —  Artista        3:45".
@@ -61,7 +120,7 @@ fn track_line(
     t: &crate::ytmusic::Track,
     width: usize,
     playing: bool,
-    accent: Color,
+    theme: &'static Theme,
 ) -> Line<'static> {
     let num = format!("{:>2}  ", index + 1);
     let dur = if t.duration.is_empty() {
@@ -76,92 +135,189 @@ fn track_line(
     let pad = " ".repeat(avail.saturating_sub(crate::ui::display_width(&main)) + 2);
 
     let marker_style = if playing {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.player)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted)
     };
     Line::from(vec![
         Span::styled(if playing { "▶ " } else { "  " }, marker_style),
-        Span::styled(num, Style::default().fg(Color::DarkGray)),
+        Span::styled(num, Style::default().fg(theme.muted)),
         Span::styled(
             main,
-            Style::default().fg(if playing { accent } else { Color::White }),
+            Style::default().fg(if playing { theme.player } else { theme.text }),
         ),
         Span::raw(pad),
-        Span::styled(dur, Style::default().fg(Color::DarkGray)),
+        Span::styled(dur, Style::default().fg(theme.muted)),
+    ])
+}
+
+/// One playlist/artist-style row: dim icon, bold title, dim subtitle.
+fn entry_line(icon: &str, title: &str, subtitle: &str, theme: &'static Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" {icon} "), Style::default().fg(theme.muted)),
+        Span::styled(
+            title.to_string(),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  ·  {subtitle}"), Style::default().fg(theme.muted)),
     ])
 }
 
 fn draw_songs(f: &mut Frame, app: &App, area: Rect, block: Block, songs: &[crate::ytmusic::Track]) {
+    let theme = app.theme();
     if songs.is_empty() {
-        let msg = Paragraph::new("No tracks yet. Press / to search.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        f.render_widget(msg, area);
+        draw_empty_state(
+            f,
+            area,
+            block,
+            "⌕",
+            "No tracks yet. Press / to search.",
+            theme,
+        );
         return;
     }
     let width = area.width.saturating_sub(4) as usize;
-    let accent = app.theme().player;
     let current_id = app.current.as_ref().map(|t| t.video_id.clone());
     let items: Vec<ListItem> = songs
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let playing = current_id.as_deref() == Some(t.video_id.as_str());
-            ListItem::new(track_line(i, t, width, playing, accent))
+            ListItem::new(track_line(i, t, width, playing, theme))
         })
         .collect();
 
     render_list(f, app, area, block, items);
 }
 
+/// Mixed search results, grouped by type with the same header-plus-rule rows
+/// the Home screen uses. All groups share one flat selectable list; the
+/// flattened index order (songs, artists, albums, playlists) must match
+/// `App::search_hit_at`, which resolves Enter/queue actions from it.
+fn draw_search_mixed(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let theme = app.theme();
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let selected = app.list_state.selected();
+    let track_width = inner.width.saturating_sub(2) as usize;
+    let header_width = inner.width as usize;
+    let current_id = app.current.as_ref().map(|t| t.video_id.clone());
+
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut shadow_selected: Option<usize> = None;
+    let mut flat_idx = 0usize;
+
+    if !app.songs.is_empty() {
+        items.push(ListItem::new(section_header("Songs", header_width, theme)));
+        for (i, t) in app.songs.iter().enumerate() {
+            if selected == Some(flat_idx) {
+                shadow_selected = Some(items.len());
+            }
+            let playing = current_id.as_deref() == Some(t.video_id.as_str());
+            items.push(ListItem::new(track_line(i, t, track_width, playing, theme)));
+            flat_idx += 1;
+        }
+    }
+    if !app.artists.is_empty() {
+        items.push(ListItem::new(section_header(
+            "Artists",
+            header_width,
+            theme,
+        )));
+        for a in &app.artists {
+            if selected == Some(flat_idx) {
+                shadow_selected = Some(items.len());
+            }
+            items.push(ListItem::new(entry_line("◆", &a.name, &a.subtitle, theme)));
+            flat_idx += 1;
+        }
+    }
+    if !app.albums.is_empty() {
+        items.push(ListItem::new(section_header("Albums", header_width, theme)));
+        for al in &app.albums {
+            if selected == Some(flat_idx) {
+                shadow_selected = Some(items.len());
+            }
+            items.push(ListItem::new(entry_line(
+                "◈",
+                &al.title,
+                &al.subtitle,
+                theme,
+            )));
+            flat_idx += 1;
+        }
+    }
+    if !app.playlists.is_empty() {
+        items.push(ListItem::new(section_header(
+            "Playlists",
+            header_width,
+            theme,
+        )));
+        for p in &app.playlists {
+            if selected == Some(flat_idx) {
+                shadow_selected = Some(items.len());
+            }
+            items.push(ListItem::new(entry_line("♫", &p.title, &p.subtitle, theme)));
+            flat_idx += 1;
+        }
+    }
+
+    // Same shadow-selection remapping as the Home screen: header rows are
+    // not selectable, so the flat selection index must be shifted past them.
+    let mut shadow_state = app.list_state.clone();
+    shadow_state.select(shadow_selected);
+    render_list_borderless(f, app, inner, items, &shadow_state);
+}
+
 fn draw_queue(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let theme = app.theme();
     if app.queue.is_empty() {
-        let msg = Paragraph::new("The queue is empty. Play a track to fill it.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        f.render_widget(msg, area);
+        draw_empty_state(
+            f,
+            area,
+            block,
+            "≡",
+            "The queue is empty. Play a track to fill it.",
+            theme,
+        );
         return;
     }
     let width = area.width.saturating_sub(4) as usize;
-    let accent = app.theme().player;
     let items: Vec<ListItem> = app
         .queue
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let playing = app.queue_index == Some(i);
-            ListItem::new(track_line(i, t, width, playing, accent))
+            ListItem::new(track_line(i, t, width, playing, theme))
         })
         .collect();
     render_list(f, app, area, block, items);
 }
 
 fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let theme = app.theme();
     if app.playlists.is_empty() {
-        let msg = Paragraph::new("No playlists yet. Search to find some.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        f.render_widget(msg, area);
+        draw_empty_state(
+            f,
+            area,
+            block,
+            "≡",
+            "No playlists yet. Search to find some.",
+            theme,
+        );
         return;
     }
     let items: Vec<ListItem> = app
         .playlists
         .iter()
-        .map(|p| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    p.title.clone(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ·  {}", p.subtitle),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-        })
+        .map(|p| ListItem::new(entry_line("≡", &p.title, &p.subtitle, theme)))
         .collect();
     render_list(f, app, area, block, items);
 }
@@ -178,17 +334,73 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if inner.height < PLAYER_PANEL_HEIGHT + 3 {
+    // With nothing playing and nothing to list, the player panel's
+    // placeholder would just crowd the wordmark — give it the whole panel.
+    let idle_empty = app.current.is_none() && app.home.is_empty() && app.recent.is_empty();
+    if idle_empty || inner.height < PLAYER_PANEL_HEIGHT + 4 {
         draw_home_sections(f, app, inner);
         return;
     }
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(PLAYER_PANEL_HEIGHT), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(PLAYER_PANEL_HEIGHT),
+            Constraint::Min(1),
+        ])
         .split(inner);
-    draw_player_panel(f, app, rows[0]);
-    draw_home_sections(f, app, rows[1]);
+    draw_greeting(f, app, rows[0]);
+    draw_player_panel(f, app, rows[1]);
+    draw_home_sections(f, app, rows[2]);
 }
+
+/// Time-of-day greeting with the signed-in name on the left and the current
+/// date on the right — the "you are home" row.
+fn draw_greeting(f: &mut Frame, app: &App, area: Rect) {
+    use chrono::{Datelike, Local, Timelike};
+    let theme = app.theme();
+    let now = Local::now();
+    let salutation = match now.hour() {
+        5..=11 => "Good morning",
+        12..=17 => "Good afternoon",
+        _ => "Good evening",
+    };
+    let greeting = match &app.account_name {
+        Some(name) => format!(" {salutation}, {name}"),
+        None => format!(" {salutation}"),
+    };
+    let weekday = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        [now.weekday().num_days_from_monday() as usize];
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][now.month0() as usize];
+    let date = format!("{weekday} · {month} {} ", now.day());
+
+    let width = area.width as usize;
+    let greeting_shown = crate::ui::truncate_chars(&greeting, width);
+    let used = crate::ui::display_width(&greeting_shown);
+    let date_len = crate::ui::display_width(&date);
+    let mut spans = vec![Span::styled(
+        greeting_shown,
+        Style::default()
+            .fg(theme.secondary)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if width > used + date_len {
+        spans.push(Span::raw(" ".repeat(width - used - date_len)));
+        spans.push(Span::styled(date, Style::default().fg(theme.muted)));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Block-glyph wordmark shown on the empty Home screen. 23 columns wide,
+/// built only from full/half blocks so it renders on any monospace font.
+const LOGO: [&str; 3] = [
+    "█ █ ▀█▀ █▀▄▀█ ▀█▀ █ █ █",
+    "▀█▀  █  █   █  █  █ █ █",
+    " ▀   ▀  ▀   ▀  ▀  ▀▀▀ ▀",
+];
+const TAGLINE: &str = "YouTube Music in your terminal";
 
 /// The recommendations list (or its empty/loading message), without a
 /// border of its own — the border now belongs to the whole Home area.
@@ -197,15 +409,42 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
 /// per-section cap/"show more" — overflow uses the existing scrollbar,
 /// exactly like the old flat list did).
 fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
-    if app.home.is_empty() {
+    let theme = app.theme();
+    if app.home.is_empty() && app.recent.is_empty() {
         let text = if app.busy {
             format!("{} Loading recommendations…", app.spinner())
         } else if app.is_authenticated() {
             "No recommendations are available. Press / to search.".to_string()
         } else {
-            "Sign in to see recommendations. Press ? for instructions.".to_string()
+            "Sign in to see recommendations — press g.".to_string()
         };
-        let msg = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
+
+        let mut lines: Vec<Line> = Vec::new();
+        // Identity moment: the wordmark and tagline, when there's room.
+        if area.width as usize >= LOGO[0].chars().count() + 2 && area.height >= 10 {
+            let pad = (area.height as usize).saturating_sub(LOGO.len() + 4) / 3;
+            for _ in 0..pad {
+                lines.push(Line::from(""));
+            }
+            for row in LOGO {
+                lines.push(Line::from(Span::styled(
+                    row,
+                    Style::default().fg(theme.accent),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                TAGLINE,
+                Style::default().fg(theme.secondary),
+            )));
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            text,
+            Style::default().fg(theme.muted),
+        )));
+        let msg = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false });
         f.render_widget(msg, area);
         return;
     }
@@ -215,29 +454,37 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     let mut shadow_selected: Option<usize> = None;
     let mut flat_idx = 0usize;
 
+    // Local history first — flat indices here must line up with
+    // `App::open_selected_home`, which plays indices below `recent.len()`.
+    if !app.recent.is_empty() {
+        items.push(ListItem::new(section_header(
+            "Recently played",
+            area.width as usize,
+            theme,
+        )));
+        let track_width = area.width.saturating_sub(2) as usize;
+        let current_id = app.current.as_ref().map(|t| t.video_id.clone());
+        for (i, t) in app.recent.iter().enumerate() {
+            if selected == Some(flat_idx) {
+                shadow_selected = Some(items.len());
+            }
+            let playing = current_id.as_deref() == Some(t.video_id.as_str());
+            items.push(ListItem::new(track_line(i, t, track_width, playing, theme)));
+            flat_idx += 1;
+        }
+    }
+
     for section in &app.home {
-        items.push(ListItem::new(Line::from(Span::styled(
-            section.title.clone(),
-            Style::default()
-                .fg(app.theme().accent)
-                .add_modifier(Modifier::BOLD),
-        ))));
+        items.push(ListItem::new(section_header(
+            &section.title,
+            area.width as usize,
+            theme,
+        )));
         for p in &section.items {
             if selected == Some(flat_idx) {
                 shadow_selected = Some(items.len());
             }
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(
-                    p.title.clone(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ·  {}", p.subtitle),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ])));
+            items.push(ListItem::new(entry_line("♪", &p.title, &p.subtitle, theme)));
             flat_idx += 1;
         }
     }
@@ -250,6 +497,21 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     render_list_borderless(f, app, area, items, &shadow_state);
 }
 
+/// Section header row: accent title followed by a dim rule to the edge,
+/// indented to line up with the item rows below it.
+fn section_header(title: &str, width: usize, theme: &'static Theme) -> Line<'static> {
+    let rule = "─".repeat(width.saturating_sub(crate::ui::display_width(title) + 4));
+    Line::from(vec![
+        Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(rule, Style::default().fg(theme.border)),
+    ])
+}
+
 /// Track title + real-time spectrum bars, or a placeholder when nothing is
 /// loaded. Paused playback keeps rendering bars — they just settle toward
 /// zero via `SpectrumAnalyzer::decay_idle`, so there's no separate branch.
@@ -257,7 +519,7 @@ fn draw_player_panel(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     if app.current.is_none() {
         let msg = Paragraph::new("Nothing playing — pick something below.")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center);
         f.render_widget(msg, area);
         return;
@@ -328,14 +590,17 @@ fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
 }
 
 fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let theme = app.theme();
     if !app.is_authenticated() {
         let msg = Paragraph::new(
             "You are not signed in.\n\n\
-             Save a Netscape cookie file to:\n\n\
-             ~/.config/ytmtui/cookies.txt\n\n\
-             Restart ytmtui after refreshing the file.",
+             Press g to sign in — ytmtui imports the session from your\n\
+             browser (Brave, Chrome, Chromium, Edge, Vivaldi, Opera or\n\
+             Firefox). Sign in to music.youtube.com there first.\n\n\
+             Manual alternative: save a Netscape cookie file to\n\
+             ~/.config/ytmtui/cookies.txt",
         )
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(theme.muted))
         .block(block)
         .wrap(Wrap { trim: false });
         f.render_widget(msg, area);
@@ -347,74 +612,54 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
         } else {
             "No playlists in your library.".to_string()
         };
-        let msg = Paragraph::new(text)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        f.render_widget(msg, area);
+        draw_empty_state(f, area, block, "♪", &text, theme);
         return;
     }
     let items: Vec<ListItem> = app
         .library
         .iter()
-        .map(|p| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    p.title.clone(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ·  {}", p.subtitle),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-        })
+        .map(|p| ListItem::new(entry_line("♪", &p.title, &p.subtitle, theme)))
         .collect();
     render_list(f, app, area, block, items);
 }
 
 fn draw_artists(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let theme = app.theme();
     if app.artists.is_empty() {
-        let msg = Paragraph::new("No artists yet. Search to find some.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        f.render_widget(msg, area);
+        draw_empty_state(
+            f,
+            area,
+            block,
+            "◆",
+            "No artists yet. Search to find some.",
+            theme,
+        );
         return;
     }
     let items: Vec<ListItem> = app
         .artists
         .iter()
-        .map(|a| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    a.name.clone(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ·  {}", a.subtitle),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-        })
+        .map(|a| ListItem::new(entry_line("◆", &a.name, &a.subtitle, theme)))
         .collect();
     render_list(f, app, area, block, items);
 }
 
 fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let theme = app.theme();
     match &app.lyrics {
         crate::lyrics::LyricsState::Synced { lines, active } => {
             draw_synced_lyrics(f, app, area, block, lines, *active)
         }
         crate::lyrics::LyricsState::Plain(text) => draw_plain_lyrics(f, app, area, block, text),
         crate::lyrics::LyricsState::NotAvailable => {
-            let p = Paragraph::new("Lyrics are not available for this track.")
-                .style(Style::default().fg(Color::Gray))
-                .block(block)
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, area);
+            draw_empty_state(
+                f,
+                area,
+                block,
+                "¶",
+                "Lyrics are not available for this track.",
+                theme,
+            );
         }
         crate::lyrics::LyricsState::None => {
             let text = if app.current.is_some() {
@@ -422,11 +667,7 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
             } else {
                 "Play a track to see its lyrics."
             };
-            let p = Paragraph::new(text)
-                .style(Style::default().fg(Color::Gray))
-                .block(block)
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, area);
+            draw_empty_state(f, area, block, "¶", text, theme);
         }
     }
 }
@@ -436,7 +677,7 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
 /// lyrics.
 fn draw_plain_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block, text: &str) {
     let p = Paragraph::new(text.to_string())
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default().fg(app.theme().subtext))
         .block(block)
         .wrap(Wrap { trim: false })
         .scroll((app.lyrics_scroll, 0));
@@ -487,7 +728,7 @@ fn draw_synced_lyrics(
     f.render_widget(p, area);
 }
 
-fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: Color) {
+fn draw_help(f: &mut Frame, area: Rect, block: Block, theme: &'static Theme) {
     let rows = [
         ("Navigation", ""),
         ("  ↑/↓  or  k/j", "move selection"),
@@ -501,8 +742,9 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: 
         ("  Esc", "cancel the search"),
         ("", ""),
         ("Account / Library", ""),
+        ("  g", "sign in (imports cookies from your browser)"),
         ("  Library", "playlists from your signed-in account"),
-        ("  cookies.txt", "in ~/.config/ytmtui/ (automatic sign-in)"),
+        ("  cookies.txt", "in ~/.config/ytmtui/ (manual alternative)"),
         ("", ""),
         ("Playback", ""),
         ("  Space", "play / pause"),
@@ -527,12 +769,19 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: 
             if v.is_empty() {
                 Line::from(Span::styled(
                     k.to_string(),
-                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 ))
             } else {
                 Line::from(vec![
-                    Span::styled(format!("{k:<18}"), Style::default().fg(secondary)),
-                    Span::styled(v.to_string(), Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!("{k:<18}"),
+                        Style::default()
+                            .fg(theme.secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(v.to_string(), Style::default().fg(theme.subtext)),
                 ])
             }
         })
@@ -541,12 +790,13 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, accent: Color, secondary: 
 }
 
 fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<ListItem>) {
+    let theme = app.theme();
     let item_count = items.len();
     let list = List::new(items)
         .block(block)
         .highlight_style(
             Style::default()
-                .bg(app.theme().highlight_bg)
+                .bg(theme.highlight_bg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("");
@@ -563,12 +813,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<Li
             scrollbar_state = scrollbar_state.position(selected);
         }
 
-        let scrollbar = ratatui::widgets::Scrollbar::default()
-            .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .thumb_symbol("█")
-            .track_symbol(Some("│"));
+        let scrollbar = scrollbar_widget(theme);
 
         // inner margin to avoid overwriting the block border
         let scroll_area = area.inner(ratatui::layout::Margin {
@@ -577,6 +822,21 @@ fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<Li
         });
         f.render_stateful_widget(scrollbar, scroll_area, &mut scrollbar_state);
     }
+}
+
+/// Shared scrollbar look: dim track and arrows, muted thumb, so it recedes
+/// behind the content while staying findable.
+fn scrollbar_widget(theme: &'static Theme) -> ratatui::widgets::Scrollbar<'static> {
+    ratatui::widgets::Scrollbar::default()
+        .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("▲"))
+        .end_symbol(Some("▼"))
+        .thumb_symbol("█")
+        .track_symbol(Some("│"))
+        .begin_style(Style::default().fg(theme.border))
+        .end_style(Style::default().fg(theme.border))
+        .track_style(Style::default().fg(theme.border))
+        .thumb_style(Style::default().fg(theme.muted))
 }
 
 /// Same as `render_list`, but for an area with no border of its own (used
@@ -591,11 +851,12 @@ fn render_list_borderless(
     items: Vec<ListItem>,
     list_state: &ListState,
 ) {
+    let theme = app.theme();
     let item_count = items.len();
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(app.theme().highlight_bg)
+                .bg(theme.highlight_bg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("");
@@ -611,12 +872,7 @@ fn render_list_borderless(
             scrollbar_state = scrollbar_state.position(selected);
         }
 
-        let scrollbar = ratatui::widgets::Scrollbar::default()
-            .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .thumb_symbol("█")
-            .track_symbol(Some("│"));
+        let scrollbar = scrollbar_widget(theme);
         f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }

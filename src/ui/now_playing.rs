@@ -1,9 +1,9 @@
-//! Compact two-line playback summary: track line plus progress gauge.
+//! Compact two-line playback summary: track line plus progress bar.
 
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Gauge, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, RepeatMode};
@@ -39,7 +39,7 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Yellow),
         )
     } else if app.current.is_none() {
-        ("⏹ ".to_string(), Style::default().fg(Color::DarkGray))
+        ("⏹ ".to_string(), Style::default().fg(theme.muted))
     } else if app.player.is_paused() {
         ("⏸ ".to_string(), Style::default().fg(Color::Yellow))
     } else {
@@ -52,11 +52,9 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
         None => ("Nothing playing".to_string(), String::new()),
     };
     let title_style = if app.current.is_some() {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted)
     };
 
     let liked = app
@@ -106,13 +104,32 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
     }
     spans.push(Span::raw(" ".repeat(pad)));
     spans.push(Span::styled(slider, Style::default().fg(theme.player)));
-    spans.push(Span::styled(modes, Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(modes, Style::default().fg(theme.muted)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Progress gauge with the elapsed/total time label.
+/// Progress line: `0:42 ━━━●──────── 4:27`. Same visual language as the
+/// volume slider (filled track, knob, empty track) so the two read as one
+/// family of controls. Idle and loading states degrade gracefully.
 fn draw_progress(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
+    let inner = area.inner(Margin {
+        vertical: 0,
+        horizontal: 1,
+    });
+    if inner.width == 0 {
+        return;
+    }
+
+    if app.loading_audio {
+        let line = Line::from(Span::styled(
+            format!("{} loading…", app.spinner()),
+            Style::default().fg(theme.subtext),
+        ));
+        f.render_widget(Paragraph::new(line), inner);
+        return;
+    }
+
     let (position, duration) = match &app.current {
         Some(t) => (app.player.position().as_secs(), t.duration_secs),
         None => (0, 0),
@@ -122,27 +139,55 @@ fn draw_progress(f: &mut Frame, app: &App, area: Rect) {
     } else {
         0.0
     };
-    let label = if app.loading_audio {
-        format!("{} loading…", app.spinner())
-    } else if duration > 0 {
-        format!("{} / {}", fmt(position), fmt(duration))
-    } else if app.current.is_some() {
+
+    let left = if app.current.is_some() {
         fmt(position)
     } else {
-        "--:-- / --:--".to_string()
+        "-:--".to_string()
+    };
+    let right = if duration > 0 {
+        fmt(duration)
+    } else {
+        "-:--".to_string()
     };
 
-    let inner = area.inner(Margin {
-        vertical: 0,
-        horizontal: 1,
-    });
-    if inner.width == 0 {
+    let time_style = Style::default().fg(theme.subtext);
+    let width = inner.width as usize;
+    let bar_width = width.saturating_sub(left.len() + right.len() + 2);
+    if bar_width < 3 {
+        // Too narrow for a bar: show what fits of the times alone.
+        let text = crate::ui::truncate_chars(&format!("{left} / {right}"), width);
+        f.render_widget(Paragraph::new(Span::styled(text, time_style)), inner);
         return;
     }
-    let gauge = Gauge::default()
-        .gauge_style(Style::default().fg(theme.player).bg(Color::Rgb(30, 30, 30)))
-        .ratio(ratio)
-        .use_unicode(true)
-        .label(Span::styled(label, Style::default().fg(Color::White)));
-    f.render_widget(gauge, inner);
+
+    // Knob occupies one cell; the filled track grows to its left. Idle
+    // playback renders a flat dim track with no knob at all.
+    let mut spans = vec![Span::styled(left, time_style), Span::raw(" ")];
+    if app.current.is_some() {
+        let filled = ((ratio * (bar_width - 1) as f64).round() as usize).min(bar_width - 1);
+        let empty = bar_width - 1 - filled;
+        spans.push(Span::styled(
+            "━".repeat(filled),
+            Style::default().fg(theme.player),
+        ));
+        spans.push(Span::styled(
+            "●",
+            Style::default()
+                .fg(theme.player)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            "─".repeat(empty),
+            Style::default().fg(theme.border),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "─".repeat(bar_width),
+            Style::default().fg(theme.border),
+        ));
+    }
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(right, time_style));
+    f.render_widget(Paragraph::new(Line::from(spans)), inner);
 }

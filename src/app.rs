@@ -2,8 +2,8 @@
 
 mod authentication;
 
-use authentication::resolve_cookie_path;
 pub use authentication::AuthenticationState;
+use authentication::{detect_browsers, export_browser_cookies, resolve_cookie_path};
 
 use std::path::PathBuf;
 
@@ -54,6 +54,22 @@ impl Section {
             Section::Fila => "Queue",
             Section::Letra => "Lyrics",
             Section::Ajuda => "Help",
+        }
+    }
+
+    /// Glyph shown next to the label in the navigation column and panel
+    /// titles. Single-column Unicode only (no Nerd Font/emoji), so alignment
+    /// holds on any terminal font.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Section::Inicio => "⌂",
+            Section::Buscar => "⌕",
+            Section::Biblioteca => "♪",
+            Section::Playlists => "♫",
+            Section::Artistas => "◆",
+            Section::Fila => "≡",
+            Section::Letra => "¶",
+            Section::Ajuda => "?",
         }
     }
 
@@ -150,6 +166,43 @@ pub enum Msg {
     Error(String),
     /// Cookies are present, but the API session is no longer valid.
     SessionExpired,
+    /// In-app sign-in finished: browser cookies were exported to `path`.
+    /// `browser` is the `--cookies-from-browser` value that worked (e.g.
+    /// "brave" or "firefox:/path/to/profile").
+    CookiesImported {
+        path: String,
+        browser: String,
+    },
+}
+
+/// Máximo de faixas mantidas no histórico local da tela Início.
+const RECENT_CAP: usize = 8;
+
+/// Caminho do histórico local de reprodução (`recent.json`).
+fn recent_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("ytmtui/recent.json"))
+}
+
+/// Carrega o histórico local, se existir; qualquer erro vira lista vazia.
+fn load_recent() -> Vec<Track> {
+    let mut recent: Vec<Track> = recent_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    recent.truncate(RECENT_CAP);
+    recent
+}
+
+/// Um item selecionado nos resultados mistos da busca, já resolvido a partir
+/// do índice achatado da lista. A ordem dos grupos na tela é a mesma da
+/// resolução: músicas, artistas, álbuns, playlists.
+#[derive(Debug, Clone)]
+pub enum SearchHit {
+    /// Índice dentro de `app.songs`.
+    Song(usize),
+    Artist(Artist),
+    Album(Playlist),
+    Playlist(Playlist),
 }
 
 fn client_error_message(context: &str, error: YtMusicError) -> Msg {
@@ -185,11 +238,20 @@ pub struct App {
     pub songs_title: String,
     pub playlists: Vec<Playlist>,
     pub artists: Vec<Artist>,
+    /// Álbuns retornados pela última busca.
+    pub albums: Vec<Playlist>,
+    /// A seção Buscar está exibindo os resultados mistos da última busca
+    /// (agrupados por tipo: músicas, artistas, álbuns, playlists) em vez de
+    /// uma lista plana de faixas de playlist/artista.
+    pub search_mixed: bool,
     /// Playlists da biblioteca do usuário logado.
     pub library: Vec<Playlist>,
     /// Recomendações da tela inicial, agrupadas nas mesmas seções nomeadas
     /// que o YouTube Music usa ("Quick picks", "Mixed for you", ...).
     pub home: Vec<crate::ytmusic::HomeSection>,
+    /// Últimas faixas reproduzidas (histórico local em `recent.json`),
+    /// exibidas como o primeiro grupo da tela Início e tocáveis com Enter.
+    pub recent: Vec<Track>,
     /// videoIds curtidos nesta sessão (para alternar curtir/descurtir).
     pub liked: std::collections::HashSet<String>,
     /// Autoplay: continuar com uma rádio quando a fila termina.
@@ -289,14 +351,14 @@ impl App {
                 "Signed in. Loading your library... Press / to search or ? for help.".to_string()
             }
             AuthenticationState::InvalidCookies => {
-                "Cookie file is invalid. Refresh it with ./scripts/refresh-cookies.sh.".to_string()
+                "Cookie file is invalid. Press g to sign in from your browser.".to_string()
             }
             AuthenticationState::Anonymous => match resolution.missing_requested_path.as_deref() {
                 Some(path) => format!("Configured cookie file does not exist: {path}"),
                 None => "Welcome to ytmtui. Press / to search or ? for help.".to_string(),
             },
             AuthenticationState::Expired => {
-                "Session expired. Refresh browser cookies and restart ytmtui.".to_string()
+                "Session expired. Press g to sign in again from your browser.".to_string()
             }
         };
 
@@ -316,8 +378,11 @@ impl App {
             songs_title: "Search results".to_string(),
             playlists: Vec::new(),
             artists: Vec::new(),
+            albums: Vec::new(),
+            search_mixed: false,
             library: Vec::new(),
             home: Vec::new(),
+            recent: load_recent(),
             liked: std::collections::HashSet::new(),
             autoplay: true,
             authentication,
@@ -471,12 +536,67 @@ impl App {
         None
     }
 
-    /// Abre a recomendação selecionada na tela inicial.
+    /// Total de itens selecionáveis na tela Início: o histórico recente vem
+    /// primeiro, seguido dos itens das seções de recomendações.
+    pub fn home_total_count(&self) -> usize {
+        self.recent.len() + self.home_item_count()
+    }
+
+    /// Registra uma faixa no histórico local (topo da lista, sem duplicatas,
+    /// limitado a [`RECENT_CAP`]) e persiste em `recent.json`. Persistência é
+    /// melhor-esforço: falhas de disco nunca interrompem a reprodução.
+    fn remember_recent(&mut self, track: &Track) {
+        self.recent.retain(|t| t.video_id != track.video_id);
+        self.recent.insert(0, track.clone());
+        self.recent.truncate(RECENT_CAP);
+        let Some(path) = recent_path() else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.recent) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Total de itens selecionáveis nos resultados mistos da busca, na ordem
+    /// em que são exibidos: músicas, artistas, álbuns, playlists.
+    pub fn search_item_count(&self) -> usize {
+        self.songs.len() + self.artists.len() + self.albums.len() + self.playlists.len()
+    }
+
+    /// Resolve um índice achatado da seleção (como usado pelo `list_state`)
+    /// para o item dos resultados mistos a que ele se refere.
+    pub fn search_hit_at(&self, index: usize) -> Option<SearchHit> {
+        let mut i = index;
+        if i < self.songs.len() {
+            return Some(SearchHit::Song(i));
+        }
+        i -= self.songs.len();
+        if i < self.artists.len() {
+            return Some(SearchHit::Artist(self.artists[i].clone()));
+        }
+        i -= self.artists.len();
+        if i < self.albums.len() {
+            return Some(SearchHit::Album(self.albums[i].clone()));
+        }
+        i -= self.albums.len();
+        self.playlists.get(i).cloned().map(SearchHit::Playlist)
+    }
+
+    /// Abre o item selecionado na tela inicial: faixas do histórico recente
+    /// tocam na hora (a fila vira o próprio histórico); recomendações abrem
+    /// como playlist.
     pub fn open_selected_home(&mut self) {
         let Some(idx) = self.list_state.selected() else {
             return;
         };
-        let Some(pl) = self.home_item_at(idx).cloned() else {
+        if idx < self.recent.len() {
+            self.queue = self.recent.clone();
+            self.queue_index = Some(idx);
+            self.start_current();
+            return;
+        }
+        let Some(pl) = self.home_item_at(idx - self.recent.len()).cloned() else {
             return;
         };
         self.load_playlist(pl);
@@ -490,6 +610,11 @@ impl App {
         let Some(artist) = self.artists.get(idx).cloned() else {
             return;
         };
+        self.load_artist(artist);
+    }
+
+    /// Dispara o carregamento (assíncrono) das principais faixas do artista.
+    fn load_artist(&mut self, artist: Artist) {
         if artist.browse_id.is_empty() {
             self.status = "Artista sem página disponível.".to_string();
             return;
@@ -514,6 +639,21 @@ impl App {
     /// Adiciona a faixa selecionada ao fim da fila (sem interromper a atual).
     pub fn enqueue_selected(&mut self) {
         let track = match self.section {
+            // Nos resultados mistos, apenas músicas podem ir para a fila.
+            Section::Buscar if self.search_mixed => {
+                match self
+                    .list_state
+                    .selected()
+                    .and_then(|i| self.search_hit_at(i))
+                {
+                    Some(SearchHit::Song(i)) => self.songs.get(i).cloned(),
+                    Some(_) => {
+                        self.status = "Somente músicas podem ser adicionadas à fila.".to_string();
+                        return;
+                    }
+                    None => None,
+                }
+            }
             Section::Buscar => self
                 .list_state
                 .selected()
@@ -539,6 +679,52 @@ impl App {
                 self.queue.len()
             );
         }
+    }
+
+    /// Login com uma tecla: importa cookies do primeiro navegador instalado
+    /// que tenha uma sessão do YouTube, salva em `~/.config/ytmtui/cookies.txt`
+    /// e reconecta o cliente sem reiniciar o app. Também serve para renovar
+    /// uma sessão expirada.
+    pub fn sign_in(&mut self) {
+        if self.busy {
+            self.status = "Aguarde a tarefa atual terminar antes de conectar.".to_string();
+            return;
+        }
+        let Some(home) = dirs::home_dir() else {
+            self.status = "⚠ Não foi possível localizar o diretório home.".to_string();
+            return;
+        };
+        let browsers = detect_browsers(&home);
+        if browsers.is_empty() {
+            self.status =
+                "⚠ Nenhum navegador suportado encontrado (Brave/Chrome/Firefox…).".to_string();
+            return;
+        }
+        let Some(dest) = dirs::config_dir().map(|d| d.join("ytmtui/cookies.txt")) else {
+            self.status = "⚠ Não foi possível localizar o diretório de config.".to_string();
+            return;
+        };
+        self.busy = true;
+        let first = browsers[0].split(':').next().unwrap_or(&browsers[0]);
+        self.status = format!("Conectando: importando cookies de {first}…");
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut last_error = String::new();
+            for browser in browsers {
+                let _ = tx.send(Msg::Status(format!("Importando cookies de {browser}…")));
+                match export_browser_cookies(&browser, &dest) {
+                    Ok(()) => {
+                        let _ = tx.send(Msg::CookiesImported {
+                            path: dest.to_string_lossy().into_owned(),
+                            browser,
+                        });
+                        return;
+                    }
+                    Err(e) => last_error = format!("{browser}: {e}"),
+                }
+            }
+            let _ = tx.send(Msg::Error(format!("Falha ao conectar — {last_error}")));
+        });
     }
 
     /// Curte ou descurte a faixa atual (alterna com base no estado da sessão).
@@ -718,7 +904,8 @@ impl App {
     /// Número de itens na lista principal da seção atual.
     pub fn main_len(&self) -> usize {
         match self.section {
-            Section::Inicio => self.home_item_count(),
+            Section::Inicio => self.home_total_count(),
+            Section::Buscar if self.search_mixed => self.search_item_count(),
             Section::Buscar => self.songs.len(),
             Section::Biblioteca => self.library.len(),
             Section::Playlists => self.playlists.len(),
@@ -795,11 +982,17 @@ impl App {
 
     /// Dispara o carregamento (assíncrono) das faixas de uma playlist.
     fn load_playlist(&mut self, pl: Playlist) {
-        self.status = format!("Carregando playlist \"{}\"...", pl.title);
+        self.load_browse(pl, "Playlist");
+    }
+
+    /// Dispara o carregamento das faixas de uma playlist ou álbum; `kind`
+    /// rotula o painel de resultados ("Playlist"/"Album").
+    fn load_browse(&mut self, pl: Playlist, kind: &str) {
+        self.status = format!("Carregando \"{}\"...", pl.title);
         self.busy = true;
         let client = self.client.clone();
         let tx = self.tx.clone();
-        let title = pl.title.clone();
+        let title = format!("{kind}: {}", pl.title);
         tokio::spawn(async move {
             match client.get_playlist_tracks(&pl.browse_id).await {
                 Ok(tracks) => {
@@ -815,10 +1008,48 @@ impl App {
     /// Reproduz a faixa selecionada na lista atual (busca ou fila),
     /// definindo a fila de reprodução a partir da lista.
     pub fn play_selected(&mut self) {
+        if self.prepare_selection_for_playback() {
+            self.start_current();
+        }
+    }
+
+    /// Resolve o Enter da lista atual: monta a fila (retornando `true` para
+    /// iniciar a reprodução) ou dispara o carregamento de artista/álbum/
+    /// playlist (retornando `false`). Separado de [`Self::play_selected`]
+    /// para ser testável sem um runtime tokio ativo.
+    fn prepare_selection_for_playback(&mut self) -> bool {
         match self.section {
+            // Resultados mistos: a ação do Enter depende do tipo do item.
+            Section::Buscar if self.search_mixed => {
+                let Some(hit) = self
+                    .list_state
+                    .selected()
+                    .and_then(|i| self.search_hit_at(i))
+                else {
+                    return false;
+                };
+                match hit {
+                    SearchHit::Song(i) => {
+                        self.queue = self.songs.clone();
+                        self.queue_index = Some(i);
+                    }
+                    SearchHit::Artist(artist) => {
+                        self.load_artist(artist);
+                        return false;
+                    }
+                    SearchHit::Album(pl) => {
+                        self.load_browse(pl, "Album");
+                        return false;
+                    }
+                    SearchHit::Playlist(pl) => {
+                        self.load_playlist(pl);
+                        return false;
+                    }
+                }
+            }
             Section::Buscar => {
                 if self.songs.is_empty() {
-                    return;
+                    return false;
                 }
                 // A stale selection (e.g. left over from a longer list shown
                 // before this one) must not index past the current list.
@@ -832,7 +1063,7 @@ impl App {
             }
             Section::Fila => {
                 if self.queue.is_empty() {
-                    return;
+                    return false;
                 }
                 let idx = self
                     .list_state
@@ -841,9 +1072,9 @@ impl App {
                     .min(self.queue.len() - 1);
                 self.queue_index = Some(idx);
             }
-            _ => return,
+            _ => return false,
         }
-        self.start_current();
+        true
     }
 
     /// Whether `video_id` matches the currently playing track. Used to
@@ -870,6 +1101,7 @@ impl App {
             return;
         };
         self.current = Some(track.clone());
+        self.remember_recent(&track);
         self.lyrics = crate::lyrics::LyricsState::None;
         self.lyrics_scroll = 0;
         self.clear_artwork();
@@ -1029,11 +1261,14 @@ impl App {
                     self.songs_title = "Search results".to_string();
                     self.playlists = res.playlists;
                     self.artists = res.artists;
+                    self.albums = res.albums;
+                    self.search_mixed = true;
                     self.status = format!(
-                        "{} músicas, {} playlists, {} artistas encontrados.",
+                        "{} músicas, {} artistas, {} álbuns, {} playlists.",
                         self.songs.len(),
-                        self.playlists.len(),
-                        self.artists.len()
+                        self.artists.len(),
+                        self.albums.len(),
+                        self.playlists.len()
                     );
                     // `songs`/`playlists`/`artists` were all just replaced,
                     // so any list_state selection now refers to whichever of
@@ -1076,16 +1311,21 @@ impl App {
                 Msg::HomeSections(sections) => {
                     self.busy = false;
                     let was_empty = self.home.is_empty();
+                    // Selection indices on Home count the local recent-tracks
+                    // group first; recommendation lookups must skip past it.
+                    let recent_len = self.recent.len();
                     let previous_id = (self.section == Section::Inicio)
                         .then(|| self.list_state.selected())
                         .flatten()
+                        .and_then(|i| i.checked_sub(recent_len))
                         .and_then(|i| self.home_item_at(i))
                         .map(|p| p.browse_id.clone());
                     self.home = sections;
                     if self.section == Section::Inicio {
-                        let count = self.home_item_count();
+                        let count = self.home_total_count();
                         let new_index = previous_id
                             .and_then(|id| self.home_flat_index_of(&id))
+                            .map(|i| i + recent_len)
                             .or(if was_empty {
                                 Some(0)
                             } else {
@@ -1123,14 +1363,17 @@ impl App {
                     self.authentication = AuthenticationState::Expired;
                     self.library.clear();
                     self.account_name = None;
-                    self.status = "Session expired. Run ./scripts/refresh-cookies.sh with \
-                                   music.youtube.com signed in, then restart ytmtui."
+                    self.status = "Session expired. Press g to sign in again from your \
+                                   browser (music.youtube.com must be signed in there)."
                         .to_string();
                 }
                 Msg::PlaylistTracks { title, tracks } => {
                     self.busy = false;
                     self.songs = tracks;
-                    self.songs_title = format!("Playlist: {title}");
+                    self.songs_title = title;
+                    // Uma lista concreta de faixas substitui a visão mista da
+                    // busca; a próxima busca a reativa.
+                    self.search_mixed = false;
                     self.section = Section::Buscar;
                     self.sidebar_index = 0;
                     self.list_state.select(Some(0));
@@ -1172,6 +1415,27 @@ impl App {
                             self.status = format!("▶ Tocando: {} — {}", t.title, t.artist);
                         }
                         self.player.play_file(path);
+                    }
+                }
+                Msg::CookiesImported { path, browser } => {
+                    self.busy = false;
+                    match YtMusicClient::with_cookies(&path) {
+                        Ok(client) => {
+                            self.client = client;
+                            self.cookies = Some(path);
+                            self.authentication = AuthenticationState::Authenticated;
+                            self.account_name = None;
+                            let name = browser.split(':').next().unwrap_or(&browser);
+                            self.status =
+                                format!("✔ Conectado via {name}. Carregando suas músicas…");
+                            self.load_account();
+                            self.load_home();
+                            self.load_library();
+                        }
+                        Err(e) => {
+                            self.authentication = AuthenticationState::InvalidCookies;
+                            self.status = format!("⚠ Cookies importados são inválidos: {e}");
+                        }
                     }
                 }
                 Msg::Status(s) => self.status = s,
@@ -1253,8 +1517,13 @@ impl App {
             songs_title: "Search results".to_string(),
             playlists: Vec::new(),
             artists: Vec::new(),
+            albums: Vec::new(),
+            search_mixed: false,
             library: Vec::new(),
             home: Vec::new(),
+            // Tests must not read (or later write) the user's real
+            // recent.json; they start with an empty in-memory history.
+            recent: Vec::new(),
             liked: std::collections::HashSet::new(),
             autoplay: true,
             authentication: AuthenticationState::Anonymous,
@@ -1500,11 +1769,113 @@ mod tests {
         ]
     }
 
+    fn mixed_search_app() -> App {
+        let mut app = App::new_for_tests();
+        app.search_mixed = true;
+        app.songs = vec![
+            Track {
+                video_id: "s1".to_string(),
+                title: "Song one".to_string(),
+                ..Default::default()
+            },
+            Track {
+                video_id: "s2".to_string(),
+                title: "Song two".to_string(),
+                ..Default::default()
+            },
+        ];
+        app.artists = vec![crate::ytmusic::Artist {
+            browse_id: "UC1".to_string(),
+            name: "Artist one".to_string(),
+            ..Default::default()
+        }];
+        app.albums = vec![Playlist {
+            browse_id: "MPRE1".to_string(),
+            title: "Album one".to_string(),
+            ..Default::default()
+        }];
+        app.playlists = vec![Playlist {
+            browse_id: "VLPL1".to_string(),
+            title: "Playlist one".to_string(),
+            ..Default::default()
+        }];
+        app
+    }
+
+    #[test]
+    fn search_hit_at_resolves_groups_in_display_order() {
+        let app = mixed_search_app();
+        assert_eq!(app.search_item_count(), 5);
+        assert!(matches!(app.search_hit_at(0), Some(SearchHit::Song(0))));
+        assert!(matches!(app.search_hit_at(1), Some(SearchHit::Song(1))));
+        assert!(matches!(app.search_hit_at(2), Some(SearchHit::Artist(a)) if a.browse_id == "UC1"));
+        assert!(
+            matches!(app.search_hit_at(3), Some(SearchHit::Album(p)) if p.browse_id == "MPRE1")
+        );
+        assert!(
+            matches!(app.search_hit_at(4), Some(SearchHit::Playlist(p)) if p.browse_id == "VLPL1")
+        );
+        assert!(app.search_hit_at(5).is_none());
+    }
+
+    #[test]
+    fn entering_a_song_in_mixed_results_queues_only_the_songs_group() {
+        let mut app = mixed_search_app();
+        app.section = Section::Buscar;
+        app.list_state.select(Some(1)); // "Song two"
+        assert!(
+            app.prepare_selection_for_playback(),
+            "songs start playback directly"
+        );
+        assert_eq!(app.queue.len(), 2, "queue holds the songs group only");
+        assert_eq!(app.queue_index, Some(1));
+    }
+
+    #[test]
+    fn enqueue_in_mixed_results_rejects_non_song_rows() {
+        let mut app = mixed_search_app();
+        app.section = Section::Buscar;
+        app.list_state.select(Some(3)); // the album row
+        app.enqueue_selected();
+        assert!(
+            app.queue.is_empty(),
+            "albums must not be enqueued as tracks"
+        );
+        assert!(
+            app.status.contains("músicas"),
+            "explains why: {}",
+            app.status
+        );
+    }
+
     #[test]
     fn home_item_count_sums_across_sections_excluding_headers() {
         let mut app = App::new_for_tests();
         app.home = home_sections();
         assert_eq!(app.home_item_count(), 3);
+    }
+
+    #[test]
+    fn home_total_count_puts_recent_tracks_before_recommendations() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        app.recent = vec![
+            Track {
+                video_id: "r1".to_string(),
+                ..Default::default()
+            },
+            Track {
+                video_id: "r2".to_string(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(app.home_total_count(), 5);
+        // Recommendation lookups skip past the recent group.
+        assert_eq!(
+            app.home_item_at(5 - app.recent.len() - 1)
+                .map(|p| p.browse_id.as_str()),
+            Some("VL3")
+        );
     }
 
     #[test]

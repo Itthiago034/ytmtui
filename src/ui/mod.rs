@@ -19,7 +19,7 @@ mod now_playing;
 mod tests;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -179,14 +179,15 @@ fn draw_search_input(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// Narrow-layout header: current section and its position in the menu.
+/// Narrow-layout header: current section (with its icon) and its position
+/// in the menu.
 fn draw_narrow_header(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     let index = app.sidebar_index.min(Section::ALL.len() - 1);
     let section = Section::ALL[index];
     let line = Line::from(vec![
         Span::styled(
-            " ♫ ",
+            format!(" {} ", section.icon()),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -199,7 +200,7 @@ fn draw_narrow_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(
             format!(" · {}/{}", index + 1, Section::ALL.len()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         ),
     ]);
     f.render_widget(Paragraph::new(line), area);
@@ -232,17 +233,43 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     let status = truncate_chars(&app.status, status_room);
     let status_len = display_width(&status);
-    spans.push(Span::styled(status, Style::default().fg(Color::Gray)));
+    spans.push(Span::styled(status, Style::default().fg(theme.subtext)));
 
     if show_shortcuts {
         let pad = width.saturating_sub(used + status_len + shortcuts_len + 1);
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(
-            shortcuts,
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.extend(shortcut_spans(shortcuts, theme));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Renders a "key desc · key desc" shortcut string as styled spans: keys
+/// pop slightly, descriptions and separators recede. Purely presentational —
+/// the visible text (and thus its width) is exactly the input string.
+fn shortcut_spans(
+    shortcuts: &'static str,
+    theme: &'static crate::theme::Theme,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, entry) in shortcuts.split(" · ").enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(theme.border)));
+        }
+        match entry.split_once(' ') {
+            Some((key, desc)) => {
+                spans.push(Span::styled(
+                    key,
+                    Style::default()
+                        .fg(theme.subtext)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(desc, Style::default().fg(theme.muted)));
+            }
+            None => spans.push(Span::styled(entry, Style::default().fg(theme.muted))),
+        }
+    }
+    spans
 }
 
 /// Shortcuts that make sense for the current focus and section.
@@ -255,6 +282,7 @@ fn contextual_shortcuts(app: &App) -> &'static str {
     }
     match app.section {
         Section::Buscar | Section::Fila => "Enter play · a queue · Space pause · / search · ? help",
+        Section::Biblioteca => "g sign in · Enter open · / search · ? help · q quit",
         Section::Letra => "↑↓ scroll · / search · ? help · q quit",
         Section::Ajuda => "/ search · q quit",
         _ => "Enter open · / search · ? help · q quit",

@@ -239,6 +239,53 @@ fn selection_highlight_and_scrollbar_stay_visible() {
 }
 
 #[test]
+fn home_shows_recent_tracks_group_and_search_shows_mixed_groups() {
+    use crate::ytmusic::{Artist, Playlist};
+
+    // Home: local history renders as the first group.
+    let mut app = App::new_for_tests();
+    app.focus = Focus::Main;
+    app.recent = vec![track("Yellow", "Coldplay", "4:27", 267, "vid1")];
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+    assert!(
+        content.contains("Recently played"),
+        "recent group header:\n{content}"
+    );
+    assert!(content.contains("Yellow"), "recent track row:\n{content}");
+
+    // Search: mixed results render one header per non-empty type group.
+    let mut app = App::new_for_tests();
+    app.focus = Focus::Main;
+    app.section = Section::Buscar;
+    app.sidebar_index = Section::Buscar.index();
+    app.search_mixed = true;
+    app.songs = vec![track("Fix You", "Coldplay", "4:54", 294, "vid2")];
+    app.artists = vec![Artist {
+        browse_id: "UC1".to_string(),
+        name: "Coldplay".to_string(),
+        subtitle: "Artist".to_string(),
+        thumbnail: None,
+    }];
+    app.albums = vec![Playlist {
+        browse_id: "MPRE1".to_string(),
+        title: "X&Y".to_string(),
+        subtitle: "Album • Coldplay".to_string(),
+        thumbnail: None,
+    }];
+    app.playlists = Vec::new();
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+    for needle in ["Songs", "Artists", "Albums", "Fix You", "X&Y"] {
+        assert!(content.contains(needle), "'{needle}' visible:\n{content}");
+    }
+    assert!(
+        !content.contains("Playlists ─"),
+        "empty groups render no header:\n{content}"
+    );
+}
+
+#[test]
 fn home_section_highlight_lands_on_the_right_item_despite_header_rows() {
     use crate::ytmusic::{HomeSection, Playlist};
 

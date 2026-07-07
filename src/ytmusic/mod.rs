@@ -32,6 +32,7 @@ const CLIENT_VERSION_ANDROID: &str = "6.51.53";
 const FILTER_SONGS: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
 const FILTER_ARTISTS: &str = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D";
 const FILTER_PLAYLISTS: &str = "EgWKAQIoAWoKEAkQChAFEAMQBA%3D%3D";
+const FILTER_ALBUMS: &str = "EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D";
 
 pub type YtMusicResult<T> = std::result::Result<T, YtMusicError>;
 
@@ -334,19 +335,20 @@ impl YtMusicClient {
         Ok(parse::parse_account_name(&data))
     }
 
-    /// Busca completa: músicas, artistas e playlists.
+    /// Busca completa: músicas, artistas, álbuns e playlists.
     ///
-    /// As três sub-buscas rodam em paralelo (`tokio::join!`), reduzindo bastante
-    /// a latência total. Se as três falharem, o erro é propagado para a UI; caso
-    /// contrário, cada parte que falhou retorna vazia (busca parcial).
+    /// As quatro sub-buscas rodam em paralelo (`tokio::join!`), reduzindo
+    /// bastante a latência total. Se todas falharem, o erro é propagado para a
+    /// UI; caso contrário, cada parte que falhou retorna vazia (busca parcial).
     pub async fn search(&self, query: &str) -> YtMusicResult<SearchResults> {
-        let (songs, artists, playlists) = tokio::join!(
+        let (songs, artists, albums, playlists) = tokio::join!(
             self.search_songs(query),
             self.search_artists(query),
+            self.search_albums(query),
             self.search_playlists(query),
         );
 
-        if songs.is_err() && artists.is_err() && playlists.is_err() {
+        if songs.is_err() && artists.is_err() && albums.is_err() && playlists.is_err() {
             // Propaga o primeiro erro encontrado para que a UI possa exibi-lo.
             return Err(songs.err().or(artists.err()).or(playlists.err()).unwrap());
         }
@@ -354,6 +356,7 @@ impl YtMusicClient {
         Ok(SearchResults {
             songs: songs.unwrap_or_default(),
             artists: artists.unwrap_or_default(),
+            albums: albums.unwrap_or_default(),
             playlists: playlists.unwrap_or_default(),
         })
     }
@@ -381,6 +384,33 @@ impl YtMusicClient {
                     out.push(Artist {
                         browse_id,
                         name: texts.first().cloned().unwrap_or_default(),
+                        subtitle: texts.get(1).cloned().unwrap_or_default(),
+                        thumbnail: extract_thumbnail(r),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Busca apenas álbuns. O modelo é o mesmo das playlists: o `browseId`
+    /// (`MPRE…`) abre pelo endpoint `browse`, cujo parser já entende o
+    /// `musicShelfRenderer` dos álbuns.
+    pub async fn search_albums(&self, query: &str) -> YtMusicResult<Vec<Playlist>> {
+        let body = json!({ "context": self.context(), "query": query, "params": FILTER_ALBUMS });
+        let data = self.post("search", body).await?;
+        let mut out = Vec::new();
+        if let Some(shelf) = find_key(&data, "musicShelfRenderer") {
+            if let Some(items) = shelf.get("contents").and_then(|c| c.as_array()) {
+                for item in items {
+                    let Some(r) = item.get("musicResponsiveListItemRenderer") else {
+                        continue;
+                    };
+                    let texts = flex_texts(r);
+                    let browse_id = top_browse_id(r);
+                    out.push(Playlist {
+                        browse_id,
+                        title: texts.first().cloned().unwrap_or_default(),
                         subtitle: texts.get(1).cloned().unwrap_or_default(),
                         thumbnail: extract_thumbnail(r),
                     });

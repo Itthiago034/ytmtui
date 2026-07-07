@@ -11,8 +11,14 @@ use ratatui_image::StatefulImage;
 
 use crate::app::{App, AuthenticationState, Focus, Section};
 
-/// Rows taken by the header (blank, title, account, blank) plus the menu.
-const MENU_ROWS: u16 = 4 + Section::ALL.len() as u16;
+/// Indexes (into `Section::ALL`) that start a new visual group; a blank
+/// separator row is drawn above each. Browse sections, then the playback
+/// pair (Queue/Lyrics), then Help.
+const GROUP_STARTS: [usize; 2] = [5, 7];
+
+/// Rows taken by the header (blank, title, account, blank) plus the menu
+/// with its group separators.
+const MENU_ROWS: u16 = 4 + Section::ALL.len() as u16 + GROUP_STARTS.len() as u16;
 
 /// Draws the navigation column.
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
@@ -22,19 +28,32 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     let width = area.width as usize;
 
-    let mut lines: Vec<Line> = Vec::with_capacity(Section::ALL.len() + 4);
+    let mut lines: Vec<Line> = Vec::with_capacity(MENU_ROWS as usize);
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " ♫ ytmtui",
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
+    // Two-tone wordmark: "ytm" carries the accent, "tui" the secondary hue.
+    lines.push(Line::from(vec![
+        Span::styled(" ♪ ", Style::default().fg(theme.accent)),
+        Span::styled(
+            "ytm",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "tui",
+            Style::default()
+                .fg(theme.secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
     lines.push(account_line(app, width));
     lines.push(Line::from(""));
 
     let focused = app.focus == Focus::Sidebar;
     for (index, section) in Section::ALL.iter().enumerate() {
+        if GROUP_STARTS.contains(&index) {
+            lines.push(Line::from(""));
+        }
         lines.push(section_line(section, index, app, focused, width));
     }
 
@@ -84,7 +103,7 @@ fn account_line(app: &App, width: usize) -> Line<'static> {
             ])
         }
         AuthenticationState::Anonymous | AuthenticationState::InvalidCookies => {
-            let style = Style::default().fg(Color::DarkGray);
+            let style = Style::default().fg(app.theme().muted);
             Line::from(vec![
                 Span::styled(" ○ ", style),
                 Span::styled("not signed in".to_string(), style),
@@ -93,8 +112,9 @@ fn account_line(app: &App, width: usize) -> Line<'static> {
     }
 }
 
-/// One menu row. The selected section carries an accent bar; the background
-/// fill additionally shows whether the menu has keyboard focus.
+/// One menu row: icon + label. The selected section carries an accent bar;
+/// the background fill additionally shows whether the menu has keyboard
+/// focus.
 fn section_line(
     section: &Section,
     index: usize,
@@ -115,15 +135,26 @@ fn section_line(
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         };
-        let label = format!(" {:<w$}", section.label(), w = width.saturating_sub(2));
+        let label = format!(
+            " {} {:<w$}",
+            section.icon(),
+            section.label(),
+            w = width.saturating_sub(4)
+        );
         Line::from(vec![
             Span::styled("▍", Style::default().fg(theme.accent)),
             Span::styled(label, style),
         ])
     } else {
-        Line::from(Span::styled(
-            format!("  {}", section.label()),
-            Style::default().fg(Color::Gray),
-        ))
+        Line::from(vec![
+            Span::styled(
+                format!("  {} ", section.icon()),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                section.label().to_string(),
+                Style::default().fg(theme.subtext),
+            ),
+        ])
     }
 }

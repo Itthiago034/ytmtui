@@ -5,7 +5,11 @@
 #![allow(dead_code)]
 
 /// Representa uma faixa (música) do YouTube Music.
-#[derive(Debug, Clone, Default)]
+///
+/// Serializável para persistir o histórico local de reprodução
+/// (`recent.json`) entre sessões.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Track {
     /// Identificador do vídeo no YouTube (usado para streaming).
     pub video_id: String,
@@ -55,6 +59,8 @@ pub struct SearchResults {
     pub songs: Vec<Track>,
     pub playlists: Vec<Playlist>,
     pub artists: Vec<Artist>,
+    /// Álbuns (browseId `MPRE…`; abrem pelo mesmo `browse` das playlists).
+    pub albums: Vec<Playlist>,
 }
 
 /// One karaoke-style timed line of lyrics.

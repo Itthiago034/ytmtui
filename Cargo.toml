@@ -53,6 +53,7 @@ rustfft = "6"
 
 # Column-width-aware text truncation/padding (CJK/emoji occupy 2 columns)
 unicode-width = "0.2"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [profile.release]
 opt-level = 3

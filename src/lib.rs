@@ -3,6 +3,7 @@
 pub mod app;
 pub mod config;
 pub mod event;
+pub mod lyrics;
 pub mod player;
 pub mod theme;
 pub mod ui;

@@ -4,9 +4,15 @@ Todas as mudanças relevantes deste projeto são documentadas aqui.
 
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 
-## [Não lançado]
+## [0.2.0] - 2026-07-07
 
 ### Adicionado
+- **Rádio de semelhantes**: tocar uma música dos resultados da busca agora
+  inicia uma rádio em volta dela (como no YT Music) — a fila recebe as
+  faixas semelhantes em background, em vez de enfileirar o resto da busca.
+- **Letras em modo karaokê**: linha ativa com preenchimento progressivo
+  (accent) conforme o tempo da linha, texto centralizado, vizinhas esmaecendo
+  com a distância e o título da faixa no painel.
 - **Login in-app** (`g`): importa a sessão do navegador instalado (Brave,
   Chrome, Chromium, Edge, Vivaldi, Opera ou Firefox) via
   `yt-dlp --cookies-from-browser`, salva em `~/.config/ytmtui/cookies.txt` e
@@ -28,6 +34,11 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.
 - **Contador de itens** no canto inferior direito dos painéis de lista.
 - **Empty states** centralizados com glifo decorativo em Buscar, Fila,
   Playlists, Artistas, Biblioteca e Letra.
+
+### Corrigido
+- **Capa sumindo ao redimensionar** (Konsole/Kitty/Sixel): a arte é
+  retransmitida no evento de resize — terminais descartam os gráficos, mas o
+  protocolo cacheado achava que a imagem já tinha sido enviada.
 
 ### Alterado (visual)
 - **Barra de progresso** redesenhada no mesmo estilo do slider de volume

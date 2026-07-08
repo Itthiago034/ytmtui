@@ -24,7 +24,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Playlists => "Playlists".to_string(),
         Section::Artistas => "Artists".to_string(),
         Section::Fila => "Queue".to_string(),
-        Section::Letra => "Lyrics".to_string(),
+        // The Lyrics panel names the track it's showing lyrics for.
+        Section::Letra => match &app.current {
+            Some(t) => crate::ui::truncate_chars(
+                &format!("Lyrics — {}", t.title),
+                (area.width as usize).saturating_sub(12),
+            ),
+            None => "Lyrics".to_string(),
+        },
         Section::Ajuda => "Help".to_string(),
     };
 
@@ -684,10 +691,13 @@ fn draw_plain_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block, text: &
     f.render_widget(p, area);
 }
 
-/// Karaoke-style synced lyrics: the active line is highlighted in the
-/// theme's accent color, and the view auto-scrolls to keep it roughly
-/// centered (approximate — a single logical line that wraps to 2+ terminal
-/// rows will throw off exact centering, which is an acceptable v1 tradeoff).
+/// Karaoke-style synced lyrics, centered like a stage: the active line gets
+/// a per-character wipe (sung part in accent, rest bright) driven by the
+/// playback position within the line's [start_ms, end_ms] window, and the
+/// surrounding lines fade with distance — a spotlight around the moment.
+/// The view auto-scrolls to keep the active line roughly centered
+/// (approximate — a single logical line that wraps to 2+ terminal rows will
+/// throw off exact centering, which is an acceptable tradeoff).
 fn draw_synced_lyrics(
     f: &mut Frame,
     app: &App,
@@ -697,18 +707,25 @@ fn draw_synced_lyrics(
     active: Option<usize>,
 ) {
     let theme = app.theme();
+    let position_ms = app.player.position().as_millis() as u64;
     let rendered: Vec<Line> = lines
         .iter()
         .enumerate()
-        .map(|(i, l)| {
-            let style = if Some(i) == active {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.secondary)
-            };
-            Line::from(Span::styled(l.text.clone(), style))
+        .map(|(i, l)| match active {
+            Some(a) if i == a => karaoke_line(l, position_ms, theme),
+            Some(a) => {
+                let color = match a.abs_diff(i) {
+                    1 => theme.subtext,
+                    2 => theme.muted,
+                    _ => theme.border,
+                };
+                Line::from(Span::styled(l.text.clone(), Style::default().fg(color)))
+            }
+            // Before the first line starts, everything waits at equal volume.
+            None => Line::from(Span::styled(
+                l.text.clone(),
+                Style::default().fg(theme.subtext),
+            )),
         })
         .collect();
 
@@ -723,9 +740,39 @@ fn draw_synced_lyrics(
 
     let p = Paragraph::new(rendered)
         .block(block)
+        .alignment(Alignment::Center)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     f.render_widget(p, area);
+}
+
+/// The active lyric line with its karaoke wipe: characters whose share of
+/// the line's time window has already elapsed are sung (accent), the rest
+/// waits in bright text. Both halves stay bold so the active line pops from
+/// its dimmer neighbors even at the very start of the window.
+pub(super) fn karaoke_line(
+    l: &crate::ytmusic::LyricLine,
+    position_ms: u64,
+    theme: &'static Theme,
+) -> Line<'static> {
+    let window = l.end_ms.saturating_sub(l.start_ms).max(1);
+    let fraction = (position_ms.saturating_sub(l.start_ms) as f64 / window as f64).clamp(0.0, 1.0);
+    let width = crate::ui::display_width(&l.text);
+    let sung_cols = (fraction * width as f64).round() as usize;
+    let sung = crate::ui::take_width(&l.text, sung_cols);
+    let rest = l.text[sung.len()..].to_string();
+    Line::from(vec![
+        Span::styled(
+            sung,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            rest,
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 fn draw_help(f: &mut Frame, area: Rect, block: Block, theme: &'static Theme) {

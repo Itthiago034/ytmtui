@@ -447,12 +447,37 @@ fn take_width_hard_truncates_by_display_width_without_an_ellipsis() {
 }
 
 #[test]
+fn karaoke_wipe_splits_the_active_line_by_elapsed_time() {
+    let theme = crate::theme::get(0);
+    let line = crate::ytmusic::LyricLine {
+        text: "abcdefghij".to_string(), // 10 columns
+        start_ms: 1000,
+        end_ms: 2000,
+    };
+    // Halfway through the window: 5 sung columns, 5 waiting.
+    let rendered = super::main_panel::karaoke_line(&line, 1500, theme);
+    assert_eq!(rendered.spans.len(), 2);
+    assert_eq!(rendered.spans[0].content.as_ref(), "abcde");
+    assert_eq!(rendered.spans[0].style.fg, Some(theme.accent));
+    assert_eq!(rendered.spans[1].content.as_ref(), "fghij");
+    assert_eq!(rendered.spans[1].style.fg, Some(theme.text));
+
+    // Before the window: nothing sung yet; after: everything sung.
+    let before = super::main_panel::karaoke_line(&line, 0, theme);
+    assert_eq!(before.spans[0].content.as_ref(), "");
+    let after = super::main_panel::karaoke_line(&line, 9000, theme);
+    assert_eq!(after.spans[0].content.as_ref(), "abcdefghij");
+}
+
+#[test]
 fn synced_lyrics_highlight_only_the_active_line() {
     let mut app = playing_app();
     app.section = Section::Letra;
     app.focus = Focus::Main;
     let theme = app.theme();
-    let (accent, secondary) = (theme.accent, theme.secondary);
+    // New spotlight design: the active line's unsung text is bright
+    // (theme.text, bold); neighbors one line away fade to subtext.
+    let (active_color, neighbor_color) = (theme.text, theme.subtext);
     app.lyrics = crate::lyrics::LyricsState::Synced {
         lines: vec![
             crate::ytmusic::LyricLine {
@@ -500,13 +525,19 @@ fn synced_lyrics_highlight_only_the_active_line() {
     let (x, y) = find_cell("Second line");
     assert_eq!(
         buffer[(x, y)].fg,
-        accent,
-        "active line should use theme.accent"
+        active_color,
+        "the active line's waiting text is bright"
+    );
+    assert!(
+        buffer[(x, y)]
+            .modifier
+            .contains(ratatui::style::Modifier::BOLD),
+        "the active line is bold"
     );
     let (x, y) = find_cell("First line");
     assert_eq!(
         buffer[(x, y)].fg,
-        secondary,
-        "non-active line should use theme.secondary"
+        neighbor_color,
+        "lines one step away fade to subtext"
     );
 }

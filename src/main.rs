@@ -101,11 +101,18 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
             Duration::from_millis(800)
         };
         if cevent::poll(poll_timeout)? {
-            if let Event::Key(key) = cevent::read()? {
-                // Ignora eventos de "release" (relevante no Windows).
-                if key.kind == KeyEventKind::Press {
-                    event::handle_key(app, key);
+            match cevent::read()? {
+                Event::Key(key) => {
+                    // Ignora eventos de "release" (relevante no Windows).
+                    if key.kind == KeyEventKind::Press {
+                        event::handle_key(app, key);
+                    }
                 }
+                // Terminais com protocolo gráfico (Konsole incluso) descartam
+                // as imagens ao redimensionar; retransmite a capa e força um
+                // clear para não sobrar lixo gráfico da janela antiga.
+                Event::Resize(_, _) => app.rebuild_artwork(),
+                _ => {}
             }
         }
 

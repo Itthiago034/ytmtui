@@ -173,6 +173,13 @@ pub enum Msg {
         path: String,
         browser: String,
     },
+    /// Radio built around `seed` (a track played from the search results):
+    /// similar tracks to append to the queue *behind* what's playing —
+    /// unlike `RadioTracks`, which starts playback when the queue ran out.
+    RelatedTracks {
+        seed: String,
+        tracks: Vec<Track>,
+    },
 }
 
 /// Máximo de faixas mantidas no histórico local da tela Início.
@@ -256,6 +263,10 @@ pub struct App {
     pub liked: std::collections::HashSet<String>,
     /// Autoplay: continuar com uma rádio quando a fila termina.
     pub autoplay: bool,
+    /// Faixa-semente de uma rádio pendente: setada quando o Enter toca uma
+    /// música dos resultados da busca; consumida por `play_selected` para
+    /// buscar as semelhantes após iniciar a reprodução.
+    pending_radio_seed: Option<String>,
     /// Current cookie authentication state.
     pub authentication: AuthenticationState,
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
@@ -285,6 +296,11 @@ pub struct App {
     pub picker: Option<Picker>,
     /// Album art for the current track, prepared for the detected protocol.
     pub artwork: Option<StatefulProtocol>,
+    /// Decoded cover image the protocol above was built from. Kept so the
+    /// art can be re-transmitted after a terminal resize: Kitty/Sixel
+    /// terminals (Konsole included) drop their graphics on resize, while the
+    /// cached protocol still believes the image was already sent.
+    pub artwork_source: Option<image::DynamicImage>,
     /// Set when the album art changed and the terminal needs a full clear
     /// before the next draw. Kitty/Sixel graphics live outside ratatui's
     /// cell buffer, so terminals (Konsole included) can leave the previous
@@ -385,6 +401,7 @@ impl App {
             recent: load_recent(),
             liked: std::collections::HashSet::new(),
             autoplay: true,
+            pending_radio_seed: None,
             authentication,
             account_name,
             theme_index,
@@ -400,6 +417,7 @@ impl App {
             lyrics_scroll: 0,
             picker: None,
             artwork: None,
+            artwork_source: None,
             clear_screen: false,
             status,
             cookies,
@@ -429,12 +447,16 @@ impl App {
         self.is_loading() || (self.current.is_some() && !self.player.is_paused())
     }
 
-    /// Whether the Home screen's spectrum visualizer is actively animating:
-    /// only true while that section is open and a track is audibly playing.
-    /// The main loop uses this to redraw faster than the general animation
-    /// tier, since a spectrum needs to look like continuous motion.
+    /// Whether the open section is actively animating and needs the fast
+    /// redraw tier: the Home spectrum visualizer, or the synced-lyrics
+    /// karaoke wipe — both must look like continuous motion. Only true while
+    /// a track is audibly playing, so the cost is paid exactly when the
+    /// animation is visible.
     pub fn needs_fast_animation(&self) -> bool {
-        self.section == Section::Inicio && self.current.is_some() && !self.player.is_paused()
+        let animated_section = self.section == Section::Inicio
+            || (self.section == Section::Letra
+                && matches!(self.lyrics, crate::lyrics::LyricsState::Synced { .. }));
+        animated_section && self.current.is_some() && !self.player.is_paused()
     }
 
     /// Consumes the pending full-clear flag set by [`Self::clear_artwork`].
@@ -1010,7 +1032,47 @@ impl App {
     pub fn play_selected(&mut self) {
         if self.prepare_selection_for_playback() {
             self.start_current();
+            // A searched song seeds a radio of similar tracks (fetched in
+            // the background and appended behind the one now playing).
+            if let Some(seed) = self.pending_radio_seed.take() {
+                self.fetch_related(seed);
+            }
         }
+    }
+
+    /// Busca (em background) a rádio de faixas semelhantes à `seed` para
+    /// completar a fila atrás do que está tocando.
+    fn fetch_related(&self, seed: String) {
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(tracks) = client.get_radio(&seed).await {
+                let _ = tx.send(Msg::RelatedTracks { seed, tracks });
+            }
+        });
+    }
+
+    /// Anexa as faixas semelhantes ao fim da fila, sem duplicar o que já
+    /// está nela e só enquanto a `seed` ainda é a faixa atual (resultados
+    /// atrasados de uma faixa já pulada são descartados). Retorna quantas
+    /// entraram. Separado do handler para ser testável sem runtime.
+    fn append_related(&mut self, seed: &str, tracks: Vec<Track>) -> usize {
+        if !self.is_current_track(seed) {
+            return 0;
+        }
+        let before = self.queue.len();
+        for t in tracks {
+            if self.queue.iter().all(|q| q.video_id != t.video_id) {
+                self.queue.push(t);
+            }
+        }
+        let added = self.queue.len() - before;
+        if added > 0 {
+            if let Some(idx) = self.queue_index {
+                self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
+            }
+        }
+        added
     }
 
     /// Resolve o Enter da lista atual: monta a fila (retornando `true` para
@@ -1029,9 +1091,16 @@ impl App {
                     return false;
                 };
                 match hit {
+                    // Like YT Music: playing a searched song starts a radio
+                    // around it — the queue holds the song and gets filled
+                    // with similar tracks, not with the other search hits.
                     SearchHit::Song(i) => {
-                        self.queue = self.songs.clone();
-                        self.queue_index = Some(i);
+                        let Some(track) = self.songs.get(i).cloned() else {
+                            return false;
+                        };
+                        self.pending_radio_seed = Some(track.video_id.clone());
+                        self.queue = vec![track];
+                        self.queue_index = Some(0);
                     }
                     SearchHit::Artist(artist) => {
                         self.load_artist(artist);
@@ -1091,6 +1160,18 @@ impl App {
     /// cover don't linger behind whatever gets drawn next.
     fn clear_artwork(&mut self) {
         self.artwork = None;
+        self.artwork_source = None;
+        self.clear_screen = true;
+    }
+
+    /// Rebuilds the album-art protocol from the stored cover image and asks
+    /// for a full screen clear. Called on terminal resize, where graphics
+    /// protocols discard their placements but the cached protocol state
+    /// would otherwise never re-transmit the image.
+    pub fn rebuild_artwork(&mut self) {
+        if let (Some(picker), Some(img)) = (self.picker.as_mut(), self.artwork_source.as_ref()) {
+            self.artwork = Some(picker.new_resize_protocol(img.clone()));
+        }
         self.clear_screen = true;
     }
 
@@ -1399,11 +1480,14 @@ impl App {
                     if self.is_current_track(&video_id) {
                         // Decode the cover and prepare it for the terminal's
                         // image protocol; without a picker no art is shown.
-                        self.artwork = self.picker.as_mut().and_then(|picker| {
-                            image::load_from_memory(&bytes)
-                                .ok()
-                                .map(|img| picker.new_resize_protocol(img))
-                        });
+                        // The decoded image is kept so a terminal resize can
+                        // re-transmit it (see `rebuild_artwork`).
+                        let decoded = image::load_from_memory(&bytes).ok();
+                        self.artwork = match (self.picker.as_mut(), decoded.clone()) {
+                            (Some(picker), Some(img)) => Some(picker.new_resize_protocol(img)),
+                            _ => None,
+                        };
+                        self.artwork_source = decoded;
                     }
                 }
                 Msg::AudioReady { video_id, path } => {
@@ -1435,6 +1519,15 @@ impl App {
                         Err(e) => {
                             self.authentication = AuthenticationState::InvalidCookies;
                             self.status = format!("⚠ Cookies importados são inválidos: {e}");
+                        }
+                    }
+                }
+                Msg::RelatedTracks { seed, tracks } => {
+                    let added = self.append_related(&seed, tracks);
+                    if added > 0 {
+                        self.status = format!("📻 +{added} músicas semelhantes na fila.");
+                        if let Some(n) = self.next_index {
+                            self.prefetch(n);
                         }
                     }
                 }
@@ -1526,6 +1619,7 @@ impl App {
             recent: Vec::new(),
             liked: std::collections::HashSet::new(),
             autoplay: true,
+            pending_radio_seed: None,
             authentication: AuthenticationState::Anonymous,
             account_name: None,
             theme_index: 0,
@@ -1541,6 +1635,7 @@ impl App {
             lyrics_scroll: 0,
             picker: None,
             artwork: None,
+            artwork_source: None,
             clear_screen: false,
             status: "Ready.".to_string(),
             cookies: None,
@@ -1769,6 +1864,29 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn resize_rebuilds_artwork_from_the_stored_cover() {
+        let mut app = App::new_for_tests();
+        app.picker = Some(ratatui_image::picker::Picker::from_fontsize((8, 16)));
+        app.artwork_source = Some(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            32,
+            32,
+            image::Rgb([10, 20, 30]),
+        )));
+        app.artwork = None;
+        app.clear_screen = false;
+
+        app.rebuild_artwork();
+        assert!(app.artwork.is_some(), "protocol re-created from the source");
+        assert!(app.clear_screen, "full clear requested after resize");
+
+        // Without a stored cover (nothing playing) it must not fabricate art.
+        let mut idle = App::new_for_tests();
+        idle.picker = Some(ratatui_image::picker::Picker::from_fontsize((8, 16)));
+        idle.rebuild_artwork();
+        assert!(idle.artwork.is_none());
+    }
+
     fn mixed_search_app() -> App {
         let mut app = App::new_for_tests();
         app.search_mixed = true;
@@ -1819,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn entering_a_song_in_mixed_results_queues_only_the_songs_group() {
+    fn entering_a_song_in_mixed_results_seeds_a_radio_queue() {
         let mut app = mixed_search_app();
         app.section = Section::Buscar;
         app.list_state.select(Some(1)); // "Song two"
@@ -1827,8 +1945,49 @@ mod tests {
             app.prepare_selection_for_playback(),
             "songs start playback directly"
         );
-        assert_eq!(app.queue.len(), 2, "queue holds the songs group only");
-        assert_eq!(app.queue_index, Some(1));
+        // Like YT Music: the queue starts with just the chosen song, and a
+        // radio of similar tracks is scheduled to fill it.
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].video_id, "s2");
+        assert_eq!(app.queue_index, Some(0));
+        assert_eq!(app.pending_radio_seed.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn related_tracks_append_behind_the_playing_seed_without_duplicates() {
+        let seed = Track {
+            video_id: "s2".to_string(),
+            title: "Song two".to_string(),
+            ..Default::default()
+        };
+        let mut app = App::new_for_tests();
+        app.queue = vec![seed.clone()];
+        app.queue_index = Some(0);
+        app.current = Some(seed.clone());
+
+        let radio = vec![
+            seed.clone(), // radios echo the seed back — must not duplicate
+            Track {
+                video_id: "r1".to_string(),
+                ..Default::default()
+            },
+            Track {
+                video_id: "r2".to_string(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(app.append_related("s2", radio.clone()), 2);
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_index, Some(0), "playback position untouched");
+        assert_eq!(app.next_index, Some(1), "next track recomputed");
+
+        // A late radio for a track the user already skipped is discarded.
+        app.current = Some(Track {
+            video_id: "other".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(app.append_related("s2", radio), 0);
+        assert_eq!(app.queue.len(), 3);
     }
 
     #[test]

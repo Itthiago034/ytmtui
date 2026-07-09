@@ -1,17 +1,40 @@
-# 🎵 ytmtui
+<h1 align="center">ytmtui</h1>
 
-[![CI](https://github.com/Itthiago034/ytmtui/actions/workflows/ci.yml/badge.svg)](https://github.com/Itthiago034/ytmtui/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Itthiago034/ytmtui?include_prereleases&sort=semver)](https://github.com/Itthiago034/ytmtui/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <strong>YouTube Music no seu terminal.</strong><br />
+  Busque, toque, organize a fila, acompanhe letras e mantenha a música perto do shell.
+</p>
 
-**Português** · [English](README.md)
+<p align="center">
+  <a href="https://github.com/Itthiago034/ytmtui/actions/workflows/ci.yml">
+    <img src="https://github.com/Itthiago034/ytmtui/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+  <a href="https://github.com/Itthiago034/ytmtui/releases">
+    <img src="https://img.shields.io/github/v/release/Itthiago034/ytmtui?include_prereleases&sort=semver&label=release&color=ff2d46" alt="Release" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="Licença MIT" />
+  </a>
+  <img src="https://img.shields.io/badge/Rust-Ratatui-f97316?logo=rust&logoColor=white" alt="Rust + Ratatui" />
+</p>
 
-**ytmtui** é um cliente de terminal (TUI – *Terminal User Interface*) para o
-**YouTube Music**, escrito em **Rust** com a biblioteca **[Ratatui](https://ratatui.rs)**.
-Inspirado em clientes como o *spotify-tui*, ele permite **buscar, navegar e ouvir
-músicas do YouTube Music direto do terminal**, sem precisar de login.
+<p align="center">
+  <a href="https://git.io/typing-svg">
+    <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=500&size=16&duration=2600&pause=900&color=FF2D46&center=true&vCenter=true&width=700&lines=Navegação+musical+focada+no+teclado;Letras+sincronizadas+e+visualizador+em+tempo+real;Playback+de+terminal+movido+a+Rust" alt="Destaques animados do ytmtui" />
+  </a>
+</p>
 
-```
+<p align="center">
+  <strong>Português</strong> · <a href="README.md">English</a>
+</p>
+
+**ytmtui** é um cliente de terminal (TUI) para o **YouTube Music**, escrito em
+**Rust** com **[Ratatui](https://ratatui.rs)**. Ele leva busca, reprodução,
+gerenciamento de fila, letras sincronizadas, temas, capa do álbum e um
+visualizador de áudio em tempo real para uma interface de terminal focada no
+teclado.
+
+```text
  ♫ ytmtui        ┌ Buscar ─────────────────────────────────────────────┐
 ─────────────────│ 🔍 coldplay yellow                                  │
   T  Thiago S.   └─────────────────────────────────────────────────────┘

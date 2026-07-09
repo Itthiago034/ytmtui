@@ -1,109 +1,115 @@
-# Solução de problemas
+# Solução de Problemas
 
 **Português** · [English](TROUBLESHOOTING.md)
 
-Passo a passo para os problemas mais comuns. Se o seu não estiver aqui, abra
-uma issue com seu sistema operacional, emulador de terminal, e a mensagem de
-erro exata.
+Correções rápidas para os problemas mais prováveis de interromper a reprodução.
+Se o seu caso não estiver aqui, abra uma issue com sistema operacional,
+emulador de terminal, método de instalação e a mensagem de erro exata.
 
-## Aviso de "dependências ausentes" ao iniciar
+Docs úteis junto deste guia:
 
-O ytmtui checa `yt-dlp`, `ffmpeg` e `deno` ao iniciar
-(`player::missing_dependencies()` em `src/player/mod.rs`) e mostra um aviso
-na barra de status se algum essencial (`yt-dlp`, `ffmpeg`) estiver
-faltando — a reprodução falha ou trava sem eles.
+- [Primeiros Passos](GETTING_STARTED.pt-BR.md)
+- [Autenticação](AUTHENTICATION.pt-BR.md)
+- [Mapa de Teclas](KEYMAP.pt-BR.md)
 
-1. Instale o `yt-dlp`: `pip install yt-dlp` (ou o pacote da sua distro).
-2. Instale o `ffmpeg`: `apt install ffmpeg` (Debian/Ubuntu) ou
-   `brew install ffmpeg` (macOS).
-3. Instale o `deno` (opcional, mas exigido por versões recentes do
-   `yt-dlp` para alguns desafios de JS): veja https://deno.land.
-4. Reinicie o ytmtui — o aviso só aparece uma vez, ao abrir.
+## Dependências Ausentes ao Iniciar
 
-## Sessão expirada / "Session expired. Refresh browser cookies and restart"
+O ytmtui checa `yt-dlp`, `ffmpeg` e `deno` ao abrir. A reprodução precisa de
+`yt-dlp` e `ffmpeg`; `deno` é recomendado para desafios JavaScript recentes do
+`yt-dlp`.
 
-A sessão do seu arquivo de cookies não é mais válida (sessões do YouTube
-Music expiram naturalmente). Correção:
+| Faltando | Correção |
+|---|---|
+| `yt-dlp` | `pip install yt-dlp` ou pacote da sua distro |
+| `ffmpeg` | `apt install ffmpeg`, `brew install ffmpeg` ou equivalente |
+| `deno` | Instale por https://deno.land |
 
-```bash
-./scripts/refresh-cookies.sh brave   # ou: firefox
+Reabra o app depois de instalar ferramentas ausentes.
+
+## Sessão Expirada
+
+Se dados da conta sumirem ou a UI informar sessão expirada, renove os cookies.
+
+Dentro do ytmtui:
+
+```text
+pressione g
 ```
 
-Garanta que você está realmente logado em
-[music.youtube.com](https://music.youtube.com) nesse navegador antes — o
-script exporta os cookies de sessão que o navegador tiver no momento.
-Depois reinicie o ytmtui. Busca, playlists públicas e letras continuam
-funcionando nesse meio tempo; só os dados da conta (sua biblioteca,
-curtidas) ficam limpos até você atualizar.
+Ou pelo shell:
 
-## YouTube bloqueia a reprodução com "Sign in to confirm you're not a bot"
+```bash
+./scripts/refresh-cookies.sh brave
+```
 
-Comum em IPs de datacenter/servidor, não em conexões residenciais pessoais.
-Exporte um arquivo de cookies e aponte `YTM_COOKIES` para ele — isso não
-exige usar uma conta para a biblioteca, é só pra satisfazer a checagem
-anti-bot:
+Confirme que o navegador está logado em
+[music.youtube.com](https://music.youtube.com). Busca pública, navegação pública
+e letras continuam funcionando enquanto dados de conta ficam limpos.
+
+## YouTube Mostra "Sign in to confirm you're not a bot"
+
+Isso costuma afetar IPs de datacenter/servidor. Use um arquivo de cookies para
+resolver o áudio mesmo que você não precise de recursos de biblioteca:
 
 ```bash
 export YTM_COOKIES="/caminho/para/cookies.txt"
-./target/release/ytmtui
+ytmtui
 ```
 
-Você pode gerar esse arquivo do mesmo jeito que pra fazer login
-(`./scripts/refresh-cookies.sh <navegador>`), ou exportar um manualmente do
-navegador (ex.: a extensão "Get cookies.txt"), em formato Netscape.
+Gere cookies com `g` dentro do app, `./scripts/refresh-cookies.sh <navegador>`
+ou uma exportação do navegador em formato Netscape.
 
-## Sem som nenhum, sem erro exibido
+## Sem Som
 
-O `OutputStream::try_default()` do `rodio` (em `src/player/mod.rs`) falha
-silenciosamente se não houver dispositivo de saída de áudio disponível — a
-thread de áudio simplesmente encerra sem mostrar um erro na interface.
-Verifique:
+Cheque a pilha de áudio primeiro:
 
-1. Existe algum dispositivo de áudio disponível no sistema de fato?
-   (`aplay -l` no Linux, ou confira as configurações de som do seu SO.)
-2. No Linux, o ALSA está instalado? (`apt install libasound2-dev` —
-   necessário para compilar; a biblioteca de tempo de execução geralmente
-   já está presente.)
-3. Em um ambiente headless/servidor/container, pode não haver dispositivo
-   de áudio nenhum — os controles de reprodução vão parecer não fazer nada,
-   já que não há pra onde mandar o som.
+1. Confirme que o sistema tem um dispositivo de saída.
+2. No Linux, instale bibliotecas de desenvolvimento ALSA se for compilar do
+   código-fonte: `apt install libasound2-dev`.
+3. Evite ambientes headless/servidor/container se eles não expõem dispositivo
+   de áudio.
+4. Confirme que outro app local consegue tocar som.
 
-## A capa do álbum não aparece (só espaço em branco ou blocos quando eu esperava uma imagem de verdade)
+Se não houver dispositivo de saída, os controles podem parecer funcionar, mas
+não há para onde o `rodio` enviar áudio.
 
-O ytmtui detecta suporte a protocolo de imagem do terminal ao iniciar
-(`env_reports_image_support` em `src/main.rs`) e só *consulta* terminais que
-reconhece (Kitty, Ghostty, WezTerm, iTerm2, foot, Konsole) — consultar um
-terminal desconhecido arrisca ele nunca responder e roubar teclas do laço
-de eventos, então terminais desconhecidos sempre recebem a alternativa em
-blocos Unicode. Se o seu terminal suporta gráficos Kitty, Sixel ou iTerm2
-mas não é reconhecido, isso é uma limitação conhecida, não um bug — sinta-se
-à vontade para abrir uma issue citando seu terminal e os valores de
-`$TERM`/`$TERM_PROGRAM`.
+## Capa do Álbum Não Renderiza
 
-Se o seu terminal *é* um dos reconhecidos e você ainda só vê blocos,
-confira se o suporte ao protocolo de imagem está realmente habilitado
-(alguns terminais escondem isso atrás de uma configuração).
+O ytmtui só consulta terminais que reconhece como capazes de responder a
+protocolos de imagem. Terminais reconhecidos incluem Kitty, Ghostty, WezTerm,
+iTerm2, foot e Konsole.
 
-## A capa do álbum mostra rapidamente a capa da faixa anterior ("fantasma")
+Se o terminal é desconhecido, o ytmtui usa fallback em blocos Unicode. Se o
+terminal é reconhecido mas imagens ainda não aparecem, confira se o suporte ao
+protocolo de imagem está habilitado.
 
-Esse era um bug real (gráficos Kitty/Sixel podem sobreviver à célula do
-terminal que os exibiu) e está corrigido desde a versão que adicionou o
-visualizador de espectro em tempo real — o terminal agora é limpo à força a
-cada troca de faixa. Se você ainda ver isso numa versão atual, abra uma
-issue com seu emulador de terminal.
+## Fantasma de Capa do Álbum
 
-## As letras aparecem como texto simples em vez de sincronizadas/destacadas
+Gráficos Kitty/Sixel podem sobreviver às células do terminal que os exibiram.
+Builds atuais limpam o terminal à força em trocas de faixa e redimensionamento.
+Se ainda acontecer em uma build atual, abra uma issue com nome e versão do
+terminal.
 
-Esse é o comportamento esperado para faixas que não têm letra com timestamp
-por linha no catálogo do YouTube Music — o ytmtui sempre tenta o caminho de
-letras sincronizadas primeiro e só cai para o texto simples do Musixmatch
-quando não há timestamps disponíveis para aquela faixa específica. Não é
-algo que dá pra forçar; depende inteiramente do que o YouTube Music indexou
-pra aquela música.
+## Letras Aparecem Como Texto Simples
 
-## A sincronização em segundo plano parece muito frequente / pouco frequente
+Algumas faixas não têm letras com timestamp no catálogo do YouTube Music. O
+ytmtui tenta letras sincronizadas primeiro e cai para texto simples estilo
+Musixmatch quando timestamps não estão disponíveis.
 
-Ajuste `sync_interval_secs` em `~/.config/ytmtui/config.json` (segundos
-entre atualizações automáticas de Início/Biblioteca; padrão `300`). Valores
-abaixo de 30 são elevados para um piso de 30 segundos, pra evitar um loop
-quente de chamadas à API.
+## Sincronização em Segundo Plano Muito Rápida ou Lenta
+
+Edite `sync_interval_secs` em `~/.config/ytmtui/config.json`.
+
+```json
+{
+  "sync_interval_secs": 300
+}
+```
+
+Valores abaixo de 30 segundos são elevados para um piso de 30 segundos.
+
+## Busca Funciona, Mas Biblioteca da Conta Não
+
+A busca pode rodar de forma anônima. Biblioteca, nome da conta, playlists
+privadas, curtidas e recomendações personalizadas precisam de cookies válidos.
+Pressione `g` ou veja [Autenticação](AUTHENTICATION.pt-BR.md).

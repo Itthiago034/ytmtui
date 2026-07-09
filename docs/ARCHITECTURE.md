@@ -1,305 +1,197 @@
-# Arquitetura do ytmtui
+# Architecture
 
-Este documento descreve, em profundidade, como o **ytmtui** é organizado: os
-módulos, o modelo de concorrência, os fluxos principais (busca, reprodução,
-autenticação, rádio, recomendações) e os pontos de extensão. É a leitura
-recomendada para quem vai contribuir com o código.
+Deep technical notes for contributors. For user-facing docs, start with the
+[README](../README.md), [Getting Started](GETTING_STARTED.md), or
+[Features](FEATURES.md).
 
-> Visão geral rápida e instruções de uso estão no [README](../README.md).
+## System Overview
 
----
+ytmtui is a Rust terminal client for YouTube Music. It uses:
 
-## 1. Visão geral
+- **Ratatui + crossterm** for the terminal UI and input loop.
+- **Tokio** for background network and blocking work.
+- **InnerTube** (`music.youtube.com/youtubei/v1/*`) for metadata, search,
+  account, library, home shelves, lyrics, and radio.
+- **yt-dlp + ffmpeg + rodio** for audio resolution, remuxing, decoding, and
+  playback.
+- **rustfft** for the real-time audio spectrum visualizer.
+- **ratatui-image** for terminal album art where the terminal supports it.
 
-O ytmtui é um cliente de terminal (TUI) para o YouTube Music escrito em Rust.
-Ele conversa **diretamente** com a API interna (*InnerTube*) do YouTube Music
-(`music.youtube.com/youtubei/v1/*`) para buscar, navegar e obter metadados, e
-usa o `yt-dlp` + `ffmpeg` + `rodio` para resolver e reproduzir o áudio.
-
-```
+```text
                  ┌──────────────────────────────────────────────┐
-                 │                    main.rs                     │
-                 │  terminal (crossterm) + laço de eventos        │
-                 └───────────────┬───────────────────────────────┘
-                                 │ desenha            ▲ eventos de tecla
-                                 ▼                    │
-        ┌────────────────────────────────┐   ┌───────┴───────────┐
-        │             ui/                 │   │      event.rs     │
-        │ mod · nav · main_panel ·        │   │  teclas → ações   │
-        │ now_playing  (render do App)    │   └───────┬───────────┘
-        └────────────────┬───────────────┘           │ muta
-                         ▲ lê estado                  ▼
-                 ┌────────┴──────────────────────────────────────┐
+                 │                    main.rs                   │
+                 │ terminal setup + synchronous event loop      │
+                 └───────────────┬──────────────────────────────┘
+                                 │ draw                 ▲ key events
+                                 ▼                      │
+        ┌────────────────────────────────┐     ┌────────┴────────┐
+        │              ui/               │     │     event.rs    │
+        │ nav · main_panel · now_playing │     │ keys → App APIs │
+        └────────────────┬───────────────┘     └────────┬────────┘
+                         ▲ reads state                  │ mutates
+                         │                              ▼
+                 ┌───────┴───────────────────────────────────────┐
                  │                    app.rs                       │
-                 │  App: estado central + coordenação de tasks     │
-                 │  (fila, seções, tema, conta, mensagens)         │
+                 │ central state, queue, sections, tasks, messages │
                  └───┬───────────────┬───────────────┬────────────┘
-                     │               │               │
-              spawn  │        spawn  │        spawn  │  (Tokio)
+                     │ spawn         │ spawn         │ config/theme
                      ▼               ▼               ▼
-             ┌───────────┐   ┌───────────────┐   ┌───────────────┐
-             │ ytmusic/  │   │   player/     │   │  config.rs    │
-             │ InnerTube │   │ yt-dlp+rodio  │   │  theme.rs     │
-             └───────────┘   └───────────────┘   └───────────────┘
+             ┌────────────┐  ┌────────────────┐  ┌────────────────┐
+             │ ytmusic/   │  │    player/     │  │ config/theme   │
+             │ InnerTube  │  │ yt-dlp+rodio   │  │ persistence    │
+             └────────────┘  └────────────────┘  └────────────────┘
                      ▲               │
-                     └── canal mpsc ─┴──► App.drain_messages() (Msg)
+                     └── mpsc Msg ───┴──► App::drain_messages()
 ```
 
----
+## Module Map
 
-## 2. Estrutura de módulos
+| Path | Responsibility |
+|---|---|
+| `src/main.rs` | Terminal setup, panic hook, image-protocol detection, initial app load, main loop. |
+| `src/lib.rs` | Public module wiring for tests and examples. |
+| `src/app.rs` | Central application state, async task coordination, queue, sections, playback orchestration, recent history. |
+| `src/app/authentication.rs` | Browser-cookie discovery/import through `yt-dlp --cookies-from-browser`. |
+| `src/config.rs` | Persistent JSON config: volume, shuffle, repeat, cookies, theme, username, sync interval. |
+| `src/theme.rs` | Accent themes and tinted UI palette helpers. |
+| `src/event.rs` | Keyboard events mapped to `App` methods. |
+| `src/visualizer.rs` | FFT spectrum analyzer fed by decoded playback samples. |
+| `src/lyrics.rs` | UI-facing lyrics state and active-line advancement. |
+| `src/ytmusic/mod.rs` | InnerTube client: search, browse, home, library, account, lyrics, radio, likes. |
+| `src/ytmusic/auth.rs` | Netscape cookie parsing and `SAPISIDHASH` authorization. |
+| `src/ytmusic/models.rs` | Shared data models: tracks, playlists/albums, artists, home sections, lyrics, search results. |
+| `src/ytmusic/parse.rs` | JSON traversal and extraction helpers for InnerTube's nested responses. |
+| `src/player/mod.rs` | Audio thread, download/remux/cache/prefetch, playback commands. |
+| `src/player/tap.rs` | Sample tap that feeds the visualizer without changing audio output. |
+| `src/ui/mod.rs` | Root responsive layout, search input, status/shortcut bar. |
+| `src/ui/nav.rs` | Sidebar identity, sections, account state, and album art area. |
+| `src/ui/main_panel.rs` | Home, search, lists, queue, lyrics, help, and empty states. |
+| `src/ui/now_playing.rs` | Compact now-playing line and progress display. |
 
-| Arquivo | Responsabilidade |
-|---------|------------------|
-| `main.rs` | Ponto de entrada. Configura o terminal (raw mode + tela alternativa), instala o hook de panic, cria o `App`, dispara os carregamentos iniciais (`load_home`, `load_library`, `load_account`) e roda o laço principal. |
-| `lib.rs` | Reexporta os módulos públicos (permite `examples/` e testes). |
-| `app.rs` | **Coração da aplicação.** Define `App` (todo o estado), o enum `Section`, `Focus`, `RepeatMode`, o enum de mensagens `Msg` e toda a lógica de coordenação. |
-| `event.rs` | Traduz teclas (`crossterm::KeyEvent`) em chamadas de métodos do `App`. |
-| `config.rs` | Configuração persistente em JSON (`~/.config/ytmtui/config.json`). |
-| `theme.rs` | Temas de cores (presets de acento) e helpers de seleção por nome. |
-| `ytmusic/mod.rs` | Cliente HTTP da API InnerTube: busca, playlists, biblioteca, home (em seções), artista, rádio, letras (sincronizadas ou não), conta e curtir. |
-| `ytmusic/auth.rs` | Autenticação por cookies (formato Netscape) + cálculo do `SAPISIDHASH`. |
-| `ytmusic/models.rs` | Modelos de dados: `Track`, `Playlist`, `Artist`, `HomeSection`, `LyricLine`, `Lyrics`, `SearchResults`. |
-| `ytmusic/parse.rs` | Helpers de parsing do JSON aninhado (busca recursiva por chaves, runs, thumbnails, durações, continuações, panel video, letras sincronizadas, seções da Home). |
-| `visualizer.rs` | Analisador de espectro (FFT via `rustfft`) para o visualizador em tempo real da tela Início. |
-| `lyrics.rs` | Estado das letras exibidas na UI (`LyricsState`) e avanço eficiente da linha ativa em letras sincronizadas. |
-| `player/mod.rs` | Player de áudio (thread `rodio` dedicada) + download/remux via `yt-dlp`/`ffmpeg` + cache. |
-| `player/tap.rs` | Intercepta as amostras decodificadas durante a reprodução e as encaminha (sem alterar o áudio) para o `visualizer.rs`. |
-| `ui/mod.rs` | Root layout (wide/narrow responsive split), search input line and status/shortcut bar. |
-| `ui/nav.rs` | Navigation column: app identity, account state and section menu (wide layout). |
-| `ui/main_panel.rs` | Painel principal (listas de músicas/playlists/artistas/fila, letra, ajuda, início). |
-| `ui/now_playing.rs` | Compact two-line playback summary: track line and progress gauge. |
+## Runtime Model
 
----
+The UI loop is synchronous and draws from `App` state. Expensive work never runs
+inside drawing:
 
-## 3. Modelo de concorrência
+1. `terminal.draw(ui::draw)` renders current state.
+2. `crossterm::event::poll` waits for key events.
+3. `event::handle_key` calls methods on `App`.
+4. Background work sends `Msg` values through an `mpsc` channel.
+5. `App::drain_messages()` applies completed work to state.
+6. `App::tick()` advances periodic behavior such as playback progress, synced
+   lyrics, automatic queue advance, and background Home/Library sync.
 
-O ytmtui combina um **laço síncrono** de UI com **tasks assíncronas** do Tokio,
-além de uma **thread dedicada** para áudio.
+The `rodio::OutputStream` is not `Send`, so playback lives on a dedicated audio
+thread controlled by commands such as play, pause, stop, seek, and volume.
 
-- **Laço principal (`main::run`)** — síncrono. A cada iteração:
-  1. `terminal.draw(ui::draw)` renderiza o estado atual.
-  2. `crossterm::event::poll` waits up to 200 ms for a key while something is
-     animating (loading spinner, playback progress) and up to 800 ms when the
-     app is idle; a pressed key is handled immediately by `event::handle_key`.
-  3. `app.drain_messages()` consome as mensagens das tasks.
-  4. `app.tick()` faz tarefas periódicas (auto-avanço da faixa).
+## Search Flow
 
-- **Tasks Tokio** — trabalho de I/O (rede, download) roda em `tokio::spawn` /
-  `tokio::task::spawn_blocking`, para nunca travar a UI. Elas se comunicam com o
-  laço por um canal **`mpsc::unbounded`**: enviam variantes de `Msg`, que o
-  `drain_messages()` aplica ao estado. Esse é o único caminho de volta para a UI.
+`/` → query → `Enter` → `App::do_search` → `YtMusicClient::search`.
 
-- **Thread de áudio (`player::audio_thread`)** — a `OutputStream` do `rodio`
-  não é `Send`, então roda em uma thread própria, controlada por comandos
-  (`Cmd::Play/Pause/Resume/Stop/SetVolume/Seek`) via `mpsc`. Estado compartilhado
-  (posição, fim da faixa) fica em `Arc<Mutex<SharedState>>`.
+Search runs four sub-searches in parallel:
 
-### Mensagens (`Msg`)
+- songs
+- artists
+- albums
+- playlists
 
-`SearchResults`, `LibraryPlaylists`, `HomeSections`, `RadioTracks`,
-`AccountName`, `PlaylistTracks`, `Lyrics`, `ArtworkBytes`, `AudioReady`,
-`Status`, `Error`. Cada task de background termina enviando uma dessas.
-`Lyrics`, `ArtworkBytes` e `AudioReady` carregam o `video_id` da faixa junto
-com o payload, para que uma resposta atrasada de uma faixa já pulada seja
-descartada em vez de sobrescrever o estado da faixa atual.
+Results are grouped in the UI. `Enter` on a song starts playback, on an artist
+loads top tracks, and on an album/playlist loads tracks through browse and
+continuation pagination.
 
----
+## Playback Flow
 
-## 4. Fluxos principais
+`Enter` on a track calls `App::start_current`:
 
-### 4.1 Busca
-`/` → digita → `Enter` → `App::do_search` → `tokio::spawn` →
-`YtMusicClient::search` (roda **três sub-buscas em paralelo** com `tokio::join!`:
-músicas, artistas, playlists) → `Msg::SearchResults` → atualiza as listas.
+1. `player::download_audio` resolves the best audio through `yt-dlp`.
+2. Cached audio is reused when available.
+3. M4A/AAC is remuxed to ADTS via `ffmpeg -c copy`, avoiding re-encode.
+4. `Msg::AudioReady(path)` returns to the app.
+5. The audio thread plays the file with `rodio`.
+6. In parallel, ytmtui fetches lyrics, artwork, and prefetches the next track.
 
-### 4.2 Reprodução (com remux)
-`Enter` em uma música → `App::play_selected` define a fila e `start_current`:
-1. `spawn_blocking` → `player::download_audio`:
-   - **cache**: se o `videoId` já foi baixado, reusa o arquivo.
-   - `yt-dlp` baixa o melhor áudio (`bestaudio[ext=m4a]/bestaudio`) usando
-     `deno` como runtime JS.
-   - **remux**: `ffmpeg -c:a copy -f adts` converte o `m4a`/AAC para ADTS
-     (`.aac`) **sem re-encode** — evita o *panic* de *seek* do symphonia
-     (rodio 0.20) e é praticamente instantâneo. *Fallback*: transcodifica para
-     `mp3`; sem `ffmpeg`, devolve o original (decodificação protegida por
-     `catch_unwind`).
-   - → `Msg::AudioReady(path)` → `player.play_file`.
-2. Em paralelo: pré-calcula e **pré-baixa** (`prefetch`) a próxima faixa;
-   busca **letras** (`get_lyrics`) e a **capa** (`fetch_bytes`).
+Natural track end is detected through shared player state and handled in
+`App::tick()`. Repeat, shuffle, and radio/autoplay determine what happens next.
 
-O fim natural da faixa é detectado em `player` (`sink.empty()`), sinalizado por
-`SharedState.finished` e tratado em `App::tick` → `advance_auto`.
+## Authentication Flow
 
-### 4.3 Autoplay / rádio
-Em `advance_auto`, quando a fila termina sem repetição e `autoplay` está ligado,
-usa a última faixa como semente: `YtMusicClient::get_radio` (endpoint `next` com
-`playlistId = RDAMVM<videoId>`) → `Msg::RadioTracks` → anexa à fila e continua.
+ytmtui has anonymous, authenticated, invalid-cookie, and expired-session states.
 
-### 4.4 Cookie authentication
+Cookie sources are resolved in this order:
 
-At startup, `App::new` resolves cookie paths in this order: `YTM_COOKIES`,
-`config.cookies`, then `~/.config/ytmtui/cookies.txt`. Invalid files produce
-`AuthenticationState::InvalidCookies` and leave the public client available in
-anonymous mode.
+1. `YTM_COOKIES`.
+2. `config.cookies`.
+3. `~/.config/ytmtui/cookies.txt`.
 
-`YtMusicClient::with_cookies` parses the Netscape file, prefers YouTube-domain
-values when cookie names overlap Google domains, deduplicates names, and
-extracts `SAPISID` or `__Secure-3PAPISID`. Authenticated requests add `Cookie`,
-`Authorization: SAPISIDHASH <timestamp>_<sha1>`, `X-Goog-AuthUser`, and
-`X-Origin` headers.
+Pressing `g` triggers in-app sign-in through `src/app/authentication.rs`, which
+uses `yt-dlp --cookies-from-browser` to import browser cookies and write the
+default cookie file. The client reconnects without requiring a full restart.
 
-The client classifies authenticated HTTP `401` and `403` responses as
-`YtMusicError::SessionExpired`. The application transitions to
-`AuthenticationState::Expired`, clears account-only state, and retains public
-search. Other HTTP and transport failures remain ordinary recoverable errors.
+Authenticated requests add `Cookie`, `Authorization: SAPISIDHASH ...`,
+`X-Goog-AuthUser`, and `X-Origin` headers. Authenticated `401`/`403` responses
+transition to expired state while public search and playback paths remain
+available.
 
-`scripts/refresh-cookies.sh` exports into a temporary mode-`600` file and moves
-it into place only after a successful non-empty export. A failed export leaves
-the previous cookie file untouched.
+## Home and Recent History
 
-### 4.5 Início, biblioteca e conta
-No boot, três tasks populam: `get_home` (`FEmusic_home`), `get_library_playlists`
-(`FEmusic_liked_playlists`, requer login) e `get_account_name`
-(`account/account_menu`). O nome da conta aparece na barra lateral (ou o
-`username` da config, se definido).
+Home uses YouTube Music shelves (`musicCarouselShelfRenderer`) rather than a
+flat recommendation list. Deduplication is scoped per shelf because the same
+album or playlist can legitimately appear in multiple sections.
 
-### 4.6 Curtir
-`f` → `App::like_current` alterna com base no conjunto `liked` da sessão →
-`YtMusicClient::rate_song` (`like/like` ou `like/removelike`). Requer login.
+Recently played tracks are stored locally in `recent.json` under the app config
+directory. They render before remote Home sections and can be played directly.
 
-### 4.7 Letras sincronizadas
+Background sync reloads Home and Library periodically using
+`sync_interval_secs`, preserving the current selection by `browse_id` when
+possible.
 
-`get_lyrics` primeiro descobre o `browseId` da aba de letras via o endpoint
-`next` (cliente `WEB_REMIX`, igual às demais chamadas). Em seguida:
+## Lyrics
 
-1. Tenta o `browse` desse mesmo `browseId` com a identidade de cliente do
-   app **Android** (`ANDROID_MUSIC`) — a única forma conhecida de obter
-   letras com timestamp por linha (`timedLyricsData`, com
-   `startTimeMilliseconds`/`endTimeMilliseconds`). Se presentes, retorna
-   `Lyrics::Synced(Vec<LyricLine>)`.
-2. Caso contrário, cai para o caminho original: `browse` com `WEB_REMIX`,
-   extraindo o texto plano (`musicDescriptionShelfRenderer.description`,
-   geralmente via Musixmatch) como `Lyrics::Plain(String)`.
+Lyrics resolution starts from the `next` endpoint to discover the lyrics
+`browseId`.
 
-Na UI, `App::tick()` avança a linha ativa (`lyrics::advance_active_line`) a
-cada iteração, comparando `player.position()` com os timestamps — o cursor
-só anda para frente no caso comum (reprodução monótona) e usa busca binária
-apenas ao detectar um retrocesso (seek ou repetição da faixa). `draw_lyrics`
-em `ui/main_panel.rs` despacha para o renderizador certo conforme o
-`LyricsState` atual.
+1. ytmtui first tries the Android Music client identity for timed lyrics.
+2. If per-line timestamps exist, the UI uses synced karaoke-style state.
+3. Otherwise it falls back to plain text from the Web Remix path.
 
-### 4.8 Início em seções
+The active synced line advances during `App::tick()` by comparing player
+position with lyric timestamps.
 
-`get_home()` não achata mais a resposta do `FEmusic_home` numa lista só:
-agrupa por `musicCarouselShelfRenderer` (as mesmas prateleiras nomeadas que
-o próprio YouTube Music mostra — "Quick picks", "Mixed for you" etc.),
-descartando prateleiras sem título ou que fiquem vazias após o filtro de
-itens navegáveis. A deduplicação de itens é **por prateleira**, não global:
-o mesmo álbum/playlist pode aparecer legitimamente em mais de uma seção.
+## Visuals
 
-Na UI, `draw_home_sections` (em `ui/main_panel.rs`) intercala uma linha de
-cabeçalho (não selecionável) por seção com os itens dela numa única lista
-rolável; como isso desloca o índice real de seleção, um `ListState`
-"sombra" remapeia a seleção (`app.list_state`, sobre itens apenas) para a
-linha correta nessa lista intercalada antes de renderizar.
+Album art support is detected at startup. Known capable terminals are queried
+for image protocol support; unknown terminals receive a Unicode half-block
+fallback to avoid blocking the input loop.
 
-### 4.9 Sincronização em segundo plano
+The visualizer receives decoded samples through `player/tap.rs` and computes a
+real FFT spectrum in `visualizer.rs`.
 
-`App::tick()` verifica a cada iteração se `last_synced.elapsed() >=
-sync_interval` (configurável via `sync_interval_secs`, mínimo efetivo de
-30s); quando vence, chama `sync_home_and_library()`, que apenas reexecuta
-`load_home()`/`load_library()` — as mesmas chamadas do carregamento inicial,
-sem endpoints novos. Como isso pode disparar enquanto o usuário navega a
-própria seção, `drain_messages()` procura o `browse_id` do item selecionado
-antes de substituir a lista e tenta reencontrá-lo na lista nova, só caindo
-para o topo (índice 0) no primeiríssimo carregamento (lista antes vazia) ou
-recuando para o índice válido mais próximo se o item selecionado tiver
-desaparecido.
+## Persistence
 
----
-
-## 5. Estado da UI
-
-`App` guarda tudo que a UI precisa; os módulos de `ui/` são **stateless** e só
-leem o `App` (recebem `&App`/`&mut App`). Destaques:
-
-- **Seções** (`Section`): Início, Buscar, Biblioteca, Playlists, Artistas, Fila,
-  Letra, Ajuda — a ordem é a exibida no menu.
-- **Foco** (`Focus`): `Sidebar` ou `Main`, controla para onde vão as setas.
-- **Listas**: `songs`, `playlists`, `artists`, `library`, `home` (agora
-  `Vec<HomeSection>`, não mais uma lista achatada), `queue` + `list_state`
-  (seleção) reaproveitado entre seções. Helpers `home_item_count`,
-  `home_item_at` e `home_flat_index_of` traduzem entre o índice achatado
-  usado por `list_state` e a estrutura em seções.
-- **Reprodução**: `queue`, `queue_index`, `current`, `next_index`, `shuffle`,
-  `repeat`, `autoplay`, `liked`.
-- **Letras**: `lyrics: lyrics::LyricsState` (`None`/`NotAvailable`/
-  `Plain(String)`/`Synced { lines, active }`) + `lyrics_scroll` (rolagem
-  manual, usada só no caso `Plain`).
-- **Aparência**: `theme_index` (ver `theme.rs`), `account_name`.
-- **Album art**: `picker` (terminal image protocol detected at startup —
-  Kitty/Sixel/iTerm2 or half-block fallback) + `artwork` (cover prepared for
-  the current track, rendered by `ratatui-image`).
-- **Sincronização**: `sync_interval` (`Duration`, de `config.sync_interval_secs`)
-  e `last_synced` (`Instant`), verificados a cada `tick()`.
-
----
-
-## 6. Persistência (`config.json`)
+Config file shape:
 
 ```json
-{ "volume": 0.8, "shuffle": false, "repeat": "off",
-  "cookies": null, "theme": "Roxo", "username": null,
-  "sync_interval_secs": 300 }
+{
+  "volume": 0.8,
+  "shuffle": false,
+  "repeat": "off",
+  "cookies": null,
+  "theme": "Roxo",
+  "username": null,
+  "sync_interval_secs": 300
+}
 ```
 
-`save_config` é chamado ao sair e ao trocar de tema. Ele **nunca sobrescreve**
-um caminho de cookies válido nem o `username` com valores vazios (relê o arquivo
-existente e preserva o que já havia).
+The config writer preserves meaningful existing `cookies` and `username`
+values instead of overwriting them with empty values.
 
----
+## Development Checks
 
-## 7. Resiliência
+```bash
+cargo test
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+```
 
-- **Typed authentication failures**: cookie parsing, session expiry, HTTP
-  status, transport, and response errors are distinct values; application
-  behavior never depends on matching formatted error strings.
-- **Panic de áudio isolado**: a thread de áudio tem nome (`ytmtui-audio`); o
-  hook global de panic em `main.rs` a ignora, e `Decoder::new` é envolto em
-  `catch_unwind` — um arquivo problemático não derruba o app nem bagunça o
-  terminal.
-- **Parsing tolerante**: as respostas da InnerTube mudam com frequência, então o
-  parsing usa busca recursiva por chaves (`find_key`/`collect_key`) em vez de
-  caminhos fixos.
-- **Buscas parciais**: se parte da busca falha, as demais ainda retornam.
-- **Sem áudio**: se não houver dispositivo de saída, a thread encerra em
-  silêncio (o restante do app segue funcionando).
-
----
-
-## 8. Pontos de extensão
-
-- **Novo tema**: adicione um `Theme` em `theme::THEMES`.
-- **Nova seção**: acrescente uma variante em `Section` (+ `ALL`, `label`,
-  `main_len`), um `draw_*` em `ui/main_panel.rs` e o caso em `event::activate`.
-- **Novo endpoint InnerTube**: um método em `YtMusicClient` + parser em
-  `parse.rs`, disparado por uma task que envia uma nova variante de `Msg`.
-
----
-
-## 9. Dependências externas
-
-| Ferramenta | Uso |
-|------------|-----|
-| `yt-dlp` | resolve/baixa o stream de áudio |
-| `deno` | runtime JS exigido pelo `yt-dlp` (desafios EJS) |
-| `ffmpeg` | remuxa o `m4a`/AAC para ADTS antes de tocar |
-| ALSA (Linux) | saída de áudio (CoreAudio/WASAPI no macOS/Windows) |
-
-Crates principais: `ratatui`+`crossterm` (TUI), `tokio` (async), `reqwest`
-(HTTP), `rodio` (áudio), `serde`/`serde_json` (JSON), `image` +
-`ratatui-image` (capa via Kitty/Sixel/iTerm2 com fallback em meio-blocos),
-`rustfft` (FFT do visualizador de espectro), `unicode-width` (truncamento e
-alinhamento cientes de largura visual, para CJK/emoji), `sha1` (SAPISIDHASH),
-`dirs` (paths), `anyhow` (erros).
+Documentation-only changes should still run `git diff --check` and verify that
+README links point to existing files.

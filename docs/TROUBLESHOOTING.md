@@ -2,102 +2,113 @@
 
 **English** · [Português](TROUBLESHOOTING.pt-BR.md)
 
-Step-by-step fixes for the most common issues. If yours isn't here, please
-open an issue with your OS, terminal emulator, and the exact error message.
+Fast fixes for the issues most likely to interrupt playback. If yours is not
+listed, open an issue with your OS, terminal emulator, install method, and the
+exact error message.
 
-## "Missing dependencies" warning at startup
+Useful companion docs:
 
-ytmtui checks for `yt-dlp`, `ffmpeg`, and `deno` at startup
-(`player::missing_dependencies()` in `src/player/mod.rs`) and shows a
-warning in the status bar if any essential one (`yt-dlp`, `ffmpeg`) is
-missing — playback will fail or hang without them.
+- [Getting Started](GETTING_STARTED.md)
+- [Authentication](AUTHENTICATION.md)
+- [Keymap](KEYMAP.md)
 
-1. Install `yt-dlp`: `pip install yt-dlp` (or your distro's package).
-2. Install `ffmpeg`: `apt install ffmpeg` (Debian/Ubuntu) or
-   `brew install ffmpeg` (macOS).
-3. Install `deno` (optional, but required by recent `yt-dlp` versions for
-   some JS challenges): see https://deno.land.
-4. Restart ytmtui — the warning only shows once at launch.
+## Missing Dependencies at Startup
 
-## Session expired / "Session expired. Refresh browser cookies and restart"
+ytmtui checks for `yt-dlp`, `ffmpeg`, and `deno` at launch. Playback needs
+`yt-dlp` and `ffmpeg`; `deno` is recommended for recent `yt-dlp` JavaScript
+challenges.
 
-Your cookie file's session is no longer valid (YouTube Music sessions
-naturally expire). Fix:
+| Missing | Fix |
+|---|---|
+| `yt-dlp` | `pip install yt-dlp` or use your distro package |
+| `ffmpeg` | `apt install ffmpeg`, `brew install ffmpeg`, or platform equivalent |
+| `deno` | Install from https://deno.land |
 
-```bash
-./scripts/refresh-cookies.sh brave   # or: firefox
+Restart the app after installing missing tools.
+
+## Session Expired
+
+If account data disappears or the UI reports an expired session, refresh cookies.
+
+Inside ytmtui:
+
+```text
+press g
 ```
 
-Make sure you're actually signed in to
-[music.youtube.com](https://music.youtube.com) in that browser first — the
-script exports whatever session cookies the browser currently has. Then
-restart ytmtui. Search, public playlists, and lyrics keep working during
-this time; only account-specific data (your library, liked songs) is
-cleared until you refresh.
+Or from the shell:
 
-## YouTube blocks playback with "Sign in to confirm you're not a bot"
+```bash
+./scripts/refresh-cookies.sh brave
+```
 
-Common on datacenter/server IPs, not on personal residential connections.
-Export a cookie file and point `YTM_COOKIES` at it — this doesn't require
-using an account for the library, it's purely to satisfy the bot check:
+Make sure the browser is signed in to
+[music.youtube.com](https://music.youtube.com). Public search, public browsing,
+and lyrics keep working while account-only data is cleared.
+
+## YouTube Says "Sign in to confirm you're not a bot"
+
+This usually affects datacenter/server IPs. Use a cookie file for audio
+resolution even if you do not need account library features:
 
 ```bash
 export YTM_COOKIES="/path/to/cookies.txt"
-./target/release/ytmtui
+ytmtui
 ```
 
-You can generate this file the same way as for signing in
-(`./scripts/refresh-cookies.sh <browser>`), or export one manually from your
-browser (e.g. the "Get cookies.txt" extension), in Netscape format.
+Generate cookies with `g` in the app, `./scripts/refresh-cookies.sh <browser>`,
+or a Netscape-format browser export.
 
-## No sound at all, no error shown
+## No Sound
 
-`rodio`'s `OutputStream::try_default()` (in `src/player/mod.rs`) fails
-silently if no audio output device is available — the audio thread simply
-exits without surfacing an error in the UI. Check:
+Check the audio stack first:
 
-1. Is any audio device actually available on the system?
-   (`aplay -l` on Linux, or check your OS's sound settings.)
-2. On Linux, is ALSA installed? (`apt install libasound2-dev` — needed to
-   build; the runtime library is usually already present.)
-3. On a headless/server/container environment, there may be no audio
-   device at all — playback controls will appear to do nothing, since
-   there's nowhere to send the sound.
+1. Confirm the system has an output device.
+2. On Linux, install ALSA development libraries if building from source:
+   `apt install libasound2-dev`.
+3. Avoid headless/server/container environments unless they expose an audio
+   device.
+4. Confirm another local audio app can play sound.
 
-## Album art doesn't appear (just blank space or half-blocks when I expected a real image)
+If there is no output device, playback controls may appear to work but there is
+nowhere for `rodio` to send audio.
 
-ytmtui detects terminal image-protocol support at startup
-(`env_reports_image_support` in `src/main.rs`) and only *queries* terminals
-it recognizes (Kitty, Ghostty, WezTerm, iTerm2, foot, Konsole) — querying an
-unrecognized terminal risks it never answering and stealing key presses
-from the event loop, so unknown terminals always get the Unicode
-half-block fallback instead. If your terminal supports Kitty, Sixel, or
-iTerm2 graphics but isn't recognized, this is a known limitation, not a
-bug — feel free to open an issue naming your terminal and its
-`$TERM`/`$TERM_PROGRAM` values.
+## Album Art Does Not Render
 
-If your terminal *is* one of the recognized ones and you still only see
-half-blocks, double-check its image-protocol support is actually enabled
-(some terminals gate it behind a setting).
+ytmtui only queries terminals it knows can answer image-protocol requests.
+Recognized terminals include Kitty, Ghostty, WezTerm, iTerm2, foot, and Konsole.
 
-## Album art briefly shows the previous track's cover ("ghosting")
+If the terminal is unknown, ytmtui uses a Unicode half-block fallback. If the
+terminal is recognized but images still do not render, check that its image
+protocol support is enabled.
 
-This was a real bug (Kitty/Sixel graphics can outlive the terminal cell
-that displayed them) and is fixed as of the version that added the
-real-time spectrum visualizer — the terminal is now force-cleared on every
-track change. If you still see it on a current build, please open an issue
-with your terminal emulator.
+## Album Art Ghosting
 
-## Lyrics show up as plain text instead of synced/highlighted
+Kitty/Sixel graphics can outlive the terminal cells that showed them. Current
+builds force-clear the terminal on track changes and resize events. If ghosting
+still happens on a current build, open an issue with your terminal name and
+version.
 
-This is expected behavior for tracks that don't have per-line timed lyrics
-in YouTube Music's catalog — ytmtui always tries the synced-lyrics path
-first and only falls back to plain Musixmatch-sourced text when timestamps
-aren't available for that specific track. It's not something you can force;
-it depends entirely on what YouTube Music has indexed for that song.
+## Lyrics Are Plain Text
 
-## Background sync feels too frequent / infrequent
+Some tracks do not have timed lyrics in YouTube Music's catalog. ytmtui tries
+synced lyrics first and falls back to plain Musixmatch-style text when
+timestamps are unavailable.
 
-Adjust `sync_interval_secs` in `~/.config/ytmtui/config.json` (seconds
-between automatic Home/Library refreshes; default `300`). Values below 30
-are raised to a 30-second floor to avoid a hot-loop of API calls.
+## Background Sync Is Too Fast or Too Slow
+
+Edit `sync_interval_secs` in `~/.config/ytmtui/config.json`.
+
+```json
+{
+  "sync_interval_secs": 300
+}
+```
+
+Values below 30 seconds are raised to a 30-second floor.
+
+## Search Works But Account Library Does Not
+
+Search can run anonymously. Library, account name, private playlists, likes, and
+personalized recommendations require valid cookies. Press `g` or see
+[Authentication](AUTHENTICATION.md).

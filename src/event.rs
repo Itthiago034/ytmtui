@@ -69,6 +69,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('r') => app.cycle_repeat(),
         // Adiciona a faixa selecionada à fila.
         KeyCode::Char('a') => app.enqueue_selected(),
+        // Gerência da fila (apenas com a seção Fila aberta e em foco).
+        KeyCode::Char('d') | KeyCode::Delete
+            if app.section == Section::Fila && app.focus == Focus::Main =>
+        {
+            app.queue_remove_selected()
+        }
+        KeyCode::Char('J') if app.section == Section::Fila && app.focus == Focus::Main => {
+            app.queue_move_selected(1)
+        }
+        KeyCode::Char('K') if app.section == Section::Fila && app.focus == Focus::Main => {
+            app.queue_move_selected(-1)
+        }
+        KeyCode::Char('c') if app.section == Section::Fila && app.focus == Focus::Main => {
+            app.queue_clear()
+        }
+        // Salto direto de seção: 1 = Início … 8 = Ajuda.
+        KeyCode::Char(c @ '1'..='8') => {
+            app.jump_to_section(c as usize - '1' as usize);
+        }
         // Curte / descurte a faixa atual.
         KeyCode::Char('f') => app.like_current(),
         // Alterna o tema de cores.
@@ -90,9 +109,72 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Down | KeyCode::Char('j') => navigate(app, 1),
         KeyCode::Up | KeyCode::Char('k') => navigate(app, -1),
 
+        // Saltos maiores na lista principal (sem wrap: paginar através da
+        // "costura" fim→início desorienta).
+        KeyCode::PageDown => page(app, PAGE_JUMP),
+        KeyCode::PageUp => page(app, -PAGE_JUMP),
+        KeyCode::Home => {
+            if app.focus == Focus::Main {
+                app.select_first();
+            }
+        }
+        KeyCode::End => {
+            if app.focus == Focus::Main {
+                app.select_last();
+            }
+        }
+
         // Ação principal.
         KeyCode::Enter => activate(app),
         _ => {}
+    }
+}
+
+/// Quantos itens PageUp/PageDown saltam por vez.
+const PAGE_JUMP: isize = 10;
+
+/// Rolagem do mouse: mesma semântica de um salto pequeno e saturado na
+/// lista principal (ou na letra), independentemente do foco — a roda age
+/// sobre o conteúdo, não sobre a barra lateral.
+pub fn handle_scroll(app: &mut App, delta: isize) {
+    match app.section {
+        Section::Letra => scroll_lyrics(app, delta),
+        Section::Ajuda => scroll_help(app, delta),
+        _ => app.page_selection(delta),
+    }
+}
+
+/// Salto de página no componente com foco; em Letra/Ajuda, rola o texto.
+fn page(app: &mut App, delta: isize) {
+    match app.focus {
+        Focus::Sidebar => {}
+        Focus::Main => match app.section {
+            Section::Letra => scroll_lyrics(app, delta),
+            Section::Ajuda => scroll_help(app, delta),
+            _ => app.page_selection(delta),
+        },
+    }
+}
+
+/// Rola a tela de Ajuda (o limite inferior é clampado na renderização, que
+/// conhece a altura real do painel).
+fn scroll_help(app: &mut App, delta: isize) {
+    if delta > 0 {
+        app.help_scroll = app.help_scroll.saturating_add(delta as u16);
+    } else {
+        app.help_scroll = app.help_scroll.saturating_sub((-delta) as u16);
+    }
+}
+
+/// Rola a letra em texto plano; letras sincronizadas seguem a reprodução e
+/// ignoram rolagem manual.
+fn scroll_lyrics(app: &mut App, delta: isize) {
+    if matches!(app.lyrics, crate::lyrics::LyricsState::Plain(_)) {
+        if delta > 0 {
+            app.lyrics_scroll = app.lyrics_scroll.saturating_add(delta as u16);
+        } else {
+            app.lyrics_scroll = app.lyrics_scroll.saturating_sub((-delta) as u16);
+        }
     }
 }
 
@@ -100,21 +182,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 fn navigate(app: &mut App, delta: isize) {
     match app.focus {
         Focus::Sidebar => app.move_sidebar(delta),
-        Focus::Main => {
-            if app.section == Section::Letra {
-                // Manual scroll only applies to the plain-text fallback;
-                // synced lyrics auto-follow playback and ignore it.
-                if matches!(app.lyrics, crate::lyrics::LyricsState::Plain(_)) {
-                    if delta > 0 {
-                        app.lyrics_scroll = app.lyrics_scroll.saturating_add(1);
-                    } else {
-                        app.lyrics_scroll = app.lyrics_scroll.saturating_sub(1);
-                    }
-                }
-            } else {
-                app.move_selection(delta);
-            }
-        }
+        Focus::Main => match app.section {
+            Section::Letra => scroll_lyrics(app, delta),
+            Section::Ajuda => scroll_help(app, delta),
+            _ => app.move_selection(delta),
+        },
     }
 }
 

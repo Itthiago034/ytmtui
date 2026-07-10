@@ -291,10 +291,18 @@ pub struct App {
     pub repeat: RepeatMode,
     /// Estado do gerador pseudoaleatório (xorshift) para o shuffle.
     rng_state: u64,
+    /// videoIds já tocados no ciclo atual do shuffle: cada faixa toca uma
+    /// vez antes de qualquer repetição. Com repeat off, o esgotamento do
+    /// ciclo encerra a fila (e o autoplay pode assumir), em vez do sorteio
+    /// infinito. Zerado ao trocar a fila ou alternar o shuffle.
+    shuffle_played: std::collections::HashSet<String>,
 
     // Extras.
     pub lyrics: crate::lyrics::LyricsState,
     pub lyrics_scroll: u16,
+    /// Rolagem manual da tela de Ajuda (a lista de atalhos é maior que
+    /// terminais baixos). Clampada na renderização ao tamanho real do texto.
+    pub help_scroll: u16,
     /// Terminal image support detected at startup (Kitty/Sixel/iTerm2, with
     /// a Unicode half-block fallback). `None` until the main loop sets it.
     pub picker: Option<Picker>,
@@ -423,8 +431,10 @@ impl App {
             shuffle: config.shuffle,
             repeat: RepeatMode::from_config(&config.repeat),
             rng_state: seed,
+            shuffle_played: std::collections::HashSet::new(),
             lyrics: crate::lyrics::LyricsState::None,
             lyrics_scroll: 0,
+            help_scroll: 0,
             picker: None,
             artwork: None,
             artwork_source: None,
@@ -645,6 +655,7 @@ impl App {
         if idx < self.recent.len() {
             self.queue = self.recent.clone();
             self.queue_index = Some(idx);
+            self.shuffle_played.clear();
             self.start_current();
             return;
         }
@@ -723,14 +734,84 @@ impl App {
             self.start_current();
         } else {
             // Recalcula o próximo (a fila mudou de tamanho).
-            if let Some(idx) = self.queue_index {
-                self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
-            }
+            self.recompute_next();
             self.status = format!(
                 "➕ \"{title}\" adicionada à fila ({} na fila).",
                 self.queue.len()
             );
         }
+    }
+
+    /// Remove a faixa selecionada da fila. A faixa em reprodução não pode
+    /// ser removida (pule com `n` ou pare com `s`): mantê-la evita um estado
+    /// ambíguo de "tocando algo que não está na fila".
+    pub fn queue_remove_selected(&mut self) {
+        let Some(idx) = self.list_state.selected().filter(|&i| i < self.queue.len()) else {
+            return;
+        };
+        if self.queue_index == Some(idx) && self.current.is_some() {
+            self.status = "A faixa em reprodução não sai da fila — pule com n.".to_string();
+            return;
+        }
+        let removed = self.queue.remove(idx);
+        if let Some(qi) = self.queue_index {
+            if idx < qi {
+                self.queue_index = Some(qi - 1);
+            } else if idx == qi {
+                // Só alcançável com a reprodução parada (guarda acima).
+                self.queue_index = None;
+            }
+        }
+        let len = self.queue.len();
+        self.list_state.select((len > 0).then(|| idx.min(len - 1)));
+        self.recompute_next();
+        self.status = format!("Removida da fila: {}", removed.title);
+    }
+
+    /// Move a faixa selecionada uma posição para cima/baixo na fila,
+    /// levando a seleção junto e repontando o índice da faixa atual se ela
+    /// participar da troca.
+    pub fn queue_move_selected(&mut self, delta: isize) {
+        let Some(idx) = self.list_state.selected().filter(|&i| i < self.queue.len()) else {
+            return;
+        };
+        let target = idx as isize + delta;
+        if target < 0 || target as usize >= self.queue.len() {
+            return;
+        }
+        let target = target as usize;
+        self.queue.swap(idx, target);
+        if let Some(qi) = self.queue_index {
+            if qi == idx {
+                self.queue_index = Some(target);
+            } else if qi == target {
+                self.queue_index = Some(idx);
+            }
+        }
+        self.list_state.select(Some(target));
+        self.recompute_next();
+    }
+
+    /// Limpa a fila, preservando apenas a faixa em reprodução (se houver).
+    pub fn queue_clear(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        match self.current.clone() {
+            Some(current) => {
+                self.queue = vec![current];
+                self.queue_index = Some(0);
+                self.list_state.select(Some(0));
+            }
+            None => {
+                self.queue.clear();
+                self.queue_index = None;
+                self.list_state.select(None);
+            }
+        }
+        self.next_index = None;
+        self.shuffle_played.clear();
+        self.status = "Fila limpa.".to_string();
     }
 
     /// Login com uma tecla: importa cookies do primeiro navegador instalado
@@ -879,24 +960,35 @@ impl App {
     /// Alterna a reprodução aleatória.
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
+        self.shuffle_played.clear();
+        // A faixa atual conta como já tocada no ciclo que começa agora.
+        if self.shuffle {
+            if let Some(t) = &self.current {
+                self.shuffle_played.insert(t.video_id.clone());
+            }
+        }
         self.status = if self.shuffle {
             "🔀 Aleatório ativado.".to_string()
         } else {
             "➡ Aleatório desativado.".to_string()
         };
         // Recalcula o próximo com base no novo modo.
-        if let Some(idx) = self.queue_index {
-            self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
-        }
+        self.recompute_next();
     }
 
     /// Alterna o modo de repetição (Off → Todos → Um).
     pub fn cycle_repeat(&mut self) {
         self.repeat = self.repeat.next();
         self.status = format!("🔁 Repetição: {}.", self.repeat.label());
-        if let Some(idx) = self.queue_index {
-            self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
-        }
+        self.recompute_next();
+    }
+
+    /// Recalcula `next_index` a partir da posição atual, respeitando os
+    /// modos de shuffle/repeat vigentes.
+    fn recompute_next(&mut self) {
+        self.next_index = self
+            .queue_index
+            .and_then(|idx| self.compute_next(idx, self.repeat != RepeatMode::Off));
     }
 
     /// Para a reprodução e limpa todo o estado "tocando agora" (faixa, capa,
@@ -934,7 +1026,9 @@ impl App {
     /// Calcula o índice da próxima faixa a partir de `idx`.
     ///
     /// `allow_wrap` indica se, ao chegar ao fim em ordem sequencial, deve voltar
-    /// ao início. No modo aleatório, escolhe um índice diferente do atual.
+    /// ao início. No modo aleatório, sorteia entre as faixas ainda não tocadas
+    /// no ciclo atual (ver `shuffle_played`); esgotado o ciclo, `allow_wrap`
+    /// decide entre começar outro ciclo ou encerrar a fila.
     fn compute_next(&mut self, idx: usize, allow_wrap: bool) -> Option<usize> {
         let len = self.queue.len();
         if len == 0 {
@@ -944,6 +1038,21 @@ impl App {
             return if allow_wrap { Some(0) } else { None };
         }
         if self.shuffle {
+            let unplayed: Vec<usize> = (0..len)
+                .filter(|&i| {
+                    i != idx && !self.shuffle_played.contains(&self.queue[i].video_id)
+                })
+                .collect();
+            if !unplayed.is_empty() {
+                let pick = (self.next_rand() % unplayed.len() as u64) as usize;
+                return Some(unplayed[pick]);
+            }
+            if !allow_wrap {
+                return None;
+            }
+            // Novo ciclo: tudo volta a valer, menos repetir a atual em
+            // seguida.
+            self.shuffle_played.clear();
             let mut n = idx;
             while n == idx {
                 n = (self.next_rand() % len as u64) as usize;
@@ -988,7 +1097,7 @@ impl App {
         }
     }
 
-    /// Move a seleção da lista principal.
+    /// Move a seleção da lista principal (com wrap nas pontas).
     pub fn move_selection(&mut self, delta: isize) {
         let len = self.main_len();
         if len == 0 {
@@ -997,6 +1106,46 @@ impl App {
         let cur = self.list_state.selected().unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(len as isize) as usize;
         self.list_state.select(Some(next));
+    }
+
+    /// Salta a seleção em `delta` itens, saturando nas pontas — para
+    /// PageUp/PageDown e scroll do mouse, onde o wrap da navegação linha a
+    /// linha seria desorientador.
+    pub fn page_selection(&mut self, delta: isize) {
+        let len = self.main_len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.list_state.selected().unwrap_or(0) as isize;
+        let next = (cur + delta).clamp(0, len as isize - 1) as usize;
+        self.list_state.select(Some(next));
+    }
+
+    /// Seleciona o primeiro item da lista principal (tecla Home).
+    pub fn select_first(&mut self) {
+        if self.main_len() > 0 {
+            self.list_state.select(Some(0));
+        }
+    }
+
+    /// Seleciona o último item da lista principal (tecla End).
+    pub fn select_last(&mut self) {
+        let len = self.main_len();
+        if len > 0 {
+            self.list_state.select(Some(len - 1));
+        }
+    }
+
+    /// Abre diretamente a seção de índice `index` (teclas 1–8), movendo o
+    /// foco para o painel principal.
+    pub fn jump_to_section(&mut self, index: usize) {
+        if index >= Section::ALL.len() {
+            return;
+        }
+        self.sidebar_index = index;
+        self.section = Section::ALL[index];
+        self.focus = Focus::Main;
+        self.list_state.select(Some(0));
     }
 
     /// Move a seleção da barra lateral.
@@ -1119,9 +1268,7 @@ impl App {
         }
         let added = self.queue.len() - before;
         if added > 0 {
-            if let Some(idx) = self.queue_index {
-                self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
-            }
+            self.recompute_next();
         }
         added
     }
@@ -1152,6 +1299,7 @@ impl App {
                         self.pending_radio_seed = Some(track.video_id.clone());
                         self.queue = vec![track];
                         self.queue_index = Some(0);
+                        self.shuffle_played.clear();
                     }
                     SearchHit::Artist(artist) => {
                         self.load_artist(artist);
@@ -1180,6 +1328,7 @@ impl App {
                     .min(self.songs.len() - 1);
                 self.queue = self.songs.clone();
                 self.queue_index = Some(idx);
+                self.shuffle_played.clear();
             }
             Section::Fila => {
                 if self.queue.is_empty() {
@@ -1233,6 +1382,9 @@ impl App {
             return;
         };
         self.current = Some(track.clone());
+        if self.shuffle {
+            self.shuffle_played.insert(track.video_id.clone());
+        }
         self.remember_recent(&track);
         self.lyrics = crate::lyrics::LyricsState::None;
         self.lyrics_scroll = 0;
@@ -1738,8 +1890,10 @@ impl App {
             shuffle: false,
             repeat: RepeatMode::Off,
             rng_state: 0x9E3779B97F4A7C15,
+            shuffle_played: std::collections::HashSet::new(),
             lyrics: crate::lyrics::LyricsState::None,
             lyrics_scroll: 0,
+            help_scroll: 0,
             picker: None,
             artwork: None,
             artwork_source: None,
@@ -2254,6 +2408,147 @@ mod tests {
             app.status, "▶ Tocando: Song — Artist",
             "periodic refresh must not overwrite what the user is reading"
         );
+    }
+
+    fn track(id: &str) -> Track {
+        Track {
+            video_id: id.to_string(),
+            title: format!("Track {id}"),
+            ..Default::default()
+        }
+    }
+
+    fn queue_app() -> App {
+        let mut app = App::new_for_tests();
+        app.section = Section::Fila;
+        app.queue = vec![track("a"), track("b"), track("c"), track("d")];
+        app.queue_index = Some(1);
+        app.current = Some(track("b"));
+        app
+    }
+
+    #[test]
+    fn removing_a_track_before_the_current_one_shifts_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(0));
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_index, Some(0), "current track followed its move");
+        assert_eq!(app.queue[0].video_id, "b");
+    }
+
+    #[test]
+    fn the_playing_track_cannot_be_removed_from_the_queue() {
+        let mut app = queue_app();
+        app.list_state.select(Some(1)); // the playing track
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 4, "queue unchanged");
+        assert_eq!(app.queue_index, Some(1));
+    }
+
+    #[test]
+    fn removing_after_the_current_track_keeps_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(3));
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_index, Some(1));
+        // Selection clamps to the new last row instead of dangling.
+        assert_eq!(app.list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn moving_a_track_follows_selection_and_repoints_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(2)); // "c"
+        app.queue_move_selected(-1); // swaps with "b" (the playing track)
+        assert_eq!(app.queue[1].video_id, "c");
+        assert_eq!(app.queue[2].video_id, "b");
+        assert_eq!(app.queue_index, Some(2), "playing track followed the swap");
+        assert_eq!(app.list_state.selected(), Some(1), "selection followed the move");
+
+        // Edges saturate: can't move the first row further up.
+        app.list_state.select(Some(0));
+        app.queue_move_selected(-1);
+        assert_eq!(app.queue[0].video_id, "a");
+    }
+
+    #[test]
+    fn clearing_the_queue_keeps_only_the_playing_track() {
+        let mut app = queue_app();
+        app.queue_clear();
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].video_id, "b");
+        assert_eq!(app.queue_index, Some(0));
+
+        // With nothing playing, the queue empties entirely.
+        let mut stopped = queue_app();
+        stopped.current = None;
+        stopped.queue_clear();
+        assert!(stopped.queue.is_empty());
+        assert_eq!(stopped.queue_index, None);
+    }
+
+    #[test]
+    fn shuffle_visits_every_track_once_then_ends_when_repeat_is_off() {
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a"), track("b"), track("c"), track("d")];
+        app.shuffle = true;
+        // Simulates `start_current` for the first track.
+        app.queue_index = Some(0);
+        app.shuffle_played.insert("a".to_string());
+
+        let mut visited = vec!["a".to_string()];
+        let mut idx = 0;
+        while let Some(next) = app.compute_next(idx, false) {
+            let id = app.queue[next].video_id.clone();
+            assert!(
+                !visited.contains(&id),
+                "shuffle must not repeat a track within a cycle"
+            );
+            visited.push(id.clone());
+            app.shuffle_played.insert(id);
+            idx = next;
+        }
+        assert_eq!(visited.len(), 4, "every track played exactly once");
+    }
+
+    #[test]
+    fn shuffle_starts_a_new_cycle_when_repeat_all_wraps() {
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a"), track("b"), track("c")];
+        app.shuffle = true;
+        // Cycle exhausted: everything already played.
+        for id in ["a", "b", "c"] {
+            app.shuffle_played.insert(id.to_string());
+        }
+        let next = app.compute_next(1, true);
+        assert!(next.is_some(), "repeat all recycles the queue");
+        assert_ne!(next, Some(1), "never repeats the current track back-to-back");
+    }
+
+    #[test]
+    fn number_keys_jump_to_sections() {
+        let mut app = App::new_for_tests();
+        app.jump_to_section(5);
+        assert_eq!(app.section, Section::Fila);
+        assert_eq!(app.sidebar_index, 5);
+        assert_eq!(app.focus, Focus::Main);
+        // Out of range is a no-op.
+        app.jump_to_section(99);
+        assert_eq!(app.section, Section::Fila);
+    }
+
+    #[test]
+    fn page_selection_saturates_at_the_list_edges() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Fila;
+        app.queue = vec![track("a"), track("b"), track("c")];
+        app.list_state.select(Some(1));
+        app.page_selection(10);
+        assert_eq!(app.list_state.selected(), Some(2), "clamps to the end");
+        app.page_selection(-10);
+        assert_eq!(app.list_state.selected(), Some(0), "clamps to the start");
     }
 
     #[test]

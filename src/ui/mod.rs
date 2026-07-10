@@ -281,10 +281,11 @@ fn contextual_shortcuts(app: &App) -> &'static str {
         return "↑↓ section · Enter open · / search · q quit";
     }
     match app.section {
-        Section::Buscar | Section::Fila => "Enter play · a queue · Space pause · / search · ? help",
+        Section::Fila => "Enter play · d remove · J/K move · c clear · ? help",
+        Section::Buscar => "Enter play · a queue · Space pause · / search · ? help",
         Section::Biblioteca => "g sign in · Enter open · / search · ? help · q quit",
         Section::Letra => "↑↓ scroll · / search · ? help · q quit",
-        Section::Ajuda => "/ search · q quit",
+        Section::Ajuda => "↑↓ scroll · / search · q quit",
         _ => "Enter open · / search · ? help · q quit",
     }
 }

@@ -78,7 +78,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Playlists => draw_playlists(f, app, area, block),
         Section::Artistas => draw_artists(f, app, area, block),
         Section::Letra => draw_lyrics(f, app, area, block),
-        Section::Ajuda => draw_help(f, area, block, app.theme()),
+        Section::Ajuda => draw_help(f, app, area, block),
     }
 }
 
@@ -775,14 +775,23 @@ pub(super) fn karaoke_line(
     ])
 }
 
-fn draw_help(f: &mut Frame, area: Rect, block: Block, theme: &'static Theme) {
+fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let theme = app.theme();
     let rows = [
         ("Navigation", ""),
         ("  ↑/↓  or  k/j", "move selection"),
+        ("  PgUp/PgDn", "jump 10 items; Home/End first/last"),
+        ("  mouse wheel", "scroll the list"),
+        ("  1..8", "jump straight to a section"),
         ("  ←/→  or  h/l", "switch between menu and list"),
         ("  Tab", "toggle focus menu/list"),
         ("  Enter", "play / open playlist / open artist"),
         ("  a", "add track to the queue"),
+        ("", ""),
+        ("Queue", ""),
+        ("  d / Delete", "remove the selected track"),
+        ("  Shift+J/K", "move the selected track down / up"),
+        ("  c", "clear the queue (keeps what's playing)"),
         ("", ""),
         ("Search", ""),
         ("  /", "open the search input"),
@@ -833,7 +842,13 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, theme: &'static Theme) {
             }
         })
         .collect();
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    // A lista de atalhos é mais alta que terminais baixos; j/k/roda rolam.
+    // Clampa aqui, onde a altura real do painel é conhecida, para a rolagem
+    // parar na última linha em vez de sumir com o texto.
+    let visible = area.height.saturating_sub(2); // bordas do block
+    let max_scroll = (lines.len() as u16).saturating_sub(visible);
+    let scroll = app.help_scroll.min(max_scroll);
+    f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
 }
 
 fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<ListItem>) {

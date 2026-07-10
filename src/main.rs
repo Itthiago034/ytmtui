@@ -9,7 +9,9 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self as cevent, Event, KeyEventKind};
+use crossterm::event::{
+    self as cevent, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -124,6 +126,13 @@ async fn run(
                 // as imagens ao redimensionar; retransmite a capa e força um
                 // clear para não sobrar lixo gráfico da janela antiga.
                 Event::Resize(_, _) => app.rebuild_artwork(),
+                // Roda do mouse: três itens por "clique" da roda, como na
+                // maioria das interfaces.
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollDown => event::handle_scroll(app, 3),
+                    MouseEventKind::ScrollUp => event::handle_scroll(app, -3),
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -144,7 +153,9 @@ async fn run(
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // Captura de mouse para rolagem nas listas; a seleção de texto do
+    // emulador continua disponível com Shift+arrastar.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -153,7 +164,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 /// Restaura o terminal ao estado normal.
 fn restore_terminal() -> Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }
 

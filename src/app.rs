@@ -15,7 +15,7 @@ use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
-use crate::home::HomeView;
+use crate::home::{HomeCardPayload, HomeDirection, HomeView};
 use crate::models::{Artist, Playlist, SearchResults, Track};
 use crate::player::AudioPlayer;
 use crate::provider::{MusicProvider, ProviderError};
@@ -285,6 +285,8 @@ pub struct App {
     /// Índice do tema de cores ativo (ver `crate::theme`).
     pub theme_index: usize,
     pub list_state: ListState,
+    /// Number of Home card columns available in the current layout.
+    pub home_columns: usize,
 
     // Reprodução.
     pub queue: Vec<Track>,
@@ -423,6 +425,7 @@ impl App {
             account_name,
             theme_index,
             list_state,
+            home_columns: 1,
             queue: Vec::new(),
             queue_index: None,
             current: None,
@@ -610,6 +613,15 @@ impl App {
         self.home_view().len()
     }
 
+    pub fn move_home(&mut self, direction: HomeDirection) {
+        let current = self.list_state.selected().unwrap_or(0);
+        let next = self
+            .home_view()
+            .move_index(current, direction, self.home_columns);
+        self.list_state
+            .select((self.home_total_count() > 0).then_some(next));
+    }
+
     /// Registra uma faixa no histórico local (topo da lista, sem duplicatas,
     /// limitado a [`RECENT_CAP`]) e persiste em `recent.json`. Persistência é
     /// melhor-esforço: falhas de disco nunca interrompem a reprodução.
@@ -658,17 +670,23 @@ impl App {
         let Some(idx) = self.list_state.selected() else {
             return;
         };
-        if idx < self.recent.len() {
-            self.queue = self.recent.clone();
-            self.queue_index = Some(idx);
-            self.shuffle_played.clear();
-            self.start_current();
-            return;
-        }
-        let Some(pl) = self.home_item_at(idx - self.recent.len()).cloned() else {
+        let Some(card) = self.home_view().flat_card(idx).cloned() else {
             return;
         };
-        self.load_playlist(pl);
+        match card.payload {
+            HomeCardPayload::Track(track) => {
+                let recent_index = self
+                    .recent
+                    .iter()
+                    .position(|candidate| candidate.video_id == track.video_id)
+                    .unwrap_or(0);
+                self.queue = self.recent.clone();
+                self.queue_index = Some(recent_index);
+                self.shuffle_played.clear();
+                self.start_current();
+            }
+            HomeCardPayload::Collection(collection) => self.load_playlist(collection),
+        }
     }
 
     /// Abre o artista selecionado, carregando suas principais faixas.
@@ -728,6 +746,14 @@ impl App {
                 .selected()
                 .and_then(|i| self.songs.get(i))
                 .cloned(),
+            Section::Inicio => self
+                .list_state
+                .selected()
+                .and_then(|i| self.home_view().flat_card(i).cloned())
+                .and_then(|card| match card.payload {
+                    HomeCardPayload::Track(track) => Some(track),
+                    HomeCardPayload::Collection(_) => None,
+                }),
             Section::Fila => None, // já está na fila
             _ => None,
         };
@@ -1612,21 +1638,16 @@ impl App {
                 Msg::HomeSections(sections) => {
                     self.finish_task();
                     let was_empty = self.home.is_empty();
-                    // Selection indices on Home count the local recent-tracks
-                    // group first; recommendation lookups must skip past it.
-                    let recent_len = self.recent.len();
-                    let previous_id = (self.section == Section::Inicio)
+                    let previous_key = (self.section == Section::Inicio)
                         .then(|| self.list_state.selected())
                         .flatten()
-                        .and_then(|i| i.checked_sub(recent_len))
-                        .and_then(|i| self.home_item_at(i))
-                        .map(|p| p.browse_id.clone());
+                        .and_then(|i| self.home_view().flat_card(i).map(|card| card.key.clone()));
                     self.home = sections;
                     if self.section == Section::Inicio {
-                        let count = self.home_total_count();
-                        let new_index = previous_id
-                            .and_then(|id| self.home_flat_index_of(&id))
-                            .map(|i| i + recent_len)
+                        let view = self.home_view();
+                        let count = view.len();
+                        let new_index = previous_key
+                            .and_then(|key| view.flat_index_of(&key))
                             .or(if was_empty {
                                 Some(0)
                             } else {
@@ -1899,6 +1920,7 @@ impl App {
             account_name: None,
             theme_index: 0,
             list_state,
+            home_columns: 1,
             queue: Vec::new(),
             queue_index: None,
             current: None,
@@ -2293,6 +2315,72 @@ mod tests {
             "explains why: {}",
             app.status
         );
+    }
+
+    #[tokio::test]
+    async fn entering_a_recent_home_card_preserves_history_order_and_selected_index() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.recent = (1..=3)
+            .map(|i| Track {
+                video_id: format!("r{i}"),
+                title: format!("Recent {i}"),
+                ..Default::default()
+            })
+            .collect();
+        app.list_state.select(Some(1));
+
+        app.open_selected_home();
+
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|track| track.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r1", "r2", "r3"]
+        );
+        assert_eq!(app.queue_index, Some(1));
+        assert_eq!(
+            app.current.as_ref().map(|track| track.video_id.as_str()),
+            Some("r2")
+        );
+    }
+
+    #[test]
+    fn enqueueing_a_recent_home_track_does_not_interrupt_playback() {
+        let playing = Track {
+            video_id: "playing".into(),
+            title: "Playing".into(),
+            ..Default::default()
+        };
+        let recent = Track {
+            video_id: "recent".into(),
+            title: "Recent".into(),
+            ..Default::default()
+        };
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.recent = vec![recent];
+        app.queue = vec![playing.clone()];
+        app.queue_index = Some(0);
+        app.current = Some(playing);
+        app.list_state.select(Some(0));
+
+        app.enqueue_selected();
+
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|track| track.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["playing", "recent"]
+        );
+        assert_eq!(app.queue_index, Some(0));
+        assert_eq!(
+            app.current.as_ref().map(|track| track.video_id.as_str()),
+            Some("playing")
+        );
+        assert!(app.status.contains("adicionada à fila"));
     }
 
     #[test]

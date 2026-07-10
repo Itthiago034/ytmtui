@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, Focus, Section};
+use crate::home::HomeDirection;
 
 /// Processa uma tecla pressionada, atualizando o estado da aplicação.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -102,6 +103,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 Focus::Main => Focus::Sidebar,
             };
         }
+        KeyCode::Left | KeyCode::Char('h')
+            if app.section == Section::Inicio && app.focus == Focus::Main =>
+        {
+            app.move_home(HomeDirection::Left)
+        }
+        KeyCode::Right | KeyCode::Char('l')
+            if app.section == Section::Inicio && app.focus == Focus::Main =>
+        {
+            app.move_home(HomeDirection::Right)
+        }
         KeyCode::Left | KeyCode::Char('h') => app.focus = Focus::Sidebar,
         KeyCode::Right | KeyCode::Char('l') => app.focus = Focus::Main,
 
@@ -183,6 +194,11 @@ fn navigate(app: &mut App, delta: isize) {
     match app.focus {
         Focus::Sidebar => app.move_sidebar(delta),
         Focus::Main => match app.section {
+            Section::Inicio => app.move_home(if delta < 0 {
+                HomeDirection::Up
+            } else {
+                HomeDirection::Down
+            }),
             Section::Letra => scroll_lyrics(app, delta),
             Section::Ajuda => scroll_help(app, delta),
             _ => app.move_selection(delta),
@@ -240,5 +256,44 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('j'))); // down: Home -> Search
         handle_key(&mut app, key(KeyCode::Char('j'))); // down: Search -> Library
         assert_eq!(app.section, Section::Biblioteca);
+    }
+
+    #[test]
+    fn home_right_moves_cards_while_search_right_only_moves_focus() {
+        let mut home = App::new_for_tests();
+        home.section = Section::Inicio;
+        home.focus = Focus::Main;
+        home.home_columns = 3;
+        home.recent = (1..=3)
+            .map(|i| crate::models::Track {
+                video_id: format!("t{i}"),
+                ..Default::default()
+            })
+            .collect();
+        home.home = vec![crate::models::HomeSection {
+            title: "Next shelf".into(),
+            items: (1..=2)
+                .map(|i| crate::models::Playlist {
+                    browse_id: format!("p{i}"),
+                    ..Default::default()
+                })
+                .collect(),
+        }];
+        home.list_state.select(Some(1));
+
+        handle_key(&mut home, key(KeyCode::Right));
+        assert_eq!(home.focus, Focus::Main);
+        assert_eq!(home.list_state.selected(), Some(2));
+        handle_key(&mut home, key(KeyCode::Down));
+        assert_eq!(home.list_state.selected(), Some(4));
+
+        let mut search = App::new_for_tests();
+        search.section = Section::Buscar;
+        search.focus = Focus::Sidebar;
+        search.list_state.select(Some(1));
+
+        handle_key(&mut search, key(KeyCode::Right));
+        assert_eq!(search.focus, Focus::Main);
+        assert_eq!(search.list_state.selected(), Some(1));
     }
 }

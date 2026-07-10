@@ -16,6 +16,14 @@ pub enum HomeCardKind {
     Playlist,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 #[derive(Debug, Clone)]
 pub enum HomeCardPayload {
     Track(Track),
@@ -110,6 +118,42 @@ impl HomeView {
             .flat_map(|shelf| &shelf.cards)
             .position(|card| &card.key == key)
     }
+
+    pub fn move_index(&self, current: usize, direction: HomeDirection, columns: usize) -> usize {
+        let columns = columns.max(1);
+        let mut base = 0usize;
+        let Some((shelf_index, local)) = self.shelves.iter().enumerate().find_map(|(i, shelf)| {
+            let end = base + shelf.cards.len();
+            let found = (current < end).then_some((i, current - base));
+            base = end;
+            found
+        }) else {
+            return 0;
+        };
+        let shelf = &self.shelves[shelf_index];
+        match direction {
+            HomeDirection::Left => {
+                base - shelf.cards.len() + (local + shelf.cards.len() - 1) % shelf.cards.len()
+            }
+            HomeDirection::Right => base - shelf.cards.len() + (local + 1) % shelf.cards.len(),
+            HomeDirection::Up | HomeDirection::Down => {
+                let target = match direction {
+                    HomeDirection::Up => shelf_index.checked_sub(1),
+                    HomeDirection::Down => {
+                        (shelf_index + 1 < self.shelves.len()).then_some(shelf_index + 1)
+                    }
+                    _ => unreachable!(),
+                };
+                let Some(target) = target else { return current };
+                let column = local % columns;
+                let target_base: usize = self.shelves[..target]
+                    .iter()
+                    .map(|shelf| shelf.cards.len())
+                    .sum();
+                target_base + column.min(self.shelves[target].cards.len().saturating_sub(1))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +236,50 @@ mod tests {
             view.flat_index_of(&HomeKey::new("ytmusic", "collection", "p2")),
             Some(3)
         );
+    }
+
+    #[test]
+    fn movement_is_deterministic_by_shelf_and_column() {
+        let recent = vec![
+            Track {
+                video_id: "t1".into(),
+                ..Default::default()
+            },
+            Track {
+                video_id: "t2".into(),
+                ..Default::default()
+            },
+            Track {
+                video_id: "t3".into(),
+                ..Default::default()
+            },
+        ];
+        let sections = vec![
+            HomeSection {
+                title: "Two cards".into(),
+                items: (1..=2)
+                    .map(|i| Playlist {
+                        browse_id: format!("p{i}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            },
+            HomeSection {
+                title: "Four cards".into(),
+                items: (3..=6)
+                    .map(|i| Playlist {
+                        browse_id: format!("p{i}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            },
+        ];
+        let view = HomeView::project("ytmusic", &recent, &sections);
+
+        assert_eq!(view.move_index(1, HomeDirection::Right, 3), 2);
+        assert_eq!(view.move_index(2, HomeDirection::Right, 3), 0);
+        assert_eq!(view.move_index(2, HomeDirection::Down, 3), 4);
+        assert_eq!(view.move_index(4, HomeDirection::Down, 3), 6);
+        assert_eq!(view.move_index(7, HomeDirection::Up, 3), 4);
     }
 }

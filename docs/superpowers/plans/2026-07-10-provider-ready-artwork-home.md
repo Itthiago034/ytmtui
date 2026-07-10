@@ -295,6 +295,9 @@ assert_eq!(view.move_index(7, HomeDirection::Up, 3), 4);
 ```
 
 Add an event test proving `Right` on Home moves cards while `Right` on Search only moves focus to Main.
+Add an App test proving `Enter` on a recent Home card preserves the existing
+recent-history queue order and starts at the selected history index, plus a test
+that `a` appends the selected recent track without interrupting playback.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -354,14 +357,22 @@ Replace the recent-length arithmetic in `open_selected_home()` with:
 let Some(card) = self.home_view().flat_card(idx).cloned() else { return };
 match card.payload {
     crate::home::HomeCardPayload::Track(track) => {
-        self.queue = vec![track];
-        self.queue_index = Some(0);
+        let recent_index = self.recent.iter()
+            .position(|candidate| candidate.video_id == track.video_id)
+            .unwrap_or(0);
+        self.queue = self.recent.clone();
+        self.queue_index = Some(recent_index);
         self.shuffle_played.clear();
         self.start_current();
     }
     crate::home::HomeCardPayload::Collection(collection) => self.load_playlist(collection),
 }
 ```
+
+Extend the existing selected-item queue helper so `Section::Inicio` resolves
+the current `HomeCardPayload`; append only `Track` payloads and leave collection
+cards unchanged until opened. Reuse the existing queue status message and do not
+change the current track or `queue_index` when appending.
 
 Preserve selection on `Msg::HomeSections` by saving `HomeKey` and resolving it through `flat_index_of` after replacing the sections.
 

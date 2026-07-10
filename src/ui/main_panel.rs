@@ -124,7 +124,7 @@ fn draw_empty_state(
 /// Formata uma linha de faixa: "01  Título  —  Artista        3:45".
 fn track_line(
     index: usize,
-    t: &crate::ytmusic::Track,
+    t: &crate::models::Track,
     width: usize,
     playing: bool,
     theme: &'static Theme,
@@ -172,7 +172,7 @@ fn entry_line(icon: &str, title: &str, subtitle: &str, theme: &'static Theme) ->
     ])
 }
 
-fn draw_songs(f: &mut Frame, app: &App, area: Rect, block: Block, songs: &[crate::ytmusic::Track]) {
+fn draw_songs(f: &mut Frame, app: &App, area: Rect, block: Block, songs: &[crate::models::Track]) {
     let theme = app.theme();
     if songs.is_empty() {
         draw_empty_state(
@@ -724,7 +724,7 @@ fn draw_synced_lyrics(
     app: &App,
     area: Rect,
     block: Block,
-    lines: &[crate::ytmusic::LyricLine],
+    lines: &[crate::models::LyricLine],
     active: Option<usize>,
 ) {
     let theme = app.theme();
@@ -772,7 +772,7 @@ fn draw_synced_lyrics(
 /// waits in bright text. Both halves stay bold so the active line pops from
 /// its dimmer neighbors even at the very start of the window.
 pub(super) fn karaoke_line(
-    l: &crate::ytmusic::LyricLine,
+    l: &crate::models::LyricLine,
     position_ms: u64,
     theme: &'static Theme,
 ) -> Line<'static> {

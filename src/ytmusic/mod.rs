@@ -6,8 +6,10 @@
 //! uma playlist e obtenção de letras.
 
 pub mod auth;
-pub mod models;
 mod parse;
+mod provider;
+mod signin;
+mod stream;
 
 use std::fmt;
 use std::sync::Arc;
@@ -15,7 +17,9 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 pub use auth::Auth;
-pub use models::{Artist, HomeSection, LyricLine, Lyrics, Playlist, SearchResults, Track};
+pub use provider::{Bootstrap, YtMusic};
+
+use crate::models::{Artist, HomeSection, Lyrics, Playlist, SearchResults, Track};
 use parse::*;
 
 const BASE: &str = "https://music.youtube.com/youtubei/v1";

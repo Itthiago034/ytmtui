@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 
 use crate::app::{App, Focus, Section};
-use crate::ytmusic::Track;
+use crate::models::Track;
 
 /// Renders one frame at the given size and returns the resulting buffer.
 fn render(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -240,7 +240,7 @@ fn selection_highlight_and_scrollbar_stay_visible() {
 
 #[test]
 fn home_shows_recent_tracks_group_and_search_shows_mixed_groups() {
-    use crate::ytmusic::{Artist, Playlist};
+    use crate::models::{Artist, Playlist};
 
     // Home: local history renders as the first group.
     let mut app = App::new_for_tests();
@@ -287,7 +287,7 @@ fn home_shows_recent_tracks_group_and_search_shows_mixed_groups() {
 
 #[test]
 fn home_section_highlight_lands_on_the_right_item_despite_header_rows() {
-    use crate::ytmusic::{HomeSection, Playlist};
+    use crate::models::{HomeSection, Playlist};
 
     let mut app = App::new_for_tests();
     app.focus = Focus::Main;
@@ -449,7 +449,7 @@ fn take_width_hard_truncates_by_display_width_without_an_ellipsis() {
 #[test]
 fn karaoke_wipe_splits_the_active_line_by_elapsed_time() {
     let theme = crate::theme::get(0);
-    let line = crate::ytmusic::LyricLine {
+    let line = crate::models::LyricLine {
         text: "abcdefghij".to_string(), // 10 columns
         start_ms: 1000,
         end_ms: 2000,
@@ -480,17 +480,17 @@ fn synced_lyrics_highlight_only_the_active_line() {
     let (active_color, neighbor_color) = (theme.text, theme.subtext);
     app.lyrics = crate::lyrics::LyricsState::Synced {
         lines: vec![
-            crate::ytmusic::LyricLine {
+            crate::models::LyricLine {
                 text: "First line".to_string(),
                 start_ms: 0,
                 end_ms: 1000,
             },
-            crate::ytmusic::LyricLine {
+            crate::models::LyricLine {
                 text: "Second line".to_string(),
                 start_ms: 1000,
                 end_ms: 2000,
             },
-            crate::ytmusic::LyricLine {
+            crate::models::LyricLine {
                 text: "Third line".to_string(),
                 start_ms: 2000,
                 end_ms: 3000,

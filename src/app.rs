@@ -1,11 +1,13 @@
 //! Estado central da aplicação e lógica de coordenação.
+//!
+//! O app fala com o serviço de música exclusivamente pelo contrato
+//! [`MusicProvider`]; o provedor concreto (YouTube Music) só aparece na
+//! raiz de composição ([`App::new`]).
 
-mod authentication;
-
-pub use authentication::AuthenticationState;
-use authentication::{detect_browsers, export_browser_cookies, resolve_cookie_path};
+pub use crate::provider::AuthState;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ratatui::widgets::ListState;
 use ratatui_image::picker::Picker;
@@ -13,9 +15,10 @@ use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
-use crate::player::{self, AudioPlayer};
+use crate::models::{Artist, Playlist, SearchResults, Track};
+use crate::player::AudioPlayer;
+use crate::provider::{MusicProvider, ProviderError};
 use crate::visualizer::SpectrumAnalyzer;
-use crate::ytmusic::{Artist, Playlist, SearchResults, Track, YtMusicClient, YtMusicError};
 
 /// Seções da barra lateral (também define o conteúdo do painel principal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +138,7 @@ impl RepeatMode {
 pub enum Msg {
     SearchResults(SearchResults),
     LibraryPlaylists(Vec<Playlist>),
-    HomeSections(Vec<crate::ytmusic::HomeSection>),
+    HomeSections(Vec<crate::models::HomeSection>),
     RadioTracks(Vec<Track>),
     AccountName(Option<String>),
     PlaylistTracks {
@@ -147,7 +150,7 @@ pub enum Msg {
     /// apart from the currently playing one and discarded.
     Lyrics {
         video_id: String,
-        lyrics: Option<crate::ytmusic::Lyrics>,
+        lyrics: Option<crate::models::Lyrics>,
     },
     /// Same rationale as `Lyrics`: the cover art is tagged with the track it
     /// belongs to.
@@ -166,12 +169,13 @@ pub enum Msg {
     Error(String),
     /// Cookies are present, but the API session is no longer valid.
     SessionExpired,
-    /// In-app sign-in finished: browser cookies were exported to `path`.
-    /// `browser` is the `--cookies-from-browser` value that worked (e.g.
-    /// "brave" or "firefox:/path/to/profile").
-    CookiesImported {
-        path: String,
-        browser: String,
+    /// In-app sign-in finished successfully; o provedor já está
+    /// reautenticado por dentro. `method` descreve a origem da sessão (ex.:
+    /// o navegador dos cookies) e `credentials_path`, quando presente, é
+    /// persistido na configuração.
+    SignedIn {
+        method: String,
+        credentials_path: Option<String>,
     },
     /// Radio built around `seed` (a track played from the search results):
     /// similar tracks to append to the queue *behind* what's playing —
@@ -216,9 +220,9 @@ pub enum SearchHit {
     Playlist(Playlist),
 }
 
-fn client_error_message(context: &str, error: YtMusicError) -> Msg {
+fn client_error_message(context: &str, error: ProviderError) -> Msg {
     match error {
-        YtMusicError::SessionExpired { .. } => Msg::SessionExpired,
+        ProviderError::SessionExpired => Msg::SessionExpired,
         other => Msg::Error(format!("{context}: {other}")),
     }
 }
@@ -226,7 +230,9 @@ fn client_error_message(context: &str, error: YtMusicError) -> Msg {
 /// Estado completo da aplicação.
 pub struct App {
     pub running: bool,
-    pub client: YtMusicClient,
+    /// Serviço de música por trás da UI. `Arc<dyn>`: as tasks assíncronas
+    /// clonam o handle e falam apenas com o contrato.
+    pub provider: Arc<dyn MusicProvider>,
     pub player: AudioPlayer,
     /// Real-time FFT spectrum feeding the Home screen's visualizer bars.
     pub visualizer: SpectrumAnalyzer,
@@ -259,7 +265,7 @@ pub struct App {
     pub library: Vec<Playlist>,
     /// Recomendações da tela inicial, agrupadas nas mesmas seções nomeadas
     /// que o YouTube Music usa ("Quick picks", "Mixed for you", ...).
-    pub home: Vec<crate::ytmusic::HomeSection>,
+    pub home: Vec<crate::models::HomeSection>,
     /// Últimas faixas reproduzidas (histórico local em `recent.json`),
     /// exibidas como o primeiro grupo da tela Início e tocáveis com Enter.
     pub recent: Vec<Track>,
@@ -271,8 +277,8 @@ pub struct App {
     /// música dos resultados da busca; consumida por `play_selected` para
     /// buscar as semelhantes após iniciar a reprodução.
     pending_radio_seed: Option<String>,
-    /// Current cookie authentication state.
-    pub authentication: AuthenticationState,
+    /// Estado de autenticação atual (espelho do provedor para a UI).
+    pub authentication: AuthState,
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
     pub account_name: Option<String>,
     /// Índice do tema de cores ativo (ver `crate::theme`).
@@ -350,24 +356,16 @@ impl App {
         // Carrega preferências persistidas.
         let config = Config::load();
 
-        let default_cookies = dirs::config_dir().map(|dir| dir.join("ytmtui/cookies.txt"));
-        let resolution = resolve_cookie_path(
-            std::env::var("YTM_COOKIES").ok(),
-            config.cookies.clone(),
-            default_cookies,
-        );
-        let cookies = resolution.path;
-
         let mut player = AudioPlayer::new()?;
         player.set_volume(config.volume);
 
-        let (client, authentication) = match cookies.as_deref() {
-            Some(path) => match YtMusicClient::with_cookies(path) {
-                Ok(client) => (client, AuthenticationState::Authenticated),
-                Err(_) => (YtMusicClient::new(), AuthenticationState::InvalidCookies),
-            },
-            None => (YtMusicClient::new(), AuthenticationState::Anonymous),
-        };
+        // Raiz de composição: o único ponto em que o provedor concreto
+        // aparece — daqui em diante o app só conhece o contrato.
+        let (provider, bootstrap) =
+            crate::ytmusic::YtMusic::from_environment(config.cookies.clone());
+        let provider: Arc<dyn MusicProvider> = Arc::new(provider);
+        let authentication = bootstrap.auth;
+        let cookies = bootstrap.cookies;
 
         // Tema salvo e nome de exibição personalizado (opcional).
         let theme_index = crate::theme::index_by_name(&config.theme);
@@ -381,24 +379,24 @@ impl App {
             | 1;
 
         let status = match authentication {
-            AuthenticationState::Authenticated => {
+            AuthState::Authenticated => {
                 "Signed in. Loading your library... Press / to search or ? for help.".to_string()
             }
-            AuthenticationState::InvalidCookies => {
+            AuthState::InvalidCredentials => {
                 "Cookie file is invalid. Press g to sign in from your browser.".to_string()
             }
-            AuthenticationState::Anonymous => match resolution.missing_requested_path.as_deref() {
+            AuthState::Anonymous => match bootstrap.missing_requested_path.as_deref() {
                 Some(path) => format!("Configured cookie file does not exist: {path}"),
                 None => "Welcome to ytmtui. Press / to search or ? for help.".to_string(),
             },
-            AuthenticationState::Expired => {
+            AuthState::Expired => {
                 "Session expired. Press g to sign in again from your browser.".to_string()
             }
         };
 
         Ok(Self {
             running: true,
-            client,
+            provider,
             player,
             visualizer: SpectrumAnalyzer::new(),
             tx,
@@ -515,14 +513,14 @@ impl App {
 
     /// Carrega (em background) as playlists da biblioteca, se autenticado.
     pub fn load_library(&mut self) {
-        if !self.is_authenticated() {
+        if !self.provider.capabilities().library || !self.is_authenticated() {
             return;
         }
         self.begin_task();
-        let client = self.client.clone();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.get_library_playlists().await {
+            match provider.library_playlists().await {
                 Ok(pls) => {
                     let _ = tx.send(Msg::LibraryPlaylists(pls));
                 }
@@ -535,11 +533,14 @@ impl App {
 
     /// Carrega (em background) as recomendações da tela inicial.
     pub fn load_home(&mut self) {
+        if !self.provider.capabilities().home {
+            return;
+        }
         self.begin_task();
-        let client = self.client.clone();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.get_home().await {
+            match provider.home().await {
                 Ok(sections) => {
                     let _ = tx.send(Msg::HomeSections(sections));
                 }
@@ -684,11 +685,11 @@ impl App {
         }
         self.status = format!("Carregando artista \"{}\"...", artist.name);
         self.begin_task();
-        let client = self.client.clone();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         let title = format!("Artist: {}", artist.name);
         tokio::spawn(async move {
-            match client.get_artist(&artist.browse_id).await {
+            match provider.artist_tracks(&artist.browse_id).await {
                 Ok(tracks) => {
                     let _ = tx.send(Msg::PlaylistTracks { title, tracks });
                 }
@@ -814,50 +815,42 @@ impl App {
         self.status = "Fila limpa.".to_string();
     }
 
-    /// Login com uma tecla: importa cookies do primeiro navegador instalado
-    /// que tenha uma sessão do YouTube, salva em `~/.config/ytmtui/cookies.txt`
-    /// e reconecta o cliente sem reiniciar o app. Também serve para renovar
-    /// uma sessão expirada.
+    /// Login com uma tecla: delega ao fluxo de sign-in do provedor (no
+    /// YouTube Music, importa cookies do primeiro navegador com sessão) e
+    /// reconecta sem reiniciar o app. Também renova uma sessão expirada.
     pub fn sign_in(&mut self) {
+        if !self.provider.capabilities().sign_in {
+            self.status = format!(
+                "{} não tem fluxo de conexão interativo.",
+                self.provider.display_name()
+            );
+            return;
+        }
         if self.signing_in {
             self.status = "Aguarde: a conexão anterior ainda está em andamento.".to_string();
             return;
         }
-        let Some(home) = dirs::home_dir() else {
-            self.status = "⚠ Não foi possível localizar o diretório home.".to_string();
-            return;
-        };
-        let browsers = detect_browsers(&home);
-        if browsers.is_empty() {
-            self.status =
-                "⚠ Nenhum navegador suportado encontrado (Brave/Chrome/Firefox…).".to_string();
-            return;
-        }
-        let Some(dest) = dirs::config_dir().map(|d| d.join("ytmtui/cookies.txt")) else {
-            self.status = "⚠ Não foi possível localizar o diretório de config.".to_string();
-            return;
-        };
         self.begin_task();
         self.signing_in = true;
-        let first = browsers[0].split(':').next().unwrap_or(&browsers[0]);
-        self.status = format!("Conectando: importando cookies de {first}…");
+        self.status = format!("Conectando ao {}…", self.provider.display_name());
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::task::spawn_blocking(move || {
-            let mut last_error = String::new();
-            for browser in browsers {
-                let _ = tx.send(Msg::Status(format!("Importando cookies de {browser}…")));
-                match export_browser_cookies(&browser, &dest) {
-                    Ok(()) => {
-                        let _ = tx.send(Msg::CookiesImported {
-                            path: dest.to_string_lossy().into_owned(),
-                            browser,
-                        });
-                        return;
-                    }
-                    Err(e) => last_error = format!("{browser}: {e}"),
+            let progress_tx = tx.clone();
+            let progress = move |message: String| {
+                let _ = progress_tx.send(Msg::Status(message));
+            };
+            match provider.sign_in(&progress) {
+                Ok(summary) => {
+                    let _ = tx.send(Msg::SignedIn {
+                        method: summary.method,
+                        credentials_path: summary.credentials_path,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(format!("Falha ao conectar — {e}")));
                 }
             }
-            let _ = tx.send(Msg::Error(format!("Falha ao conectar — {last_error}")));
         });
     }
 
@@ -867,6 +860,13 @@ impl App {
             self.status = "Nada tocando para curtir.".to_string();
             return;
         };
+        if !self.provider.capabilities().likes {
+            self.status = format!(
+                "{} não suporta curtir faixas.",
+                self.provider.display_name()
+            );
+            return;
+        }
         if !self.is_authenticated() {
             self.status = "⚠ Conecte sua conta para curtir faixas.".to_string();
             return;
@@ -880,10 +880,10 @@ impl App {
             self.liked.remove(&vid);
             self.status = format!("🤍 Removeu a curtida: {}", track.title);
         }
-        let client = self.client.clone();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = client.rate_song(&vid, like).await {
+            if let Err(e) = provider.rate_track(&vid, like).await {
                 let _ = tx.send(Msg::Error(format!("Não foi possível curtir: {e}")));
             }
         });
@@ -896,10 +896,10 @@ impl App {
             return;
         }
         self.begin_task();
-        let client = self.client.clone();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.get_account_name().await {
+            match provider.account_name().await {
                 // `None` também é enviado: toda tarefa contada precisa
                 // terminar em exatamente uma mensagem (ver `begin_task`).
                 Ok(name) => {
@@ -1075,11 +1075,10 @@ impl App {
         if track.video_id.is_empty() {
             return;
         }
-        let url = track.watch_url();
-        let vid = track.video_id.clone();
-        let cookies = self.cookies.clone();
+        let track = track.clone();
+        let provider = Arc::clone(&self.provider);
         tokio::task::spawn_blocking(move || {
-            let _ = player::download_audio(&url, &vid, cookies.as_deref());
+            let _ = provider.resolve_playable(&track);
         });
     }
 
@@ -1166,10 +1165,10 @@ impl App {
         }
         self.status = format!("Buscando por \"{q}\"...");
         self.begin_task();
-        let client = self.client.clone();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.search(&q).await {
+            match provider.search(&q).await {
                 Ok(res) => {
                     let _ = tx.send(Msg::SearchResults(res));
                 }
@@ -1212,11 +1211,11 @@ impl App {
     fn load_browse(&mut self, pl: Playlist, kind: &str) {
         self.status = format!("Carregando \"{}\"...", pl.title);
         self.begin_task();
-        let client = self.client.clone();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         let title = format!("{kind}: {}", pl.title);
         tokio::spawn(async move {
-            match client.get_playlist_tracks(&pl.browse_id).await {
+            match provider.playlist_tracks(&pl.browse_id).await {
                 Ok(tracks) => {
                     let _ = tx.send(Msg::PlaylistTracks { title, tracks });
                 }
@@ -1243,10 +1242,13 @@ impl App {
     /// Busca (em background) a rádio de faixas semelhantes à `seed` para
     /// completar a fila atrás do que está tocando.
     fn fetch_related(&self, seed: String) {
-        let client = self.client.clone();
+        if !self.provider.capabilities().radio {
+            return;
+        }
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Ok(tracks) = client.get_radio(&seed).await {
+            if let Ok(tracks) = provider.radio(&seed).await {
                 let _ = tx.send(Msg::RelatedTracks { seed, tracks });
             }
         });
@@ -1393,16 +1395,16 @@ impl App {
         self.loading_audio = true;
         self.status = format!("Baixando \"{}\"...", track.title);
 
-        // 1) Download / resolução do áudio (bloqueante) em task dedicada.
+        // 1) Resolução do áudio (bloqueante) em task dedicada, a cargo do
+        // provedor (download/cache/remux ficam do lado de lá do contrato).
         let tx = self.tx.clone();
-        let url = track.watch_url();
-        let vid_audio = track.video_id.clone();
-        let cookies = self.cookies.clone();
+        let provider = Arc::clone(&self.provider);
+        let track_audio = track.clone();
         tokio::task::spawn_blocking(move || {
-            match player::download_audio(&url, &vid_audio, cookies.as_deref()) {
+            match provider.resolve_playable(&track_audio) {
                 Ok(path) => {
                     let _ = tx.send(Msg::AudioReady {
-                        video_id: vid_audio,
+                        video_id: track_audio.video_id,
                         path,
                     });
                 }
@@ -1418,26 +1420,28 @@ impl App {
             self.prefetch(n);
         }
 
-        // 2) Letras.
-        let client = self.client.clone();
-        let tx2 = self.tx.clone();
-        let vid = track.video_id.clone();
-        tokio::spawn(async move {
-            if let Ok(lyr) = client.get_lyrics(&vid).await {
-                let _ = tx2.send(Msg::Lyrics {
-                    video_id: vid,
-                    lyrics: lyr,
-                });
-            }
-        });
+        // 2) Letras (só quando o provedor as fornece).
+        if self.provider.capabilities().lyrics {
+            let provider = Arc::clone(&self.provider);
+            let tx2 = self.tx.clone();
+            let vid = track.video_id.clone();
+            tokio::spawn(async move {
+                if let Ok(lyr) = provider.lyrics(&vid).await {
+                    let _ = tx2.send(Msg::Lyrics {
+                        video_id: vid,
+                        lyrics: lyr,
+                    });
+                }
+            });
+        }
 
         // 3) Capa (artwork).
         if let Some(url) = track.thumbnail.clone() {
             let tx3 = self.tx.clone();
-            let http = self.client.clone();
+            let provider = Arc::clone(&self.provider);
             let vid_art = track.video_id.clone();
             tokio::spawn(async move {
-                if let Ok(bytes) = http.fetch_bytes(&url).await {
+                if let Ok(bytes) = provider.fetch_artwork(&url).await {
                     let _ = tx3.send(Msg::ArtworkBytes {
                         video_id: vid_art,
                         bytes,
@@ -1502,14 +1506,14 @@ impl App {
             }
             None => {
                 // Fim da fila: tenta continuar com uma rádio (autoplay).
-                if self.autoplay {
+                if self.autoplay && self.provider.capabilities().radio {
                     if let Some(seed) = self.current.as_ref().map(|t| t.video_id.clone()) {
                         if !seed.is_empty() {
                             self.status = "📻 Fila concluída — carregando rádio...".to_string();
-                            let client = self.client.clone();
+                            let provider = Arc::clone(&self.provider);
                             let tx = self.tx.clone();
                             tokio::spawn(async move {
-                                match client.get_radio(&seed).await {
+                                match provider.radio(&seed).await {
                                     Ok(tracks) => {
                                         let _ = tx.send(Msg::RadioTracks(tracks));
                                     }
@@ -1651,7 +1655,7 @@ impl App {
                 }
                 Msg::SessionExpired => {
                     self.finish_task();
-                    self.authentication = AuthenticationState::Expired;
+                    self.authentication = AuthState::Expired;
                     self.library.clear();
                     self.account_name = None;
                     self.status = "Session expired. Press g to sign in again from your \
@@ -1675,7 +1679,7 @@ impl App {
                     // past must not overwrite the current track's lyrics.
                     if self.is_current_track(&video_id) {
                         use crate::lyrics::LyricsState;
-                        use crate::ytmusic::Lyrics;
+                        use crate::models::Lyrics;
                         self.lyrics = match lyrics {
                             Some(Lyrics::Synced(lines)) => LyricsState::Synced {
                                 lines,
@@ -1711,27 +1715,23 @@ impl App {
                         self.player.play_file(path);
                     }
                 }
-                Msg::CookiesImported { path, browser } => {
+                Msg::SignedIn {
+                    method,
+                    credentials_path,
+                } => {
                     self.finish_task();
                     self.signing_in = false;
-                    match YtMusicClient::with_cookies(&path) {
-                        Ok(client) => {
-                            self.client = client;
-                            self.cookies = Some(path);
-                            self.authentication = AuthenticationState::Authenticated;
-                            self.account_name = None;
-                            let name = browser.split(':').next().unwrap_or(&browser);
-                            self.status =
-                                format!("✔ Conectado via {name}. Carregando suas músicas…");
-                            self.load_account();
-                            self.load_home();
-                            self.load_library();
-                        }
-                        Err(e) => {
-                            self.authentication = AuthenticationState::InvalidCookies;
-                            self.status = format!("⚠ Cookies importados são inválidos: {e}");
-                        }
+                    // O provedor já se reautenticou por dentro (`sign_in`);
+                    // aqui só espelhamos o estado e recarregamos o conteúdo.
+                    self.authentication = AuthState::Authenticated;
+                    if credentials_path.is_some() {
+                        self.cookies = credentials_path;
                     }
+                    self.account_name = None;
+                    self.status = format!("✔ Conectado via {method}. Carregando suas músicas…");
+                    self.load_account();
+                    self.load_home();
+                    self.load_library();
                 }
                 Msg::RelatedTracks { seed, tracks } => {
                     let added = self.append_related(&seed, tracks);
@@ -1862,7 +1862,7 @@ impl App {
 
         Self {
             running: true,
-            client: YtMusicClient::new(),
+            provider: Arc::new(crate::provider::mock::MockProvider::default()),
             player: AudioPlayer::new().expect("audio thread should start"),
             visualizer: SpectrumAnalyzer::new(),
             tx,
@@ -1886,7 +1886,7 @@ impl App {
             liked: std::collections::HashSet::new(),
             autoplay: true,
             pending_radio_seed: None,
-            authentication: AuthenticationState::Anonymous,
+            authentication: AuthState::Anonymous,
             account_name: None,
             theme_index: 0,
             list_state,
@@ -1920,14 +1920,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ytmusic::YtMusicError;
-    use reqwest::StatusCode;
 
     #[test]
     fn background_home_refresh_preserves_selection_by_browse_id() {
         let mut app = App::new_for_tests();
         app.section = Section::Inicio;
-        app.home = vec![crate::ytmusic::HomeSection {
+        app.home = vec![crate::models::HomeSection {
             title: "Quick picks".to_string(),
             items: vec![
                 Playlist {
@@ -1945,7 +1943,7 @@ mod tests {
 
         // A background refresh reorders VL2 ahead of VL1.
         app.tx
-            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
                 title: "Quick picks".to_string(),
                 items: vec![
                     Playlist {
@@ -1972,7 +1970,7 @@ mod tests {
     fn background_home_refresh_clamps_when_the_selected_item_is_gone() {
         let mut app = App::new_for_tests();
         app.section = Section::Inicio;
-        app.home = vec![crate::ytmusic::HomeSection {
+        app.home = vec![crate::models::HomeSection {
             title: "Quick picks".to_string(),
             items: vec![
                 Playlist {
@@ -1989,7 +1987,7 @@ mod tests {
 
         // VL2 is gone from the refreshed data.
         app.tx
-            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
                 title: "Quick picks".to_string(),
                 items: vec![Playlist {
                     browse_id: "VL1".to_string(),
@@ -2050,7 +2048,7 @@ mod tests {
         assert!(app.home.is_empty());
 
         app.tx
-            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
                 title: "Quick picks".to_string(),
                 items: vec![Playlist {
                     browse_id: "VL1".to_string(),
@@ -2076,7 +2074,7 @@ mod tests {
         assert!(app.needs_animation(), "loading shows the spinner");
         app.finish_task();
 
-        app.current = Some(crate::ytmusic::Track::default());
+        app.current = Some(crate::models::Track::default());
         assert!(app.needs_animation(), "playback progress animates");
     }
 
@@ -2105,9 +2103,9 @@ mod tests {
         );
     }
 
-    fn home_sections() -> Vec<crate::ytmusic::HomeSection> {
+    fn home_sections() -> Vec<crate::models::HomeSection> {
         vec![
-            crate::ytmusic::HomeSection {
+            crate::models::HomeSection {
                 title: "Quick picks".to_string(),
                 items: vec![
                     Playlist {
@@ -2122,7 +2120,7 @@ mod tests {
                     },
                 ],
             },
-            crate::ytmusic::HomeSection {
+            crate::models::HomeSection {
                 title: "Mixed for you".to_string(),
                 items: vec![Playlist {
                     browse_id: "VL3".to_string(),
@@ -2171,7 +2169,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        app.artists = vec![crate::ytmusic::Artist {
+        app.artists = vec![crate::models::Artist {
             browse_id: "UC1".to_string(),
             name: "Artist one".to_string(),
             ..Default::default()
@@ -2560,14 +2558,8 @@ mod tests {
 
     #[test]
     fn session_expiry_maps_to_the_dedicated_message() {
-        let message = client_error_message(
-            "Could not load library",
-            YtMusicError::SessionExpired {
-                status: StatusCode::UNAUTHORIZED,
-                endpoint: "browse".to_string(),
-            },
-        );
-
+        let message =
+            client_error_message("Could not load library", ProviderError::SessionExpired);
         assert!(matches!(message, Msg::SessionExpired));
     }
 }

@@ -101,7 +101,7 @@ pub fn extract_thumbnail(item: &Value) -> Option<String> {
 /// picks", "Mixed for you", ...) instead of flattening everything into one
 /// list. Shelves with no title, or that end up with zero navigable items,
 /// are dropped.
-pub fn parse_home_sections(data: &Value) -> Vec<crate::ytmusic::HomeSection> {
+pub fn parse_home_sections(data: &Value) -> Vec<crate::models::HomeSection> {
     let mut shelves = Vec::new();
     collect_key(data, "musicCarouselShelfRenderer", &mut shelves);
 
@@ -142,7 +142,7 @@ pub fn parse_home_sections(data: &Value) -> Vec<crate::ytmusic::HomeSection> {
             }
             let item_title = r.get("title").map(join_runs).unwrap_or_default();
             let subtitle = r.get("subtitle").map(join_runs).unwrap_or_default();
-            items.push(crate::ytmusic::Playlist {
+            items.push(crate::models::Playlist {
                 browse_id: browse_id.to_string(),
                 title: item_title,
                 subtitle,
@@ -150,7 +150,7 @@ pub fn parse_home_sections(data: &Value) -> Vec<crate::ytmusic::HomeSection> {
             });
         }
         if !items.is_empty() {
-            out.push(crate::ytmusic::HomeSection { title, items });
+            out.push(crate::models::HomeSection { title, items });
         }
     }
     out
@@ -224,7 +224,7 @@ pub fn extract_continuation(value: &Value) -> Option<String> {
 }
 
 /// Converte um `playlistPanelVideoRenderer` (item de fila/rádio) em `Track`.
-pub fn parse_panel_video(r: &Value) -> Option<crate::ytmusic::Track> {
+pub fn parse_panel_video(r: &Value) -> Option<crate::models::Track> {
     let video_id = r
         .get("videoId")
         .and_then(|v| v.as_str())
@@ -252,7 +252,7 @@ pub fn parse_panel_video(r: &Value) -> Option<crate::ytmusic::Track> {
         .map(|s| s.to_string())
         .unwrap_or_default();
     let duration = r.get("lengthText").map(join_runs).unwrap_or_default();
-    Some(crate::ytmusic::Track {
+    Some(crate::models::Track {
         video_id,
         title,
         artist,
@@ -285,7 +285,7 @@ pub fn fixed_duration(renderer: &Value) -> Option<String> {
 /// empty `Vec` — rather than an `Option` — when the shape isn't present
 /// (e.g. a WEB_REMIX response, or a track without synced lyrics), so the
 /// caller can treat "empty" and "field absent" the same way.
-pub fn parse_timed_lyrics(data: &Value) -> Vec<crate::ytmusic::LyricLine> {
+pub fn parse_timed_lyrics(data: &Value) -> Vec<crate::models::LyricLine> {
     let Some(arr) = find_key(data, "timedLyricsData").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
@@ -299,7 +299,7 @@ pub fn parse_timed_lyrics(data: &Value) -> Vec<crate::ytmusic::LyricLine> {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0)
             };
-            Some(crate::ytmusic::LyricLine {
+            Some(crate::models::LyricLine {
                 text,
                 start_ms: ms("startTimeMilliseconds"),
                 end_ms: ms("endTimeMilliseconds"),

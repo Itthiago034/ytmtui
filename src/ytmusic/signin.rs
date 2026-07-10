@@ -1,18 +1,9 @@
+//! Fluxo de sign-in do YouTube Music: resolução do arquivo de cookies e
+//! importação da sessão a partir de um navegador instalado (via yt-dlp).
+//! Tudo aqui é específico do YouTube — a UI só vê o contrato genérico de
+//! `crate::provider::MusicProvider::sign_in`.
+
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthenticationState {
-    Anonymous,
-    Authenticated,
-    Expired,
-    InvalidCookies,
-}
-
-impl AuthenticationState {
-    pub fn is_authenticated(self) -> bool {
-        matches!(self, Self::Authenticated)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CookiePathResolution {
@@ -157,14 +148,6 @@ pub fn export_browser_cookies(browser: &str, dest: &Path) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_authenticated_state_is_authenticated() {
-        assert!(AuthenticationState::Authenticated.is_authenticated());
-        assert!(!AuthenticationState::Anonymous.is_authenticated());
-        assert!(!AuthenticationState::Expired.is_authenticated());
-        assert!(!AuthenticationState::InvalidCookies.is_authenticated());
-    }
 
     #[test]
     fn detect_browsers_requires_a_real_cookie_store() {

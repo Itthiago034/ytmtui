@@ -272,6 +272,7 @@ fn home_shows_recent_tracks_group_and_search_shows_mixed_groups() {
         title: "X&Y".to_string(),
         subtitle: "Album • Coldplay".to_string(),
         thumbnail: None,
+        ..Default::default()
     }];
     app.playlists = Vec::new();
     let buffer = render(&mut app, 100, 30);
@@ -299,6 +300,7 @@ fn home_section_highlight_lands_on_the_right_item_despite_header_rows() {
                 title: "First pick".to_string(),
                 subtitle: "Some artist".to_string(),
                 thumbnail: None,
+                ..Default::default()
             }],
         },
         HomeSection {
@@ -308,6 +310,7 @@ fn home_section_highlight_lands_on_the_right_item_despite_header_rows() {
                 title: "Second pick".to_string(),
                 subtitle: "Another artist".to_string(),
                 thumbnail: None,
+                ..Default::default()
             }],
         },
     ];

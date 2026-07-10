@@ -15,6 +15,7 @@ use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
+use crate::home::HomeView;
 use crate::models::{Artist, Playlist, SearchResults, Track};
 use crate::player::AudioPlayer;
 use crate::provider::{MusicProvider, ProviderError};
@@ -601,8 +602,12 @@ impl App {
 
     /// Total de itens selecionáveis na tela Início: o histórico recente vem
     /// primeiro, seguido dos itens das seções de recomendações.
+    pub fn home_view(&self) -> HomeView {
+        HomeView::project(self.provider.id(), &self.recent, &self.home)
+    }
+
     pub fn home_total_count(&self) -> usize {
-        self.recent.len() + self.home_item_count()
+        self.home_view().len()
     }
 
     /// Registra uma faixa no histórico local (topo da lista, sem duplicatas,

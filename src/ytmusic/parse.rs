@@ -147,6 +147,11 @@ pub fn parse_home_sections(data: &Value) -> Vec<crate::models::HomeSection> {
                 title: item_title,
                 subtitle,
                 thumbnail: extract_thumbnail(r),
+                kind: if browse_id.starts_with("MPRE") {
+                    crate::models::CollectionKind::Album
+                } else {
+                    crate::models::CollectionKind::Playlist
+                },
             });
         }
         if !items.is_empty() {
@@ -482,6 +487,7 @@ mod tests {
                         home_item("VL1", "Song A"),
                         home_item("VL1", "Song A (dup within shelf)"),
                         home_item("VL2", "Song B"),
+                        home_item("MPRE1", "Album A"),
                         // Not navigable (no VL/MPRE prefix): filtered out.
                         home_item("SOMETHING_ELSE", "Not a playlist"),
                     ],
@@ -503,9 +509,18 @@ mod tests {
         let quick_picks = &sections[0];
         assert_eq!(quick_picks.title, "Quick picks");
         // VL1 appears once (per-shelf dedup), the invalid id is filtered.
-        assert_eq!(quick_picks.items.len(), 2);
+        assert_eq!(quick_picks.items.len(), 3);
         assert_eq!(quick_picks.items[0].browse_id, "VL1");
         assert_eq!(quick_picks.items[1].browse_id, "VL2");
+        assert_eq!(
+            quick_picks.items[0].kind,
+            crate::models::CollectionKind::Playlist
+        );
+        assert_eq!(quick_picks.items[2].browse_id, "MPRE1");
+        assert_eq!(
+            quick_picks.items[2].kind,
+            crate::models::CollectionKind::Album
+        );
 
         let mixed = &sections[1];
         assert_eq!(mixed.title, "Mixed for you");

@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 pub use auth::Auth;
 pub use provider::{Bootstrap, YtMusic};
 
-use crate::models::{Artist, HomeSection, Lyrics, Playlist, SearchResults, Track};
+use crate::models::{Artist, CollectionKind, HomeSection, Lyrics, Playlist, SearchResults, Track};
 use parse::*;
 
 const BASE: &str = "https://music.youtube.com/youtubei/v1";
@@ -260,6 +260,7 @@ impl YtMusicClient {
                 title,
                 subtitle,
                 thumbnail: extract_thumbnail(r),
+                kind: CollectionKind::Playlist,
             });
         }
         Ok(out)
@@ -422,6 +423,7 @@ impl YtMusicClient {
                         title: texts.first().cloned().unwrap_or_default(),
                         subtitle: texts.get(1).cloned().unwrap_or_default(),
                         thumbnail: extract_thumbnail(r),
+                        kind: CollectionKind::Album,
                     });
                 }
             }
@@ -447,6 +449,7 @@ impl YtMusicClient {
                         title: texts.first().cloned().unwrap_or_default(),
                         subtitle: texts.get(1).cloned().unwrap_or_default(),
                         thumbnail: extract_thumbnail(r),
+                        kind: CollectionKind::Playlist,
                     });
                 }
             }

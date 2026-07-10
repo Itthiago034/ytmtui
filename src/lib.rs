@@ -3,6 +3,7 @@
 pub mod app;
 pub mod config;
 pub mod event;
+pub mod home;
 pub mod lyrics;
 pub mod models;
 pub mod mpris;

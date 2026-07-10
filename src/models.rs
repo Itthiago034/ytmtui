@@ -33,6 +33,14 @@ pub struct Track {
     pub thumbnail: Option<String>,
 }
 
+/// Classificação neutra do provedor para uma coleção navegável.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CollectionKind {
+    Album,
+    #[default]
+    Playlist,
+}
+
 /// Representa uma playlist ou álbum.
 #[derive(Debug, Clone, Default)]
 pub struct Playlist {
@@ -41,6 +49,7 @@ pub struct Playlist {
     pub title: String,
     pub subtitle: String,
     pub thumbnail: Option<String>,
+    pub kind: CollectionKind,
 }
 
 /// Um artista retornado na busca.

@@ -83,7 +83,10 @@ Expected: the commit contains the four named paths and `git status --short` no l
 - Modify: `src/lib.rs`
 - Modify: `src/models.rs`
 - Modify: `src/app.rs`
+- Modify: `src/ytmusic/mod.rs`
 - Modify: `src/ytmusic/parse.rs`
+- Modify: `src/ui/tests.rs`
+- Modify: `tests/provider_boundary.rs`
 - Test: `src/ytmusic/parse.rs`
 - Test: `src/home.rs`
 
@@ -151,8 +154,9 @@ pub struct Playlist {
 
 Update YouTube parsing so album-filter results and `MPRE` Home entries receive
 `CollectionKind::Album`; playlist results receive `CollectionKind::Playlist`.
-Update existing `Playlist` struct literals to use `..Default::default()` where
-they do not care about kind, and add parser assertions for both kinds.
+Update existing `Playlist` struct literals in `src/app.rs`, `src/ui/tests.rs`,
+and `tests/provider_boundary.rs` to use `..Default::default()` where they do not
+care about kind, and add parser assertions for both kinds.
 
 Create `src/home.rs` with these public shapes and a projection that clones source models into cards:
 
@@ -259,7 +263,7 @@ Expected: all new projection tests and existing Home indexing tests pass.
 - [ ] **Step 5: Commit the projection**
 
 ```bash
-git add src/home.rs src/lib.rs src/models.rs src/app.rs src/ytmusic/parse.rs
+git add src/home.rs src/lib.rs src/models.rs src/app.rs src/ytmusic/mod.rs src/ytmusic/parse.rs src/ui/tests.rs tests/provider_boundary.rs
 git commit -m "refactor: add provider-neutral Home projection"
 ```
 

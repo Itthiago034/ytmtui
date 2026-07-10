@@ -70,6 +70,30 @@ pub struct Capabilities {
     pub sign_in: bool,
 }
 
+impl Capabilities {
+    pub const fn all() -> Self {
+        Self {
+            home: true,
+            library: true,
+            lyrics: true,
+            radio: true,
+            likes: true,
+            sign_in: true,
+        }
+    }
+
+    pub const fn none() -> Self {
+        Self {
+            home: false,
+            library: false,
+            lyrics: false,
+            radio: false,
+            likes: false,
+            sign_in: false,
+        }
+    }
+}
+
 /// Resultado de um sign-in bem-sucedido.
 #[derive(Debug, Clone)]
 pub struct SignInSummary {

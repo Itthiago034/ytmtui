@@ -12,7 +12,6 @@ use super::{Capabilities, MusicProvider, ProviderError, Result, SignInSummary};
 use crate::models::{HomeSection, Lyrics, Playlist, SearchResults, Track};
 
 /// Dados enlatados; campos públicos para os testes montarem cenários.
-#[derive(Default)]
 pub struct MockProvider {
     pub search_results: SearchResults,
     pub home_sections: Vec<HomeSection>,
@@ -22,9 +21,33 @@ pub struct MockProvider {
     pub radio_tracks: Vec<Track>,
     pub lyrics: Option<Lyrics>,
     pub account: Option<String>,
+    /// O que este provedor "suporta" — os testes desligam ações para provar
+    /// que a UI as esconde em vez de chamá-las.
+    pub capabilities: Capabilities,
     /// Quando setado, todo método async devolve este erro (por mensagem).
     pub fail_with: Option<String>,
+    /// Quando `true`, todo método async falha com `SessionExpired`.
+    pub expire_session: bool,
     authenticated: AtomicBool,
+}
+
+impl Default for MockProvider {
+    fn default() -> Self {
+        Self {
+            search_results: SearchResults::default(),
+            home_sections: Vec::new(),
+            library: Vec::new(),
+            playlist_tracks: Vec::new(),
+            artist_tracks: Vec::new(),
+            radio_tracks: Vec::new(),
+            lyrics: None,
+            account: None,
+            capabilities: Capabilities::all(),
+            fail_with: None,
+            expire_session: false,
+            authenticated: AtomicBool::new(false),
+        }
+    }
 }
 
 impl MockProvider {
@@ -35,6 +58,9 @@ impl MockProvider {
     }
 
     fn outcome<T>(&self, value: T) -> Result<T> {
+        if self.expire_session {
+            return Err(ProviderError::SessionExpired);
+        }
         match &self.fail_with {
             Some(message) => Err(ProviderError::Message(message.clone())),
             None => Ok(value),
@@ -53,14 +79,7 @@ impl MusicProvider for MockProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            home: true,
-            library: true,
-            lyrics: true,
-            radio: true,
-            likes: true,
-            sign_in: true,
-        }
+        self.capabilities
     }
 
     fn is_authenticated(&self) -> bool {

@@ -1399,18 +1399,20 @@ impl App {
         // provedor (download/cache/remux ficam do lado de lá do contrato).
         let tx = self.tx.clone();
         let provider = Arc::clone(&self.provider);
+        let provider_name = provider.display_name();
         let track_audio = track.clone();
-        tokio::task::spawn_blocking(move || {
-            match provider.resolve_playable(&track_audio) {
-                Ok(path) => {
-                    let _ = tx.send(Msg::AudioReady {
-                        video_id: track_audio.video_id,
-                        path,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("Falha ao obter áudio: {e}")));
-                }
+        tokio::task::spawn_blocking(move || match provider.resolve_playable(&track_audio) {
+            Ok(path) => {
+                let _ = tx.send(Msg::AudioReady {
+                    video_id: track_audio.video_id,
+                    path,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(Msg::Error(format!(
+                    "Falha ao obter áudio ({provider_name}): {e}",
+                    provider_name = provider_name
+                )));
             }
         });
 
@@ -1848,21 +1850,24 @@ impl App {
     }
 }
 
-#[cfg(test)]
 impl App {
-    /// Builds an `App` with fixed defaults for rendering tests.
-    ///
-    /// Unlike [`App::new`], this constructor never reads configuration files,
-    /// environment variables, or cookie files, so tests are deterministic on
-    /// any machine.
-    pub(crate) fn new_for_tests() -> Self {
+    /// Raiz de composição alternativa: constrói o app em torno de um
+    /// provedor já pronto, sem ler configuração, variáveis de ambiente,
+    /// cookies ou histórico do disco. É o ponto de entrada dos testes de
+    /// fronteira (mock) e de provedores selecionados externamente.
+    pub fn with_provider(provider: Arc<dyn MusicProvider>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+        let authentication = if provider.is_authenticated() {
+            AuthState::Authenticated
+        } else {
+            AuthState::Anonymous
+        };
 
         Self {
             running: true,
-            provider: Arc::new(crate::provider::mock::MockProvider::default()),
+            provider,
             player: AudioPlayer::new().expect("audio thread should start"),
             visualizer: SpectrumAnalyzer::new(),
             tx,
@@ -1880,13 +1885,12 @@ impl App {
             search_mixed: false,
             library: Vec::new(),
             home: Vec::new(),
-            // Tests must not read (or later write) the user's real
-            // recent.json; they start with an empty in-memory history.
+            // Sem leitura do recent.json real: histórico começa vazio.
             recent: Vec::new(),
             liked: std::collections::HashSet::new(),
             autoplay: true,
             pending_radio_seed: None,
-            authentication: AuthState::Anonymous,
+            authentication,
             account_name: None,
             theme_index: 0,
             list_state,
@@ -1914,6 +1918,18 @@ impl App {
             sync_interval: std::time::Duration::from_secs(300),
             last_synced: std::time::Instant::now(),
         }
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Builds an `App` with fixed defaults for rendering tests.
+    ///
+    /// Unlike [`App::new`], this constructor never reads configuration files,
+    /// environment variables, or cookie files, so tests are deterministic on
+    /// any machine.
+    pub(crate) fn new_for_tests() -> Self {
+        Self::with_provider(Arc::new(crate::provider::mock::MockProvider::default()))
     }
 }
 

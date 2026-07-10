@@ -536,7 +536,13 @@ fn draw_player_panel(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     draw_panel_title(f, app, rows[0], theme);
-    draw_bars(f, app.visualizer.bars(), rows[1], theme);
+    draw_bars(
+        f,
+        app.visualizer.bars(),
+        app.visualizer.peaks(),
+        rows[1],
+        theme,
+    );
 }
 
 /// Compact "▶ Title — Artist" line above the bars.
@@ -552,15 +558,19 @@ fn draw_panel_title(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme)
 }
 
 /// Cava-style bars: one column per entry in `bars`, each a stack of Unicode
-/// eighth-block glyphs sized to that bar's smoothed height. Colored by the
-/// bar's own current height using the theme's existing palette (no new
-/// gradient helper) so quiet bars read as calmer and loud ones as louder.
+/// eighth-block glyphs sized to that bar's smoothed height, plus a slowly
+/// falling "peak cap" marking each bar's recent maximum (Winamp-style).
+/// Cells are colored by their own height in the panel — quiet bars stay in
+/// the player color, tall bars grade through secondary into accent — so
+/// every loud bar reads as a vertical gradient.
 // Precomputed "glyph + trailing space" static slices: with the Home screen's
 // fast (~60ms) redraw tier, this function runs often, so each cell is a
 // `&'static str` lookup rather than a fresh `format!()` allocation.
 const BAR_GLYPHS: [&str; 9] = ["  ", "▁ ", "▂ ", "▃ ", "▄ ", "▅ ", "▆ ", "▇ ", "█ "];
+/// Glyph do peak cap (linha fina no alto da célula onde o pico está).
+const PEAK_GLYPH: &str = "▔ ";
 
-fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
+fn draw_bars(f: &mut Frame, bars: &[f32], peaks: &[f32], area: Rect, theme: &'static Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -571,8 +581,17 @@ fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows as usize);
     for row in 0..rows {
         let row_from_bottom = (rows - 1 - row) as f32;
+        // Fração de altura desta linha no painel: gradiente por célula.
+        let fraction = (row_from_bottom + 1.0) / rows as f32;
+        let color = if fraction > 0.66 {
+            theme.accent
+        } else if fraction > 0.33 {
+            theme.secondary
+        } else {
+            theme.player
+        };
         let mut spans = Vec::with_capacity(visible);
-        for &height in &bars[..visible] {
+        for (&height, &peak) in bars[..visible].iter().zip(&peaks[..visible]) {
             let filled_rows = height * rows as f32;
             let glyph = if row_from_bottom + 1.0 <= filled_rows {
                 BAR_GLYPHS[8]
@@ -582,13 +601,15 @@ fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
             } else {
                 BAR_GLYPHS[0]
             };
-            let color = if height > 0.66 {
-                theme.accent
-            } else if height > 0.33 {
-                theme.secondary
-            } else {
-                theme.player
-            };
+            // O cap só aparece em célula vazia acima da barra; quando o
+            // pico coincide com o topo da barra, a própria barra o mostra.
+            if glyph == BAR_GLYPHS[0] && peak > 0.04 {
+                let peak_row = ((peak * rows as f32).ceil() - 1.0).max(0.0);
+                if (peak_row - row_from_bottom).abs() < f32::EPSILON {
+                    spans.push(Span::styled(PEAK_GLYPH, Style::default().fg(theme.text)));
+                    continue;
+                }
+            }
             spans.push(Span::styled(glyph, Style::default().fg(color)));
         }
         lines.push(Line::from(spans));

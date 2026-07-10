@@ -1816,8 +1816,15 @@ impl App {
         if self.section == Section::Inicio {
             let audible = self.current.is_some() && !self.player.is_paused();
             if audible {
+                // Todos os chunks acumulados entram na janela, mas a FFT
+                // roda uma única vez por tick: só o frame final é desenhado.
+                let mut fed = false;
                 for chunk in self.player.drain_sample_chunks() {
                     self.visualizer.push_samples(&chunk);
+                    fed = true;
+                }
+                if fed {
+                    self.visualizer.compute_frame();
                 }
             } else {
                 self.visualizer.decay_idle();

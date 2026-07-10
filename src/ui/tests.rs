@@ -541,3 +541,44 @@ fn synced_lyrics_highlight_only_the_active_line() {
         "lines one step away fade to subtext"
     );
 }
+
+#[test]
+fn marquee_slides_one_column_per_step_and_wraps_with_a_gap() {
+    use ratatui::style::Style;
+    let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+    let dim = Style::default();
+    let parts = [("ABCDE", bold), ("xy", dim)];
+    let text_at = |step: usize| -> String {
+        super::marquee_spans(&parts, 5, step)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    // Ciclo completo: "ABCDExy" + 3 colunas de respiro = 10 passos.
+    assert_eq!(text_at(0), "ABCDE");
+    assert_eq!(text_at(1), "BCDEx");
+    assert_eq!(text_at(2), "CDExy");
+    assert_eq!(text_at(3), "DExy ");
+    assert_eq!(text_at(7), "   AB", "wraps around through the gap");
+    assert_eq!(text_at(8), "  ABC");
+    assert_eq!(text_at(10), "ABCDE", "cycle length is text + gap");
+
+    // Estilos preservados por trecho: no passo 1, "BCDE" em bold e "x" dim.
+    let spans = super::marquee_spans(&parts, 5, 1);
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].content.as_ref(), "BCDE");
+    assert_eq!(spans[0].style, bold);
+    assert_eq!(spans[1].content.as_ref(), "x");
+
+    // Caractere largo (2 colunas) nunca é cortado ao meio: a coluna órfã
+    // vira espaço.
+    let wide = [("A漢B", dim)];
+    let at = |step: usize| -> String {
+        super::marquee_spans(&wide, 3, step)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    assert_eq!(at(0), "A漢");
+    assert_eq!(at(2), " B ", "half of a wide char becomes a space");
+}

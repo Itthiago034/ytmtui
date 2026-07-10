@@ -44,6 +44,9 @@ const MIN_FREQ_HZ: f32 = 40.0;
 const ATTACK: f32 = 0.55;
 /// Slower "gravity" fall when a bar's energy decreases.
 const RELEASE: f32 = 0.12;
+/// Queda por frame dos "peak caps" (marcadores do pico recente de cada
+/// barra) — bem mais lenta que a das barras, no estilo Winamp/Cava.
+const PEAK_FALL: f32 = 0.02;
 
 /// Downmixes interleaved samples to mono `f32` in `[-1.0, 1.0]`.
 fn downmix_to_mono(data: &[i16], channels: u16) -> Vec<f32> {
@@ -113,9 +116,14 @@ pub struct SpectrumAnalyzer {
     hann: Vec<f32>,
     fft: Arc<dyn Fft<f32>>,
     scratch: Vec<Complex<f32>>,
+    /// Buffer de magnitudes reutilizado entre frames (evita uma alocação
+    /// de `FFT_SIZE/2` floats por frame).
+    magnitudes: Vec<f32>,
     bar_bins: Vec<(usize, usize)>,
     cached_sample_rate: u32,
     bars: [f32; BAR_COUNT],
+    /// Pico recente de cada barra, caindo devagar (ver [`PEAK_FALL`]).
+    peaks: [f32; BAR_COUNT],
 }
 
 impl SpectrumAnalyzer {
@@ -131,14 +139,18 @@ impl SpectrumAnalyzer {
             hann,
             fft,
             scratch: vec![Complex::new(0.0, 0.0); FFT_SIZE],
+            magnitudes: vec![0.0; FFT_SIZE / 2],
             bar_bins: build_bar_bins(FFT_SIZE, 44_100, BAR_COUNT),
             cached_sample_rate: 44_100,
             bars: [0.0; BAR_COUNT],
+            peaks: [0.0; BAR_COUNT],
         }
     }
 
-    /// Feeds one drained chunk in: downmixes, slides it into the rolling
-    /// window, and (once the window is full) recomputes one spectrum frame.
+    /// Feeds one drained chunk into the rolling window (downmix only — no
+    /// FFT). Several chunks arrive per UI tick but only the final window
+    /// matters for the frame that gets drawn, so the caller pushes them all
+    /// and then runs [`Self::compute_frame`] once.
     pub fn push_samples(&mut self, chunk: &SampleChunk) {
         if chunk.sample_rate != self.cached_sample_rate && chunk.sample_rate > 0 {
             self.bar_bins = build_bar_bins(FFT_SIZE, chunk.sample_rate, BAR_COUNT);
@@ -151,7 +163,13 @@ impl SpectrumAnalyzer {
             }
             self.ring.push_back(sample);
         }
+    }
 
+    /// Recomputes one spectrum frame from the current window: FFT, bucket
+    /// into bars, apply the attack/release envelope and let the peak caps
+    /// fall. One call per UI tick — the FFT runs once per drawn frame
+    /// instead of once per drained chunk.
+    pub fn compute_frame(&mut self) {
         if self.ring.len() < FFT_SIZE {
             return;
         }
@@ -161,13 +179,13 @@ impl SpectrumAnalyzer {
         }
         self.fft.process(&mut self.scratch);
 
-        let magnitudes: Vec<f32> = self.scratch[..FFT_SIZE / 2]
-            .iter()
-            .map(|c| (c.re * c.re + c.im * c.im).sqrt())
-            .collect();
-        let raw = bucket_bins(&magnitudes, &self.bar_bins);
-        for (bar, &r) in self.bars.iter_mut().zip(raw.iter()) {
-            *bar = smooth(*bar, r, ATTACK, RELEASE);
+        for (slot, c) in self.magnitudes.iter_mut().zip(&self.scratch[..FFT_SIZE / 2]) {
+            *slot = (c.re * c.re + c.im * c.im).sqrt();
+        }
+        let raw = bucket_bins(&self.magnitudes, &self.bar_bins);
+        for (i, &r) in raw.iter().enumerate().take(BAR_COUNT) {
+            self.bars[i] = smooth(self.bars[i], r, ATTACK, RELEASE);
+            self.peaks[i] = self.bars[i].max(self.peaks[i] - PEAK_FALL);
         }
     }
 
@@ -175,8 +193,9 @@ impl SpectrumAnalyzer {
     /// Home screen isn't the active section) so they settle instead of
     /// freezing mid-frame.
     pub fn decay_idle(&mut self) {
-        for bar in self.bars.iter_mut() {
+        for (bar, peak) in self.bars.iter_mut().zip(self.peaks.iter_mut()) {
             *bar = smooth(*bar, 0.0, ATTACK, RELEASE);
+            *peak = bar.max(*peak - PEAK_FALL);
         }
     }
 
@@ -185,12 +204,18 @@ impl SpectrumAnalyzer {
         &self.bars
     }
 
-    /// Clears the rolling sample window and bar heights. Called on track
-    /// change so the previous track's residual spectrum can't blend into
-    /// the next track's first frames.
+    /// Recent peak per bar, each in `[0.0, 1.0]`, falling slowly.
+    pub fn peaks(&self) -> &[f32; BAR_COUNT] {
+        &self.peaks
+    }
+
+    /// Clears the rolling sample window, bar heights and peak caps. Called
+    /// on track change so the previous track's residual spectrum can't
+    /// blend into the next track's first frames.
     pub fn reset(&mut self) {
         self.ring.clear();
         self.bars = [0.0; BAR_COUNT];
+        self.peaks = [0.0; BAR_COUNT];
     }
 }
 
@@ -276,12 +301,63 @@ mod tests {
     }
 
     #[test]
+    fn peaks_fall_slower_than_bars_and_never_below_them() {
+        let mut analyzer = SpectrumAnalyzer::new();
+        analyzer.bars = [0.8; BAR_COUNT];
+        analyzer.peaks = [0.8; BAR_COUNT];
+        analyzer.decay_idle();
+        let (bar, peak) = (analyzer.bars()[0], analyzer.peaks()[0]);
+        assert!(peak > bar, "cap lags behind the falling bar");
+        assert!((peak - (0.8 - PEAK_FALL)).abs() < 1e-6);
+
+        // A rising bar drags its cap along instead of passing through it.
+        analyzer.bars = [0.9; BAR_COUNT];
+        analyzer.peaks = [0.5; BAR_COUNT];
+        analyzer.decay_idle();
+        assert!(analyzer.peaks()[0] >= analyzer.bars()[0]);
+    }
+
+    #[test]
+    fn compute_frame_lights_bars_from_a_sine_window() {
+        let mut analyzer = SpectrumAnalyzer::new();
+        // 440Hz a 44.1kHz, chunks mono cheios até encher a janela da FFT.
+        let mut phase = 0.0f32;
+        let mut fed = 0;
+        while fed < FFT_SIZE {
+            let mut chunk = SampleChunk {
+                len: CHUNK_SAMPLES,
+                channels: 1,
+                sample_rate: 44_100,
+                ..Default::default()
+            };
+            for slot in chunk.data.iter_mut() {
+                *slot = ((phase * std::f32::consts::TAU).sin() * 20_000.0) as i16;
+                phase += 440.0 / 44_100.0;
+            }
+            analyzer.push_samples(&chunk);
+            fed += CHUNK_SAMPLES;
+        }
+        assert_eq!(*analyzer.bars(), [0.0; BAR_COUNT], "no FFT before compute_frame");
+        analyzer.compute_frame();
+        assert!(
+            analyzer.bars().iter().any(|&b| b > 0.1),
+            "a pure tone must light up at least one bar"
+        );
+        assert!(
+            analyzer.peaks().iter().zip(analyzer.bars()).all(|(p, b)| p >= b),
+            "caps sit at or above their bars"
+        );
+    }
+
+    #[test]
     fn reset_clears_bars_and_the_rolling_window() {
         let mut analyzer = SpectrumAnalyzer::new();
         analyzer.bars = [0.8; BAR_COUNT];
+        analyzer.peaks = [0.9; BAR_COUNT];
         analyzer.ring.extend([0.1, 0.2, 0.3]);
         analyzer.reset();
         assert_eq!(*analyzer.bars(), [0.0; BAR_COUNT]);
+        assert_eq!(*analyzer.peaks(), [0.0; BAR_COUNT]);
         assert!(analyzer.ring.is_empty());
     }
 }

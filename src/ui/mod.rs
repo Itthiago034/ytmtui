@@ -343,6 +343,77 @@ pub(crate) fn take_width(s: &str, max: usize) -> String {
     out
 }
 
+/// Marquee: recorta uma janela de `width` colunas sobre os trechos
+/// estilizados de `parts`, deslizando uma coluna por unidade de `step` e
+/// recomeçando após um respiro de 3 colunas — o clássico título rolante de
+/// players de música. O chamador só usa quando o texto não cabe e deriva
+/// `step` do relógio de reprodução, então o texto desliza enquanto toca e
+/// congela em pausa. Caracteres largos (CJK/emoji) nunca são cortados ao
+/// meio: a coluna órfã na borda vira um espaço.
+pub(crate) fn marquee_spans(
+    parts: &[(&str, Style)],
+    width: usize,
+    step: usize,
+) -> Vec<Span<'static>> {
+    const GAP: usize = 3;
+    let cells: Vec<(char, Style)> = parts
+        .iter()
+        .flat_map(|(text, style)| text.chars().map(move |c| (c, *style)))
+        .chain((0..GAP).map(|_| (' ', Style::default())))
+        .collect();
+    let total: usize = cells
+        .iter()
+        .map(|(c, _)| UnicodeWidthChar::width(*c).unwrap_or(0))
+        .sum();
+    if total == 0 || width == 0 {
+        return Vec::new();
+    }
+
+    // Localiza a célula que cobre a coluna `offset`; se o offset cair no
+    // meio de um caractere largo, começa na célula seguinte e compensa a
+    // coluna órfã com um espaço à esquerda.
+    let offset = step % total;
+    let mut col = 0usize;
+    let mut start = cells.len();
+    for (i, (c, _)) in cells.iter().enumerate() {
+        if col >= offset {
+            start = i;
+            break;
+        }
+        col += UnicodeWidthChar::width(*c).unwrap_or(0);
+    }
+    let mut out: Vec<(char, Style)> = Vec::new();
+    let mut used = 0usize;
+    for _ in 0..col.saturating_sub(offset).min(width) {
+        out.push((' ', Style::default()));
+        used += 1;
+    }
+    let mut i = start;
+    while used < width {
+        let (c, style) = cells[i % cells.len()];
+        i += 1;
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if w == 0 {
+            continue;
+        }
+        if used + w > width {
+            break;
+        }
+        out.push((c, style));
+        used += w;
+    }
+
+    // Mescla caracteres consecutivos de mesmo estilo em um span só.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (c, style) in out {
+        match spans.last_mut() {
+            Some(last) if last.style == style => last.content.to_mut().push(c),
+            _ => spans.push(Span::styled(c.to_string(), style)),
+        }
+    }
+    spans
+}
+
 /// Keeps the last `max` display columns of `s` (used so the search cursor
 /// and the end of long queries stay visible).
 fn tail_chars(s: &str, max: usize) -> String {

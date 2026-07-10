@@ -83,22 +83,38 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
     let right = slider.chars().count() + modes.chars().count() + 2;
     let avail = width.saturating_sub(fixed + right);
 
-    let title_shown = crate::ui::truncate_chars(&title, avail);
-    let remaining = avail.saturating_sub(crate::ui::display_width(&title_shown));
-    let subtitle_shown = if remaining >= 4 {
-        crate::ui::truncate_chars(&subtitle, remaining)
+    let subtitle_style = Style::default().fg(theme.secondary);
+    let needed = crate::ui::display_width(&title) + crate::ui::display_width(&subtitle);
+    // Título que não cabe vira um marquee deslizando com o relógio da faixa
+    // (e congelando em pausa); com espaço de sobra, texto estático normal.
+    let mut middle = if needed > avail && avail >= 8 && app.current.is_some() {
+        let step = (app.player.position().as_millis() / 350) as usize;
+        crate::ui::marquee_spans(
+            &[(title.as_str(), title_style), (subtitle.as_str(), subtitle_style)],
+            avail,
+            step,
+        )
     } else {
-        String::new()
+        let title_shown = crate::ui::truncate_chars(&title, avail);
+        let remaining = avail.saturating_sub(crate::ui::display_width(&title_shown));
+        let subtitle_shown = if remaining >= 4 {
+            crate::ui::truncate_chars(&subtitle, remaining)
+        } else {
+            String::new()
+        };
+        vec![
+            Span::styled(title_shown, title_style),
+            Span::styled(subtitle_shown, subtitle_style),
+        ]
     };
-    let used = crate::ui::display_width(&title_shown) + crate::ui::display_width(&subtitle_shown);
+    let used: usize = middle
+        .iter()
+        .map(|s| crate::ui::display_width(&s.content))
+        .sum();
     let pad = avail.saturating_sub(used) + 1;
 
-    let mut spans = vec![
-        Span::raw(" "),
-        Span::styled(glyph, glyph_style),
-        Span::styled(title_shown, title_style),
-        Span::styled(subtitle_shown, Style::default().fg(theme.secondary)),
-    ];
+    let mut spans = vec![Span::raw(" "), Span::styled(glyph, glyph_style)];
+    spans.append(&mut middle);
     if liked {
         spans.push(Span::styled(" ♥", Style::default().fg(theme.player)));
     }

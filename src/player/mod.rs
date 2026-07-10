@@ -184,17 +184,16 @@ impl AudioPlayer {
 
     /// Avança `secs` segundos na faixa atual.
     pub fn seek_forward(&mut self, secs: u64) {
-        let target = self.position() + Duration::from_secs(secs);
-        {
-            let mut s = self.state.lock().unwrap();
-            s.position = target;
-        }
-        let _ = self.tx.send(Cmd::Seek(target));
+        self.seek_to(self.position() + Duration::from_secs(secs));
     }
 
     /// Retrocede `secs` segundos na faixa atual.
     pub fn seek_backward(&mut self, secs: u64) {
-        let target = self.position().saturating_sub(Duration::from_secs(secs));
+        self.seek_to(self.position().saturating_sub(Duration::from_secs(secs)));
+    }
+
+    /// Salta para uma posição absoluta na faixa atual (seek do MPRIS).
+    pub fn seek_to(&mut self, target: Duration) {
         {
             let mut s = self.state.lock().unwrap();
             s.position = target;

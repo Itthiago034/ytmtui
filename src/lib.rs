@@ -4,6 +4,7 @@ pub mod app;
 pub mod config;
 pub mod event;
 pub mod lyrics;
+pub mod mpris;
 pub mod player;
 pub mod theme;
 pub mod ui;

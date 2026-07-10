@@ -3,7 +3,7 @@
 //! Ponto de entrada: configura o terminal, cria o estado da aplicação e roda
 //! o laço principal de eventos/renderização.
 
-use ytmtui::{app, event, player, ui};
+use ytmtui::{app, event, mpris, player, ui};
 
 use std::io::{self, Stdout};
 use std::time::Duration;
@@ -59,12 +59,16 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Registra o player no MPRIS (widget de mídia do desktop, playerctl,
+    // teclas multimídia). `None` em ambientes sem D-Bus — segue sem ele.
+    let mut mpris = mpris::Mpris::new(app.tx.clone());
+
     // Carrega recomendações, biblioteca e nome da conta (se logado).
     app.load_home();
     app.load_library();
     app.load_account();
 
-    let res = run(&mut terminal, &mut app).await;
+    let res = run(&mut terminal, &mut app, mpris.as_mut()).await;
 
     // Persiste preferências e remove os arquivos temporários de áudio.
     app.save_config();
@@ -79,7 +83,11 @@ async fn main() -> Result<()> {
 }
 
 /// Laço principal: desenha, lê eventos e processa mensagens.
-async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+async fn run(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    mut mpris: Option<&mut mpris::Mpris>,
+) -> Result<()> {
     while app.running {
         if app.take_clear_screen() {
             terminal.clear()?;
@@ -93,12 +101,16 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
         // raises CPU use while Home is open with a track actively playing;
         // every other section/state keeps the coarser tiers. Key presses
         // interrupt the poll immediately either way.
+        // The idle tier also caps how long an MPRIS command (media keys,
+        // desktop widget) can sit unprocessed in the channel — a key press
+        // interrupts the poll, a channel message does not — so it stays at
+        // 400ms rather than something longer.
         let poll_timeout = if app.needs_fast_animation() {
             Duration::from_millis(60)
         } else if app.needs_animation() {
             Duration::from_millis(200)
         } else {
-            Duration::from_millis(800)
+            Duration::from_millis(400)
         };
         if cevent::poll(poll_timeout)? {
             match cevent::read()? {
@@ -119,6 +131,11 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
         // Processa resultados das tasks assíncronas e tarefas periódicas.
         app.drain_messages();
         app.tick();
+
+        // Espelha o estado de reprodução no D-Bus (apenas diffs).
+        if let Some(m) = mpris.as_deref_mut() {
+            m.sync(app);
+        }
     }
     Ok(())
 }

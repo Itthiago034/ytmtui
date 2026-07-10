@@ -180,6 +180,10 @@ pub enum Msg {
         seed: String,
         tracks: Vec<Track>,
     },
+    /// Comando vindo do desktop via MPRIS (widget de mídia, playerctl,
+    /// teclas multimídia). Reenviado pelo callback da `souvlaki` para que a
+    /// mutação de estado aconteça no loop principal.
+    Media(souvlaki::MediaControlEvent),
 }
 
 /// Máximo de faixas mantidas no histórico local da tela Início.
@@ -1586,6 +1590,7 @@ impl App {
                         }
                     }
                 }
+                Msg::Media(event) => self.handle_media_event(event),
                 Msg::Status(s) => self.status = s,
                 Msg::Error(e) => {
                     self.loading_audio = false;
@@ -1595,6 +1600,51 @@ impl App {
                     self.status = format!("⚠ {e}");
                 }
             }
+        }
+    }
+
+    /// Aplica um comando de mídia vindo do desktop (MPRIS): os mesmos
+    /// caminhos dos atalhos de teclado, então o comportamento é idêntico.
+    fn handle_media_event(&mut self, event: souvlaki::MediaControlEvent) {
+        use souvlaki::{MediaControlEvent as E, SeekDirection};
+        match event {
+            E::Play => {
+                if self.player.is_paused() {
+                    self.player.toggle_pause();
+                }
+            }
+            E::Pause => {
+                if !self.player.is_paused() {
+                    self.player.toggle_pause();
+                }
+            }
+            E::Toggle => self.player.toggle_pause(),
+            E::Next => self.next_track(),
+            E::Previous => self.prev_track(),
+            E::Stop => self.stop_playback(),
+            E::Seek(SeekDirection::Forward) => self.seek_forward(),
+            E::Seek(SeekDirection::Backward) => self.seek_backward(),
+            E::SeekBy(direction, amount) => {
+                let secs = amount.as_secs().max(1);
+                if self.current.is_some() {
+                    match direction {
+                        SeekDirection::Forward => self.player.seek_forward(secs),
+                        SeekDirection::Backward => self.player.seek_backward(secs),
+                    }
+                }
+            }
+            E::SetPosition(souvlaki::MediaPosition(position)) => {
+                if self.current.is_some() {
+                    self.player.seek_to(position);
+                }
+            }
+            E::SetVolume(volume) => {
+                self.player.set_volume(volume.clamp(0.0, 1.0) as f32);
+            }
+            E::Quit => self.running = false,
+            // Uma TUI não tem janela própria para trazer à frente, e abrir
+            // URIs externas não faz sentido aqui.
+            E::Raise | E::OpenUri(_) => {}
         }
     }
 

@@ -313,8 +313,14 @@ pub struct App {
     pub cookies: Option<String>,
     /// Um download de áudio está em andamento.
     pub loading_audio: bool,
-    /// Uma tarefa de carregamento (busca/playlist/artista/biblioteca) está ativa.
-    pub busy: bool,
+    /// Quantas tarefas de carregamento (busca/playlist/artista/biblioteca/
+    /// sign-in) estão em voo. Um contador, e não um bool: o sync periódico
+    /// dispara Home e Biblioteca juntas, e a primeira resposta não pode
+    /// apagar o spinner enquanto a outra ainda carrega.
+    busy_tasks: usize,
+    /// Um sign-in (importação de cookies) está em andamento. Separado de
+    /// `busy_tasks` para que um sync de fundo não bloqueie a tecla `g`.
+    signing_in: bool,
     /// Quadro atual do spinner de carregamento (avança a cada tick).
     pub spinner_frame: usize,
     /// How often background sync (Home + Library) re-fetches.
@@ -422,7 +428,8 @@ impl App {
             status,
             cookies,
             loading_audio: false,
-            busy: false,
+            busy_tasks: 0,
+            signing_in: false,
             spinner_frame: 0,
             // Defends against a hand-edited config value of 0 creating a
             // hot loop of re-fetches.
@@ -435,9 +442,28 @@ impl App {
         self.authentication.is_authenticated()
     }
 
+    /// Há alguma tarefa de carregamento de conteúdo (rede) em andamento?
+    pub fn busy(&self) -> bool {
+        self.busy_tasks > 0
+    }
+
+    /// Registra o início de uma tarefa contada no spinner. Cada tarefa
+    /// iniciada por aqui deve terminar em exatamente uma mensagem que chame
+    /// [`Self::finish_task`] (payload, `SessionExpired` ou `Error`).
+    pub(crate) fn begin_task(&mut self) {
+        self.busy_tasks += 1;
+    }
+
+    /// Registra o fim de uma tarefa contada. Saturante: tarefas não contadas
+    /// (download de áudio, curtir, rádio de autoplay) também reportam erros
+    /// pelo canal, e um decremento a mais não pode enlouquecer o contador.
+    fn finish_task(&mut self) {
+        self.busy_tasks = self.busy_tasks.saturating_sub(1);
+    }
+
     /// Há alguma tarefa de carregamento em andamento (rede ou áudio)?
     pub fn is_loading(&self) -> bool {
-        self.busy || self.loading_audio
+        self.busy() || self.loading_audio
     }
 
     /// Whether the UI currently benefits from frequent redraws: a loading
@@ -478,7 +504,7 @@ impl App {
         if !self.is_authenticated() {
             return;
         }
-        self.busy = true;
+        self.begin_task();
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -495,7 +521,7 @@ impl App {
 
     /// Carrega (em background) as recomendações da tela inicial.
     pub fn load_home(&mut self) {
-        self.busy = true;
+        self.begin_task();
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -642,7 +668,7 @@ impl App {
             return;
         }
         self.status = format!("Carregando artista \"{}\"...", artist.name);
-        self.busy = true;
+        self.begin_task();
         let client = self.client.clone();
         let tx = self.tx.clone();
         let title = format!("Artist: {}", artist.name);
@@ -708,8 +734,8 @@ impl App {
     /// e reconecta o cliente sem reiniciar o app. Também serve para renovar
     /// uma sessão expirada.
     pub fn sign_in(&mut self) {
-        if self.busy {
-            self.status = "Aguarde a tarefa atual terminar antes de conectar.".to_string();
+        if self.signing_in {
+            self.status = "Aguarde: a conexão anterior ainda está em andamento.".to_string();
             return;
         }
         let Some(home) = dirs::home_dir() else {
@@ -726,7 +752,8 @@ impl App {
             self.status = "⚠ Não foi possível localizar o diretório de config.".to_string();
             return;
         };
-        self.busy = true;
+        self.begin_task();
+        self.signing_in = true;
         let first = browsers[0].split(':').next().unwrap_or(&browsers[0]);
         self.status = format!("Conectando: importando cookies de {first}…");
         let tx = self.tx.clone();
@@ -779,18 +806,20 @@ impl App {
 
     /// Carrega (em background) o nome da conta, se autenticado e sem nome
     /// personalizado já definido na config.
-    pub fn load_account(&self) {
+    pub fn load_account(&mut self) {
         if !self.is_authenticated() {
             return;
         }
+        self.begin_task();
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
             match client.get_account_name().await {
-                Ok(Some(name)) => {
-                    let _ = tx.send(Msg::AccountName(Some(name)));
+                // `None` também é enviado: toda tarefa contada precisa
+                // terminar em exatamente uma mensagem (ver `begin_task`).
+                Ok(name) => {
+                    let _ = tx.send(Msg::AccountName(name));
                 }
-                Ok(None) => {}
                 Err(error) => {
                     let _ = tx.send(client_error_message("Could not load account", error));
                 }
@@ -863,6 +892,24 @@ impl App {
         self.status = format!("🔁 Repetição: {}.", self.repeat.label());
         if let Some(idx) = self.queue_index {
             self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
+        }
+    }
+
+    /// Para a reprodução e limpa todo o estado "tocando agora" (faixa, capa,
+    /// letra e download em andamento) — diferente de `player.stop()` sozinho,
+    /// que silencia o áudio mas deixaria a UI mostrando a faixa como ativa.
+    /// A fila é preservada: Enter na Fila retoma de onde o usuário quiser.
+    pub fn stop_playback(&mut self) {
+        let had_track = self.current.is_some() || self.loading_audio;
+        self.player.stop();
+        self.current = None;
+        self.loading_audio = false;
+        self.lyrics = crate::lyrics::LyricsState::None;
+        self.lyrics_scroll = 0;
+        self.visualizer.reset();
+        if had_track {
+            self.clear_artwork();
+            self.status = "⏹ Reprodução parada.".to_string();
         }
     }
 
@@ -965,7 +1012,7 @@ impl App {
             return;
         }
         self.status = format!("Buscando por \"{q}\"...");
-        self.busy = true;
+        self.begin_task();
         let client = self.client.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -1011,7 +1058,7 @@ impl App {
     /// rotula o painel de resultados ("Playlist"/"Album").
     fn load_browse(&mut self, pl: Playlist, kind: &str) {
         self.status = format!("Carregando \"{}\"...", pl.title);
-        self.busy = true;
+        self.begin_task();
         let client = self.client.clone();
         let tx = self.tx.clone();
         let title = format!("{kind}: {}", pl.title);
@@ -1337,7 +1384,7 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::SearchResults(res) => {
-                    self.busy = false;
+                    self.finish_task();
                     self.songs = res.songs;
                     self.songs_title = "Search results".to_string();
                     self.playlists = res.playlists;
@@ -1359,7 +1406,7 @@ impl App {
                     self.list_state.select(Some(0));
                 }
                 Msg::LibraryPlaylists(pls) => {
-                    self.busy = false;
+                    self.finish_task();
                     // A background sync (Feature 3) re-runs this same load
                     // periodically; preserve the current selection by
                     // `browse_id` instead of always resetting to the top, or
@@ -1384,13 +1431,19 @@ impl App {
                         self.list_state
                             .select((!self.library.is_empty()).then_some(new_index).flatten());
                     }
-                    self.status = format!(
-                        "Library loaded: {} playlist(s). Open Library in the menu.",
-                        self.library.len()
-                    );
+                    // Só o primeiro carregamento anuncia na status bar: o
+                    // sync periódico repassa por aqui a cada poucos minutos
+                    // e não pode apagar o que o usuário estava lendo
+                    // ("▶ Tocando…", um erro, etc.).
+                    if was_empty && !self.library.is_empty() {
+                        self.status = format!(
+                            "Library loaded: {} playlist(s). Open Library in the menu.",
+                            self.library.len()
+                        );
+                    }
                 }
                 Msg::HomeSections(sections) => {
-                    self.busy = false;
+                    self.finish_task();
                     let was_empty = self.home.is_empty();
                     // Selection indices on Home count the local recent-tracks
                     // group first; recommendation lookups must skip past it.
@@ -1433,6 +1486,7 @@ impl App {
                     }
                 }
                 Msg::AccountName(name) => {
+                    self.finish_task();
                     if let Some(n) = name {
                         if self.account_name.is_none() {
                             self.account_name = Some(n);
@@ -1440,7 +1494,7 @@ impl App {
                     }
                 }
                 Msg::SessionExpired => {
-                    self.busy = false;
+                    self.finish_task();
                     self.authentication = AuthenticationState::Expired;
                     self.library.clear();
                     self.account_name = None;
@@ -1449,7 +1503,7 @@ impl App {
                         .to_string();
                 }
                 Msg::PlaylistTracks { title, tracks } => {
-                    self.busy = false;
+                    self.finish_task();
                     self.songs = tracks;
                     self.songs_title = title;
                     // Uma lista concreta de faixas substitui a visão mista da
@@ -1502,7 +1556,8 @@ impl App {
                     }
                 }
                 Msg::CookiesImported { path, browser } => {
-                    self.busy = false;
+                    self.finish_task();
+                    self.signing_in = false;
                     match YtMusicClient::with_cookies(&path) {
                         Ok(client) => {
                             self.client = client;
@@ -1534,7 +1589,9 @@ impl App {
                 Msg::Status(s) => self.status = s,
                 Msg::Error(e) => {
                     self.loading_audio = false;
-                    self.busy = false;
+                    self.finish_task();
+                    // Um sign-in que falhou termina aqui; libera o `g`.
+                    self.signing_in = false;
                     self.status = format!("⚠ {e}");
                 }
             }
@@ -1640,7 +1697,8 @@ impl App {
             status: "Ready.".to_string(),
             cookies: None,
             loading_audio: false,
-            busy: false,
+            busy_tasks: 0,
+            signing_in: false,
             spinner_frame: 0,
             sync_interval: std::time::Duration::from_secs(300),
             last_synced: std::time::Instant::now(),
@@ -1803,9 +1861,9 @@ mod tests {
         let mut app = App::new_for_tests();
         assert!(!app.needs_animation(), "idle app needs no animation");
 
-        app.busy = true;
+        app.begin_task();
         assert!(app.needs_animation(), "loading shows the spinner");
-        app.busy = false;
+        app.finish_task();
 
         app.current = Some(crate::ytmusic::Track::default());
         assert!(app.needs_animation(), "playback progress animates");
@@ -2063,6 +2121,89 @@ mod tests {
         assert_eq!(app.home_flat_index_of("VL1"), Some(0));
         assert_eq!(app.home_flat_index_of("VL3"), Some(2));
         assert_eq!(app.home_flat_index_of("missing"), None);
+    }
+
+    #[test]
+    fn stop_clears_the_now_playing_state_but_keeps_the_queue() {
+        let mut app = App::new_for_tests();
+        app.current = Some(Track::default());
+        app.loading_audio = true;
+        app.lyrics = crate::lyrics::LyricsState::Plain("la la".to_string());
+        app.artwork_source = Some(image::DynamicImage::ImageRgb8(
+            image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3])),
+        ));
+        app.queue = vec![Track::default(), Track::default()];
+        app.queue_index = Some(1);
+
+        app.stop_playback();
+
+        assert!(app.current.is_none(), "no track shown as playing");
+        assert!(!app.loading_audio);
+        assert!(app.artwork_source.is_none(), "cover cleared");
+        assert!(app.clear_screen, "graphics leftovers get erased");
+        assert!(matches!(app.lyrics, crate::lyrics::LyricsState::None));
+        assert_eq!(app.queue.len(), 2, "queue survives for a later resume");
+
+        // Stopping when idle must not request a screen clear (no flicker).
+        let mut idle = App::new_for_tests();
+        idle.stop_playback();
+        assert!(!idle.clear_screen);
+    }
+
+    #[test]
+    fn concurrent_loads_keep_the_spinner_until_the_last_one_finishes() {
+        let mut app = App::new_for_tests();
+        // Simulates `sync_home_and_library`: two counted tasks in flight.
+        app.begin_task();
+        app.begin_task();
+
+        app.tx.send(Msg::HomeSections(Vec::new())).unwrap();
+        app.drain_messages();
+        assert!(
+            app.is_loading(),
+            "first response must not hide the spinner while the second load is in flight"
+        );
+
+        app.tx.send(Msg::LibraryPlaylists(Vec::new())).unwrap();
+        app.drain_messages();
+        assert!(!app.is_loading());
+    }
+
+    #[test]
+    fn stray_errors_never_underflow_the_busy_counter() {
+        let mut app = App::new_for_tests();
+        // An uncounted task (audio download, like) reporting an error while
+        // nothing counted is in flight must saturate at zero...
+        app.tx.send(Msg::Error("boom".to_string())).unwrap();
+        app.drain_messages();
+        assert!(!app.is_loading());
+
+        // ...so a counted task started right after still shows its spinner.
+        app.begin_task();
+        assert!(app.is_loading());
+    }
+
+    #[test]
+    fn background_library_refresh_does_not_clobber_the_status_bar() {
+        let mut app = App::new_for_tests();
+        app.library = vec![Playlist {
+            browse_id: "L1".to_string(),
+            ..Default::default()
+        }];
+        app.status = "▶ Tocando: Song — Artist".to_string();
+
+        app.tx
+            .send(Msg::LibraryPlaylists(vec![Playlist {
+                browse_id: "L1".to_string(),
+                ..Default::default()
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.status, "▶ Tocando: Song — Artist",
+            "periodic refresh must not overwrite what the user is reading"
+        );
     }
 
     #[test]

@@ -114,6 +114,11 @@ impl YtMusicClient {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             )
+            // Sem timeout, uma conexão pendurada deixa a tarefa contada no
+            // spinner (`busy`) em voo para sempre — a UI ficaria "carregando"
+            // sem nunca se recuperar.
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(20))
             .build()
             .expect("falha ao construir cliente HTTP");
         Self { http, auth: None }

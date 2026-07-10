@@ -344,6 +344,49 @@ fn is_playable_ext(ext: &str) -> bool {
     matches!(ext, "aac" | "mp3" | "ogg" | "oga" | "flac" | "wav")
 }
 
+/// Extensões de arquivos parciais/incompletos do yt-dlp (nunca reproduzir,
+/// nunca remover: pode haver um download em andamento usando-os).
+fn is_partial(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("part" | "ytdl")
+    )
+}
+
+/// Limite de áudios mantidos no cache da sessão. O diretório fica no tmp do
+/// sistema — tmpfs (RAM) em várias distros — então uma sessão longa de rádio
+/// não pode acumular faixas sem limite.
+const MAX_CACHED_TRACKS: usize = 24;
+
+/// Remove os áudios menos recentes quando o cache passa de
+/// [`MAX_CACHED_TRACKS`], sem tocar em `keep` (a faixa recém-resolvida) nem
+/// em downloads parciais em andamento. Em Linux, apagar um arquivo ainda
+/// aberto pelo player é seguro (o descritor continua válido); noutros SOs a
+/// remoção falha e é ignorada.
+fn evict_cache(dir: &std::path::Path, keep: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && !is_partial(p) && p != keep)
+        .filter_map(|p| {
+            let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
+            Some((p, modified))
+        })
+        .collect();
+    // `keep` conta como um dos MAX_CACHED_TRACKS.
+    if files.len() < MAX_CACHED_TRACKS {
+        return;
+    }
+    files.sort_by_key(|(_, modified)| *modified);
+    let excess = files.len() + 1 - MAX_CACHED_TRACKS;
+    for (path, _) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Procura no cache um arquivo de áudio já pronto para tocar para o `video_id`.
 fn find_cached(dir: &std::path::Path, video_id: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
@@ -486,37 +529,28 @@ pub fn download_audio(watch_url: &str, video_id: &str, cookies: Option<&str>) ->
     if let Some(path) = stdout.lines().rev().find(|l| !l.trim().is_empty()) {
         let p = PathBuf::from(path.trim());
         if p.exists() {
-            return Ok(prepare_for_playback(p));
+            let ready = prepare_for_playback(p);
+            evict_cache(&dir, &ready);
+            return Ok(ready);
         }
     }
 
-    // Fallback 1: procura no cache pelo id da faixa.
+    // Fallback: o `--print` não deu um caminho utilizável, mas o arquivo da
+    // faixa pode ter chegado ao disco (com qualquer extensão) — localiza
+    // pelo stem, que é o próprio video_id. Nunca "adivinhar" pelo arquivo
+    // mais recente do diretório: um prefetch concorrente de outra faixa
+    // pode ser o mais novo, e a música errada tocaria.
     if !video_id.is_empty() {
-        if let Some(cached) = find_cached(&dir, video_id) {
-            return Ok(cached);
+        if let Some(entry) = std::fs::read_dir(&dir)?.flatten().find(|e| {
+            let path = e.path();
+            path.is_file()
+                && !is_partial(&path)
+                && path.file_stem().and_then(|s| s.to_str()) == Some(video_id)
+        }) {
+            let ready = prepare_for_playback(entry.path());
+            evict_cache(&dir, &ready);
+            return Ok(ready);
         }
     }
-
-    // Fallback 2: arquivo mais recente no diretório.
-    let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
-    for entry in std::fs::read_dir(&dir)?.flatten() {
-        let path = entry.path();
-        let is_partial = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e == "part" || e == "ytdl")
-            .unwrap_or(false);
-        if path.is_file() && !is_partial {
-            if let Ok(meta) = entry.metadata() {
-                if let Ok(modified) = meta.modified() {
-                    if newest.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
-                        newest = Some((path, modified));
-                    }
-                }
-            }
-        }
-    }
-    newest
-        .map(|(p, _)| prepare_for_playback(p))
-        .ok_or_else(|| anyhow!("arquivo de áudio não encontrado após o download"))
+    Err(anyhow!("arquivo de áudio não encontrado após o download"))
 }

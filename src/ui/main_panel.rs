@@ -418,7 +418,7 @@ const TAGLINE: &str = "YouTube Music in your terminal";
 fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     if app.home.is_empty() && app.recent.is_empty() {
-        let text = if app.busy {
+        let text = if app.busy() {
             format!("{} Loading recommendations…", app.spinner())
         } else if app.is_authenticated() {
             "No recommendations are available. Press / to search.".to_string()
@@ -614,7 +614,7 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
         return;
     }
     if app.library.is_empty() {
-        let text = if app.busy {
+        let text = if app.busy() {
             format!("{} Loading your library…", app.spinner())
         } else {
             "No playlists in your library.".to_string()

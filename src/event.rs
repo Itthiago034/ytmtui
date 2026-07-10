@@ -58,7 +58,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char(' ') => app.player.toggle_pause(),
         KeyCode::Char('n') => app.next_track(),
         KeyCode::Char('p') => app.prev_track(),
-        KeyCode::Char('s') => app.player.stop(),
+        KeyCode::Char('s') => app.stop_playback(),
         KeyCode::Char('+') | KeyCode::Char('=') => app.player.volume_up(),
         KeyCode::Char('-') | KeyCode::Char('_') => app.player.volume_down(),
         // Seek dentro da faixa.

@@ -106,7 +106,7 @@ fn very_small_terminals_never_panic() {
             render(&mut idle, width, height);
 
             let mut playing = playing_app();
-            playing.busy = true;
+            playing.begin_task();
             playing.input_mode = true;
             playing.query = "x".repeat(200);
             render(&mut playing, width, height);
@@ -187,7 +187,7 @@ fn empty_search_section_shows_an_english_hint() {
 #[test]
 fn loading_state_shows_spinner_and_message() {
     let mut app = App::new_for_tests();
-    app.busy = true;
+    app.begin_task();
     let buffer = render(&mut app, 100, 30);
     let content = text(&buffer);
 

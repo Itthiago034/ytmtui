@@ -601,6 +601,9 @@ fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Them
     app.home_columns = columns;
     let density = app.home_density;
     let shelf_h = shelf_height(density);
+    // Only one card in the whole grid can be selected, so the reveal stage
+    // is computed once up front and threaded down to that card.
+    let reveal = current_reveal_stage(app);
 
     let view = app.home_view();
     if view.is_empty() {
@@ -701,6 +704,7 @@ fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Them
                 selected,
                 theme,
                 density,
+                reveal,
             );
         }
         y += cards_height;
@@ -736,6 +740,7 @@ fn draw_shelf_cards(
     selected: Option<usize>,
     theme: &'static Theme,
     density: HomeDensity,
+    reveal: RevealStage,
 ) {
     if area.width == 0 || area.height == 0 || columns == 0 {
         return;
@@ -756,15 +761,72 @@ fn draw_shelf_cards(
             height: area.height,
         };
         let is_selected = selected == Some(shelf_base + card_index);
-        draw_card(f, card_rect, card, is_selected, theme, density);
+        draw_card(f, card_rect, card, is_selected, theme, density, reveal);
     }
+}
+
+/// Stage of the selected card's staged reveal, driven by the elapsed time
+/// since `App::selection_changed_at` (see [`reveal_stage`]). Non-selected
+/// cards never consult this — they always render the plain, un-accented
+/// look regardless of stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RevealStage {
+    /// 0–80ms: only the `selected_card` background shows; title and footer
+    /// stay in their normal (non-selected) colors, no badge.
+    Background,
+    /// 80–160ms: the title has switched to accent+bold; the badge is still
+    /// absent.
+    Title,
+    /// Past 160ms, under `reduced_motion`, or with no transition in
+    /// progress at all (`selection_changed_at` is `None`): the complete
+    /// final look, including the provider badge. This is the only stage
+    /// buffer tests without an explicit `selection_changed_at` ever
+    /// observe, so it must stay identical to the pre-Etapa-6 unconditional
+    /// rendering.
+    Full,
+}
+
+/// Pure decision of which [`RevealStage`] applies `elapsed_ms` after the
+/// selection changed. Kept free of `Instant`/`App` so it's directly
+/// testable with explicit elapsed values — `Instant` itself can't be
+/// mocked. `reduced_motion` always short-circuits to `Full`: reduced motion
+/// skips the staged reveal entirely rather than slowing it down.
+pub(super) fn reveal_stage(elapsed_ms: u128, reduced_motion: bool) -> RevealStage {
+    if reduced_motion {
+        return RevealStage::Full;
+    }
+    if elapsed_ms < 80 {
+        RevealStage::Background
+    } else if elapsed_ms < 160 {
+        RevealStage::Title
+    } else {
+        RevealStage::Full
+    }
+}
+
+/// Resolves the current [`RevealStage`] from live `App` state: elapsed time
+/// since `selection_changed_at` (or "forever ago" when `None`, which always
+/// resolves to `Full`), scaled by [`crate::config::AnimationSpeed::factor`]
+/// the same way [`crate::app::App::kick_animation`] scales its window.
+fn current_reveal_stage(app: &App) -> RevealStage {
+    let Some(changed_at) = app.selection_changed_at else {
+        return RevealStage::Full;
+    };
+    let elapsed_ms = changed_at.elapsed().as_millis();
+    // Dividing (rather than multiplying) the elapsed time by the speed
+    // factor makes a `Slow` transition take longer to reach each stage —
+    // matching `kick_animation`, which multiplies the *window* by the same
+    // factor to make it last longer.
+    let scaled_ms = (elapsed_ms as f64 / app.animation_speed.factor()) as u128;
+    reveal_stage(scaled_ms, app.reduced_motion)
 }
 
 /// One card: title (bold), an optional subtitle (dropped in "compact"
 /// density), and a footer with the item's type glyph and duration. The
-/// selected card gets `theme.selected_card` across all its lines, an
-/// accented title, and a provider badge appended to the footer — the
-/// "metadata reveal" that only shows up on the focused card.
+/// selected card gets `theme.selected_card` across all its lines; the
+/// accented title and the provider badge appended to the footer — the
+/// "metadata reveal" that only shows up on the focused card — phase in over
+/// `reveal` (see [`RevealStage`]) instead of appearing instantly.
 fn draw_card(
     f: &mut Frame,
     area: Rect,
@@ -772,6 +834,7 @@ fn draw_card(
     selected: bool,
     theme: &'static Theme,
     density: HomeDensity,
+    reveal: RevealStage,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -794,7 +857,11 @@ fn draw_card(
     };
     let footer_main = crate::ui::truncate_chars(&format!("{glyph}{duration_part}"), inner_width);
 
-    let title_fg = if selected { theme.accent } else { theme.text };
+    // The title only picks up the accent color from the `Title` stage
+    // onward — during `Background` it still reads as a normal card, just
+    // with the selection background already showing.
+    let title_accented = selected && reveal != RevealStage::Background;
+    let title_fg = if title_accented { theme.accent } else { theme.text };
     let mut lines = vec![Line::from(Span::styled(
         format!(" {title}"),
         Style::default().fg(title_fg).add_modifier(Modifier::BOLD),
@@ -813,9 +880,10 @@ fn draw_card(
         format!(" {footer_main}"),
         Style::default().fg(theme.muted),
     )];
-    if selected {
-        // The provider badge only reveals on the focused card — everyone
-        // else keeps the plain type-glyph-plus-duration footer.
+    if selected && reveal == RevealStage::Full {
+        // The provider badge only reveals on the focused card, and only
+        // once the reveal has reached its final stage — everyone else (and
+        // an earlier stage) keeps the plain type-glyph-plus-duration footer.
         let used = crate::ui::display_width(&footer_main) + 1; // +1 for the leading space above
         let remaining = (area.width as usize).saturating_sub(used);
         if remaining > 3 {
@@ -827,6 +895,8 @@ fn draw_card(
 
     let mut paragraph = Paragraph::new(lines);
     if selected {
+        // The background shows from `Background` onward — it's the very
+        // first thing to reveal.
         paragraph = paragraph.style(Style::default().bg(theme.selected_card));
     }
     f.render_widget(paragraph, area);
@@ -1079,7 +1149,7 @@ fn draw_synced_lyrics(
         .iter()
         .enumerate()
         .map(|(i, l)| match active {
-            Some(a) if i == a => karaoke_line(l, position_ms, theme),
+            Some(a) if i == a => karaoke_line(l, position_ms, theme, app.reduced_motion),
             Some(a) => {
                 let color = match a.abs_diff(i) {
                     1 => theme.subtext,
@@ -1117,11 +1187,25 @@ fn draw_synced_lyrics(
 /// the line's time window has already elapsed are sung (accent), the rest
 /// waits in bright text. Both halves stay bold so the active line pops from
 /// its dimmer neighbors even at the very start of the window.
+///
+/// Under `reduced_motion` the per-character wipe — a continuous animation —
+/// is skipped entirely: the whole line renders already in the "sung" style,
+/// the same economy trade-off `App::needs_fast_animation` makes for this
+/// same driver (falls back to the 200ms redraw tier instead of 60ms).
 pub(super) fn karaoke_line(
     l: &crate::models::LyricLine,
     position_ms: u64,
     theme: &'static Theme,
+    reduced_motion: bool,
 ) -> Line<'static> {
+    if reduced_motion {
+        return Line::from(Span::styled(
+            l.text.clone(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     let window = l.end_ms.saturating_sub(l.start_ms).max(1);
     let fraction = (position_ms.saturating_sub(l.start_ms) as f64 / window as f64).clamp(0.0, 1.0);
     let width = crate::ui::display_width(&l.text);

@@ -373,13 +373,32 @@ pub struct App {
     /// Estilo do visualizador de espectro do player. Chamado `visualizer_style`
     /// (e não `visualizer`) para não colidir com o analisador FFT acima.
     pub visualizer_style: VisualizerStyle,
-    /// Velocidade das animações. Apenas armazenada nesta etapa; o consumo
-    /// real chega na Etapa 6.
+    /// Velocidade das animações: escala a janela de [`Self::kick_animation`]
+    /// e os estágios de revelação/fade-in lidos por `ui::main_panel` e
+    /// `ui::now_playing`.
     pub animation_speed: AnimationSpeed,
-    /// Reduz/desativa animações não essenciais. Consumido, por ora, só pelo
-    /// marquee de títulos longos em `ui::now_playing` (a Etapa 6 estende o
-    /// efeito ao wipe do karaokê e demais animações contínuas).
+    /// Reduz/desativa animações não essenciais: [`Self::kick_animation`]
+    /// vira no-op, o marquee de títulos longos volta a truncar com '…', o
+    /// wipe do karaokê mostra a linha ativa já inteira "cantada", e a
+    /// revelação em estágios do card selecionado/metadados do now-playing
+    /// pula direto para o estado final.
     pub reduced_motion: bool,
+    /// Instante até quando uma animação de transição (seleção da Home,
+    /// troca de faixa) ainda está em curso; `None` quando nenhuma está
+    /// ativa. Enquanto `animating()` é verdadeiro, [`Self::needs_fast_animation`]
+    /// segura o tier de redraw de 60ms só pela duração da transição, em vez
+    /// de indefinidamente — ver [`Self::kick_animation`].
+    animate_until: Option<std::time::Instant>,
+    /// Instante da última mudança de seleção na grade Início; consumido por
+    /// `ui::main_panel::draw_card` para a revelação em estágios do card
+    /// selecionado (fundo → título accent → badge). `None` antes de
+    /// qualquer navegação, o que já corresponde ao estado final completo.
+    pub(crate) selection_changed_at: Option<std::time::Instant>,
+    /// Instante em que a faixa atual mudou pela última vez (setado em
+    /// [`Self::start_current`]); consumido por `ui::now_playing` para o
+    /// fade-in de duas etapas do título. Nunca `None`: antes da primeira
+    /// faixa o valor é irrelevante, pois `current` ainda é `None`.
+    pub(crate) track_changed_at: std::time::Instant,
 }
 
 impl App {
@@ -490,6 +509,9 @@ impl App {
             visualizer_style: VisualizerStyle::from_config(&config.visualizer),
             animation_speed: AnimationSpeed::from_config(&config.animation_speed),
             reduced_motion: config.reduced_motion,
+            animate_until: None,
+            selection_changed_at: None,
+            track_changed_at: std::time::Instant::now(),
         })
     }
 
@@ -529,15 +551,65 @@ impl App {
     }
 
     /// Whether the open section is actively animating and needs the fast
-    /// redraw tier: the Home spectrum visualizer, or the synced-lyrics
-    /// karaoke wipe — both must look like continuous motion. Only true while
-    /// a track is audibly playing, so the cost is paid exactly when the
-    /// animation is visible.
+    /// redraw tier: the Home spectrum visualizer, the synced-lyrics karaoke
+    /// wipe, or a time-based transition kicked off by
+    /// [`Self::kick_animation`] (selection change, track change) — all must
+    /// look like continuous motion while they're visible.
+    ///
+    /// `reduced_motion` puts the app in an economy mode: the two continuous
+    /// drivers (visualizer/karaoke) stop requiring the 60ms tier and fall
+    /// back to the 200ms one via [`Self::needs_animation`] — there is no
+    /// continuous motion left to redraw quickly for. Transitions never fire
+    /// under `reduced_motion` either, since [`Self::kick_animation`] is a
+    /// no-op there, so `animating()` is always false in that mode.
     pub fn needs_fast_animation(&self) -> bool {
+        if self.animating() {
+            return true;
+        }
+        if self.reduced_motion {
+            return false;
+        }
         let animated_section = self.section == Section::Inicio
             || (self.section == Section::Letra
                 && matches!(self.lyrics, crate::lyrics::LyricsState::Synced { .. }));
         animated_section && self.current.is_some() && !self.player.is_paused()
+    }
+
+    /// Extends the fast-redraw window by `base` (scaled by
+    /// [`AnimationSpeed::factor`]) from now, so a just-kicked-off transition
+    /// (selection change, track change) keeps drawing at the 60ms tier for
+    /// exactly as long as it takes to play out — never indefinitely. A
+    /// no-op under `reduced_motion`: that mode never wants the fast tier for
+    /// a transition, since the transition itself is skipped (see
+    /// `ui::main_panel::reveal_stage`/`ui::now_playing`'s stage functions).
+    /// Calling this while an earlier animation is still running only ever
+    /// extends the deadline, never shortens it (`max`), so overlapping kicks
+    /// (e.g. rapid selection changes) don't cut each other's tail short.
+    pub(crate) fn kick_animation(&mut self, base: std::time::Duration) {
+        if self.reduced_motion {
+            return;
+        }
+        let scaled_ms = (base.as_millis() as f64 * self.animation_speed.factor()).round() as u64;
+        let candidate = std::time::Instant::now() + std::time::Duration::from_millis(scaled_ms);
+        self.animate_until = Some(match self.animate_until {
+            Some(existing) => existing.max(candidate),
+            None => candidate,
+        });
+    }
+
+    /// Whether a transition kicked off by [`Self::kick_animation`] is still
+    /// in progress.
+    fn animating(&self) -> bool {
+        self.animate_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    /// Marks the Home grid's selection as just-changed (drives
+    /// `ui::main_panel::draw_card`'s staged reveal of the selected card) and
+    /// kicks a matching fast-redraw window.
+    fn mark_selection_changed(&mut self) {
+        self.selection_changed_at = Some(std::time::Instant::now());
+        self.kick_animation(std::time::Duration::from_millis(220));
     }
 
     /// Consumes the pending full-clear flag set by [`Self::clear_artwork`].
@@ -664,6 +736,7 @@ impl App {
             .move_index(current, direction, self.home_columns);
         self.list_state
             .select((self.home_total_count() > 0).then_some(next));
+        self.mark_selection_changed();
     }
 
     /// Registra uma faixa no histórico local (topo da lista, sem duplicatas,
@@ -1195,6 +1268,9 @@ impl App {
         let cur = self.list_state.selected().unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(len as isize) as usize;
         self.list_state.select(Some(next));
+        if self.section == Section::Inicio {
+            self.mark_selection_changed();
+        }
     }
 
     /// Salta a seleção em `delta` itens, saturando nas pontas — para
@@ -1208,12 +1284,18 @@ impl App {
         let cur = self.list_state.selected().unwrap_or(0) as isize;
         let next = (cur + delta).clamp(0, len as isize - 1) as usize;
         self.list_state.select(Some(next));
+        if self.section == Section::Inicio {
+            self.mark_selection_changed();
+        }
     }
 
     /// Seleciona o primeiro item da lista principal (tecla Home).
     pub fn select_first(&mut self) {
         if self.main_len() > 0 {
             self.list_state.select(Some(0));
+            if self.section == Section::Inicio {
+                self.mark_selection_changed();
+            }
         }
     }
 
@@ -1222,6 +1304,9 @@ impl App {
         let len = self.main_len();
         if len > 0 {
             self.list_state.select(Some(len - 1));
+            if self.section == Section::Inicio {
+                self.mark_selection_changed();
+            }
         }
     }
 
@@ -1474,6 +1559,8 @@ impl App {
             return;
         };
         self.current = Some(track.clone());
+        self.track_changed_at = std::time::Instant::now();
+        self.kick_animation(std::time::Duration::from_millis(300));
         if self.shuffle {
             self.shuffle_played.insert(track.video_id.clone());
         }
@@ -2020,6 +2107,9 @@ impl App {
             visualizer_style: VisualizerStyle::Gradient,
             animation_speed: AnimationSpeed::Normal,
             reduced_motion: false,
+            animate_until: None,
+            selection_changed_at: None,
+            track_changed_at: std::time::Instant::now(),
         }
     }
 }
@@ -2798,6 +2888,130 @@ mod tests {
         assert!(
             !app.is_loading(),
             "no capability means no task, hence no spinner"
+        );
+    }
+
+    // --- Etapa 6: animações time-based + reduced motion ---------------
+
+    #[test]
+    fn kick_animation_is_a_no_op_under_reduced_motion() {
+        let mut app = App::new_for_tests();
+        app.reduced_motion = true;
+        app.kick_animation(std::time::Duration::from_millis(500));
+        assert!(
+            !app.animating(),
+            "reduced motion must never hold the fast redraw tier open"
+        );
+    }
+
+    #[test]
+    fn kick_animation_scales_the_window_by_animation_speed() {
+        // Same base duration, three speeds: the resulting deadline must
+        // order Slow > Normal > Fast, matching `AnimationSpeed::factor`.
+        let base = std::time::Duration::from_millis(200);
+        let deadline_for = |speed: AnimationSpeed| {
+            let mut app = App::new_for_tests();
+            app.animation_speed = speed;
+            let before = std::time::Instant::now();
+            app.kick_animation(base);
+            app.animate_until.expect("kick sets a deadline") - before
+        };
+        let fast = deadline_for(AnimationSpeed::Fast);
+        let normal = deadline_for(AnimationSpeed::Normal);
+        let slow = deadline_for(AnimationSpeed::Slow);
+        assert!(fast < normal, "fast ({fast:?}) must be shorter than normal ({normal:?})");
+        assert!(normal < slow, "normal ({normal:?}) must be shorter than slow ({slow:?})");
+    }
+
+    #[test]
+    fn animating_expires_after_the_kicked_window_elapses() {
+        let mut app = App::new_for_tests();
+        // A 1ms kick is effectively already expired by the time the assert
+        // below runs — no sleep needed in the test.
+        app.kick_animation(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(!app.animating(), "the animation window must expire");
+    }
+
+    #[test]
+    fn needs_fast_animation_is_true_while_animating_even_with_nothing_playing() {
+        let mut app = App::new_for_tests();
+        assert!(!app.needs_fast_animation(), "idle app needs no animation");
+        app.kick_animation(std::time::Duration::from_millis(500));
+        assert!(
+            app.needs_fast_animation(),
+            "a kicked-off transition holds the fast tier even without playback"
+        );
+    }
+
+    #[test]
+    fn reduced_motion_drops_the_fast_tier_even_while_the_visualizer_would_animate() {
+        let mut app = App::new_for_tests();
+        app.reduced_motion = true;
+        app.section = Section::Inicio;
+        app.current = Some(Track::default());
+        // Not paused: without `reduced_motion` this would need the fast tier
+        // (Home visualizer). Under `reduced_motion`, it must not.
+        assert!(!app.player.is_paused());
+        assert!(
+            !app.needs_fast_animation(),
+            "reduced motion falls back to the 200ms tier for continuous drivers"
+        );
+        assert!(
+            app.needs_animation(),
+            "playback progress still animates at the economy tier"
+        );
+    }
+
+    #[test]
+    fn moving_the_home_selection_marks_the_change_and_kicks_the_fast_tier() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.home = home_sections();
+        app.list_state.select(Some(0));
+        assert!(app.selection_changed_at.is_none());
+
+        app.move_home(HomeDirection::Down);
+
+        assert!(
+            app.selection_changed_at.is_some(),
+            "move_home marks the selection as just-changed"
+        );
+        assert!(
+            app.needs_fast_animation(),
+            "the selection-change kick holds the fast tier"
+        );
+    }
+
+    #[test]
+    fn move_selection_marks_the_change_only_in_the_home_section() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Fila;
+        app.queue = vec![track("a"), track("b")];
+        app.move_selection(1);
+        assert!(
+            app.selection_changed_at.is_none(),
+            "the queue section has no card-reveal transition to drive"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_a_track_marks_track_changed_at_and_kicks_the_fast_tier() {
+        // `start_current` spawns background tasks (audio resolution, lyrics,
+        // artwork), so this needs a real Tokio runtime, like
+        // `entering_a_recent_home_card_preserves_history_order_and_selected_index`
+        // above.
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a")];
+        app.queue_index = Some(0);
+        let before = std::time::Instant::now();
+
+        app.start_current();
+
+        assert!(app.track_changed_at >= before);
+        assert!(
+            app.needs_fast_animation(),
+            "starting a track kicks the fast tier for the metadata fade-in"
         );
     }
 }

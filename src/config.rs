@@ -39,14 +39,14 @@ pub struct Config {
     /// com a altura da barra), "mono" (cor única de `theme.player`) ou
     /// "off" (nenhuma barra desenhada). Ver [`VisualizerStyle`].
     pub visualizer: String,
-    /// Velocidade das animações (marquee, wipe do karaokê, etc.): "normal",
-    /// "fast" ou "slow". Apenas armazenado nesta etapa — o consumo real
-    /// chega na Etapa 6. Ver [`AnimationSpeed`].
+    /// Velocidade das animações (marquee, wipe do karaokê, revelação de
+    /// seleção/metadados, janela de `App::kick_animation`): "normal", "fast"
+    /// ou "slow". Ver [`AnimationSpeed`].
     pub animation_speed: String,
-    /// Reduz/desativa animações não essenciais. Nesta etapa desativa apenas
-    /// o marquee de títulos longos em `now_playing.rs` (volta a truncar com
-    /// '…'); a Etapa 6 estende o efeito ao wipe do karaokê e a outras
-    /// animações contínuas.
+    /// Reduz/desativa animações não essenciais: marquee de títulos longos
+    /// (volta a truncar com '…'), wipe por caractere do karaokê (linha ativa
+    /// já inteira "cantada"), e a revelação em estágios do card
+    /// selecionado/metadados do now-playing (pula direto ao estado final).
     pub reduced_motion: bool,
 }
 
@@ -162,9 +162,10 @@ impl VisualizerStyle {
     }
 }
 
-/// Velocidade das animações (config: `animation_speed`). Armazenado e
-/// persistido desde já; o consumo real (ajustar a velocidade do marquee, do
-/// wipe do karaokê etc.) chega na Etapa 6.
+/// Velocidade das animações (config: `animation_speed`). Consumida pela
+/// Etapa 6: escala a janela de `App::kick_animation` (mantém o tier rápido de
+/// redraw), os estágios de revelação/fade-in (seleção da Home, metadados do
+/// now-playing) e o intervalo de passo do marquee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimationSpeed {
     Normal,
@@ -189,6 +190,20 @@ impl AnimationSpeed {
             Self::Normal => "normal",
             Self::Fast => "fast",
             Self::Slow => "slow",
+        }
+    }
+
+    /// Fator multiplicativo aplicado a durações/instantes de animação:
+    /// `Fast` encurta, `Slow` alonga, `Normal` é a identidade. Único ponto de
+    /// verdade para a escala de velocidade — usado tanto por
+    /// `App::kick_animation` (janela do tier rápido de redraw) quanto pelas
+    /// funções puras de estágio (`ui::main_panel::reveal_stage`,
+    /// metadados do now-playing) e pelo intervalo do marquee.
+    pub fn factor(self) -> f64 {
+        match self {
+            Self::Fast => 0.6,
+            Self::Normal => 1.0,
+            Self::Slow => 1.6,
         }
     }
 }
@@ -307,5 +322,12 @@ mod tests {
         ] {
             assert_eq!(AnimationSpeed::from_config(speed.as_config()), speed);
         }
+    }
+
+    #[test]
+    fn animation_speed_factor_orders_slow_above_normal_above_fast() {
+        assert!(AnimationSpeed::Slow.factor() > AnimationSpeed::Normal.factor());
+        assert!(AnimationSpeed::Normal.factor() > AnimationSpeed::Fast.factor());
+        assert_eq!(AnimationSpeed::Normal.factor(), 1.0);
     }
 }

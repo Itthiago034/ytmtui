@@ -414,6 +414,22 @@ pub(crate) fn marquee_spans(
     spans
 }
 
+/// Milliseconds of playback time the marquee (see [`marquee_spans`]) holds
+/// each column before sliding to the next one, for a given
+/// [`crate::config::AnimationSpeed`]. A pure lookup rather than deriving
+/// this from `AnimationSpeed::factor` (which scales *durations that pass*,
+/// like `App::kick_animation`'s window): here a *faster* speed must slide
+/// the marquee quicker, i.e. a *shorter* interval, so the mapping goes the
+/// other way and reads clearer written out directly.
+pub(crate) fn marquee_interval(speed: crate::config::AnimationSpeed) -> u128 {
+    use crate::config::AnimationSpeed;
+    match speed {
+        AnimationSpeed::Fast => 250,
+        AnimationSpeed::Normal => 350,
+        AnimationSpeed::Slow => 500,
+    }
+}
+
 /// Keeps the last `max` display columns of `s` (used so the search cursor
 /// and the end of long queries stay visible).
 fn tail_chars(s: &str, max: usize) -> String {

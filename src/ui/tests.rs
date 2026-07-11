@@ -302,6 +302,71 @@ fn reduced_motion_disables_the_marquee_and_falls_back_to_ellipsis_truncation() {
 }
 
 #[test]
+fn metadata_stage_pure_thresholds() {
+    use super::now_playing::{metadata_stage, MetadataStage};
+
+    assert_eq!(metadata_stage(0, false), MetadataStage::Fading);
+    assert_eq!(metadata_stage(149, false), MetadataStage::Fading);
+    assert_eq!(metadata_stage(150, false), MetadataStage::Final);
+    assert_eq!(metadata_stage(10_000, false), MetadataStage::Final);
+
+    // `reduced_motion` always short-circuits to `Final`.
+    assert_eq!(metadata_stage(0, true), MetadataStage::Final);
+}
+
+#[test]
+fn marquee_interval_orders_fast_below_normal_below_slow() {
+    use crate::config::AnimationSpeed;
+    use super::marquee_interval;
+
+    let fast = marquee_interval(AnimationSpeed::Fast);
+    let normal = marquee_interval(AnimationSpeed::Normal);
+    let slow = marquee_interval(AnimationSpeed::Slow);
+    assert!(fast < normal, "fast ({fast}) must be quicker than normal ({normal})");
+    assert!(normal < slow, "normal ({normal}) must be quicker than slow ({slow})");
+}
+
+#[test]
+fn track_title_fades_in_from_subtext_right_after_a_track_change() {
+    let mut app = playing_app();
+    // Away from Section::Inicio (the default): the Home player panel also
+    // shows the track title in `theme.accent`, which would give `find_cell`
+    // a second, unrelated match for "Yellow".
+    app.section = Section::Buscar;
+    app.player.seek_to(std::time::Duration::from_secs(0));
+    let buffer = render(&mut app, 100, 30);
+    let theme = app.theme();
+
+    // `App::new_for_tests` (called inside `playing_app`) just set
+    // `track_changed_at` to "now" — well within the fade-in window.
+    let (x, y) = find_cell(&buffer, "Yellow");
+    assert_eq!(
+        buffer[(x, y)].fg,
+        theme.subtext,
+        "the title fades in from `subtext` right after a track change"
+    );
+}
+
+#[test]
+fn track_title_settles_to_its_final_style_once_the_fade_finishes() {
+    let mut app = playing_app();
+    app.section = Section::Buscar;
+    // Backdate the track change well past the ~150ms fade-in window —
+    // `Instant` can't be mocked, so this is the only way to exercise the
+    // "fade finished" branch in a buffer test without sleeping.
+    app.track_changed_at = std::time::Instant::now() - std::time::Duration::from_millis(500);
+    let buffer = render(&mut app, 100, 30);
+    let theme = app.theme();
+
+    let (x, y) = find_cell(&buffer, "Yellow");
+    assert_eq!(
+        buffer[(x, y)].fg,
+        theme.text,
+        "the title settles to its final color once the fade-in finishes"
+    );
+}
+
+#[test]
 fn long_status_messages_are_truncated() {
     let mut app = App::new_for_tests();
     app.status = "status ".repeat(60);
@@ -642,6 +707,76 @@ fn home_density_compact_renders_two_line_cards_without_a_subtitle_row() {
 }
 
 #[test]
+fn reveal_stage_pure_thresholds() {
+    use super::main_panel::{reveal_stage, RevealStage};
+
+    assert_eq!(reveal_stage(0, false), RevealStage::Background);
+    assert_eq!(reveal_stage(79, false), RevealStage::Background);
+    assert_eq!(reveal_stage(80, false), RevealStage::Title);
+    assert_eq!(reveal_stage(159, false), RevealStage::Title);
+    assert_eq!(reveal_stage(160, false), RevealStage::Full);
+    assert_eq!(reveal_stage(10_000, false), RevealStage::Full);
+
+    // `reduced_motion` always short-circuits to `Full`, no matter how
+    // little time has elapsed.
+    assert_eq!(reveal_stage(0, true), RevealStage::Full);
+    assert_eq!(reveal_stage(159, true), RevealStage::Full);
+}
+
+#[test]
+fn freshly_changed_home_selection_shows_the_background_before_the_badge() {
+    let mut app = grid_home_app();
+    app.list_state.select(Some(0));
+    // Just changed "now": within the first 80ms, the reveal must still be
+    // at the `Background` stage — background shown, but no accent title
+    // and no provider badge yet. No sleep: the assertions below run well
+    // inside that 80ms window.
+    app.selection_changed_at = Some(std::time::Instant::now());
+
+    let buffer = render(&mut app, 100, 30);
+    let theme = app.theme();
+    let content = text(&buffer);
+
+    let badge = format!("◆ {}", app.provider.id());
+    assert!(
+        !content.contains(&badge),
+        "the badge must not appear before the transition finishes:\n{content}"
+    );
+
+    let (x, y) = find_cell(&buffer, "First collection");
+    assert_eq!(
+        buffer[(x, y)].bg,
+        theme.highlight_bg,
+        "the selection background shows immediately, even at the Background stage"
+    );
+    assert_ne!(
+        buffer[(x, y)].fg,
+        theme.accent,
+        "the title stays un-accented during the Background stage"
+    );
+}
+
+#[test]
+fn reduced_motion_skips_the_reveal_stages_and_shows_the_badge_immediately() {
+    let mut app = grid_home_app();
+    app.reduced_motion = true;
+    app.list_state.select(Some(0));
+    // Same "just changed" instant as the previous test, but this time
+    // `reduced_motion` must skip straight to the final state.
+    app.selection_changed_at = Some(std::time::Instant::now());
+
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+
+    let badge = format!("◆ {}", app.provider.id());
+    assert_eq!(
+        content.matches(&badge).count(),
+        1,
+        "reduced motion shows the badge right away, skipping the staged reveal:\n{content}"
+    );
+}
+
+#[test]
 fn narrow_home_keeps_the_flat_list_and_a_single_column_even_with_many_cards() {
     let mut app = grid_home_app();
     app.list_state.select(Some(0));
@@ -872,7 +1007,7 @@ fn karaoke_wipe_splits_the_active_line_by_elapsed_time() {
         end_ms: 2000,
     };
     // Halfway through the window: 5 sung columns, 5 waiting.
-    let rendered = super::main_panel::karaoke_line(&line, 1500, theme);
+    let rendered = super::main_panel::karaoke_line(&line, 1500, theme, false);
     assert_eq!(rendered.spans.len(), 2);
     assert_eq!(rendered.spans[0].content.as_ref(), "abcde");
     assert_eq!(rendered.spans[0].style.fg, Some(theme.accent));
@@ -880,10 +1015,26 @@ fn karaoke_wipe_splits_the_active_line_by_elapsed_time() {
     assert_eq!(rendered.spans[1].style.fg, Some(theme.text));
 
     // Before the window: nothing sung yet; after: everything sung.
-    let before = super::main_panel::karaoke_line(&line, 0, theme);
+    let before = super::main_panel::karaoke_line(&line, 0, theme, false);
     assert_eq!(before.spans[0].content.as_ref(), "");
-    let after = super::main_panel::karaoke_line(&line, 9000, theme);
+    let after = super::main_panel::karaoke_line(&line, 9000, theme, false);
     assert_eq!(after.spans[0].content.as_ref(), "abcdefghij");
+}
+
+#[test]
+fn karaoke_line_under_reduced_motion_renders_the_whole_line_already_sung() {
+    let theme = crate::theme::get(0);
+    let line = crate::models::LyricLine {
+        text: "abcdefghij".to_string(),
+        start_ms: 1000,
+        end_ms: 2000,
+    };
+    // Even right at the start of the window, reduced motion skips the wipe
+    // entirely: one span, the full text, already in the "sung" style.
+    let rendered = super::main_panel::karaoke_line(&line, 1000, theme, true);
+    assert_eq!(rendered.spans.len(), 1);
+    assert_eq!(rendered.spans[0].content.as_ref(), "abcdefghij");
+    assert_eq!(rendered.spans[0].style.fg, Some(theme.accent));
 }
 
 #[test]

@@ -34,6 +34,18 @@ const FILTER_ARTISTS: &str = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D";
 const FILTER_PLAYLISTS: &str = "EgWKAQIoAWoKEAkQChAFEAMQBA%3D%3D";
 const FILTER_ALBUMS: &str = "EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D";
 
+// Paths de endpoint InnerTube usados por `YtMusicClient::post`/`post_anonymous`.
+const EP_BROWSE: &str = "browse";
+const EP_SEARCH: &str = "search";
+const EP_NEXT: &str = "next";
+const EP_LIKE: &str = "like/like";
+const EP_REMOVE_LIKE: &str = "like/removelike";
+const EP_ACCOUNT_MENU: &str = "account/account_menu";
+
+/// Tempo máximo de espera por uma resposta da API antes de desistir da
+/// requisição, evitando travar a UI indefinidamente numa chamada de rede presa.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub type YtMusicResult<T> = std::result::Result<T, YtMusicError>;
 
 #[derive(Debug)]
@@ -41,6 +53,10 @@ pub enum YtMusicError {
     AuthenticationRequired,
     SessionExpired {
         status: reqwest::StatusCode,
+        endpoint: String,
+    },
+    /// HTTP 429: o cliente está sendo limitado por taxa de requisições.
+    RateLimited {
         endpoint: String,
     },
     HttpStatus {
@@ -57,6 +73,9 @@ impl fmt::Display for YtMusicError {
             Self::AuthenticationRequired => write!(f, "authentication is required"),
             Self::SessionExpired { status, endpoint } => {
                 write!(f, "session expired while requesting {endpoint} ({status})")
+            }
+            Self::RateLimited { endpoint } => {
+                write!(f, "rate limited while requesting {endpoint}")
             }
             Self::HttpStatus { status, endpoint } => {
                 write!(f, "request to {endpoint} failed with {status}")
@@ -80,7 +99,13 @@ fn classify_status(
     status: reqwest::StatusCode,
     endpoint: &str,
 ) -> YtMusicError {
-    if authenticated
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        // Pode ocorrer autenticado ou não, então é checado antes do bloco de
+        // sessão expirada.
+        YtMusicError::RateLimited {
+            endpoint: endpoint.to_string(),
+        }
+    } else if authenticated
         && matches!(
             status,
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
@@ -96,6 +121,21 @@ fn classify_status(
             endpoint: endpoint.to_string(),
         }
     }
+}
+
+/// Retorna o primeiro erro entre os quatro resultados, na mesma ordem em que
+/// aparecem. Usado por [`YtMusicClient::search`] quando todas as sub-buscas
+/// falham, para propagar um erro representativo à UI.
+fn first_error<A, B, C, D>(
+    a: YtMusicResult<A>,
+    b: YtMusicResult<B>,
+    c: YtMusicResult<C>,
+    d: YtMusicResult<D>,
+) -> Option<YtMusicError> {
+    a.err()
+        .or_else(|| b.err())
+        .or_else(|| c.err())
+        .or_else(|| d.err())
 }
 
 /// Cliente HTTP reutilizável para o YouTube Music.
@@ -114,6 +154,7 @@ impl YtMusicClient {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             )
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("falha ao construir cliente HTTP");
         Self { http, auth: None }
@@ -219,7 +260,7 @@ impl YtMusicClient {
         }
 
         let body = json!({ "context": self.context(), "browseId": "FEmusic_liked_playlists" });
-        let data = self.post("browse", body).await?;
+        let data = self.post(EP_BROWSE, body).await?;
 
         let mut renderers = Vec::new();
         collect_key(&data, "musicTwoRowItemRenderer", &mut renderers);
@@ -264,14 +305,14 @@ impl YtMusicClient {
     /// ...) instead of one flattened list.
     pub async fn get_home(&self) -> YtMusicResult<Vec<HomeSection>> {
         let body = json!({ "context": self.context(), "browseId": "FEmusic_home" });
-        let data = self.post("browse", body).await?;
+        let data = self.post(EP_BROWSE, body).await?;
         Ok(parse_home_sections(&data))
     }
 
     /// Obtém as principais faixas de um artista a partir do seu `browseId`.
     pub async fn get_artist(&self, browse_id: &str) -> YtMusicResult<Vec<Track>> {
         let body = json!({ "context": self.context(), "browseId": browse_id });
-        let data = self.post("browse", body).await?;
+        let data = self.post(EP_BROWSE, body).await?;
         let mut renderers = Vec::new();
         collect_key(&data, "musicResponsiveListItemRenderer", &mut renderers);
         let mut out = Vec::new();
@@ -291,7 +332,7 @@ impl YtMusicClient {
             "playlistId": format!("RDAMVM{video_id}"),
             "isAudioOnly": true,
         });
-        let data = self.post("next", body).await?;
+        let data = self.post(EP_NEXT, body).await?;
         let mut renderers = Vec::new();
         collect_key(&data, "playlistPanelVideoRenderer", &mut renderers);
         let mut out = Vec::new();
@@ -317,7 +358,7 @@ impl YtMusicClient {
         if !self.is_authenticated() {
             return Err(YtMusicError::AuthenticationRequired);
         }
-        let endpoint = if like { "like/like" } else { "like/removelike" };
+        let endpoint = if like { EP_LIKE } else { EP_REMOVE_LIKE };
         let body = json!({ "context": self.context(), "target": { "videoId": video_id } });
         self.post(endpoint, body).await?;
         Ok(())
@@ -331,7 +372,7 @@ impl YtMusicClient {
             return Ok(None);
         }
         let body = json!({ "context": self.context() });
-        let data = self.post("account/account_menu", body).await?;
+        let data = self.post(EP_ACCOUNT_MENU, body).await?;
         Ok(parse::parse_account_name(&data))
     }
 
@@ -350,7 +391,8 @@ impl YtMusicClient {
 
         if songs.is_err() && artists.is_err() && albums.is_err() && playlists.is_err() {
             // Propaga o primeiro erro encontrado para que a UI possa exibi-lo.
-            return Err(songs.err().or(artists.err()).or(playlists.err()).unwrap());
+            return Err(first_error(songs, artists, albums, playlists)
+                .expect("guarda acima garante que ao menos um resultado é Err"));
         }
 
         Ok(SearchResults {
@@ -364,85 +406,61 @@ impl YtMusicClient {
     /// Busca apenas músicas.
     pub async fn search_songs(&self, query: &str) -> YtMusicResult<Vec<Track>> {
         let body = json!({ "context": self.context(), "query": query, "params": FILTER_SONGS });
-        let data = self.post("search", body).await?;
+        let data = self.post(EP_SEARCH, body).await?;
         Ok(self.parse_song_shelf(&data))
     }
 
-    /// Busca apenas artistas.
-    pub async fn search_artists(&self, query: &str) -> YtMusicResult<Vec<Artist>> {
-        let body = json!({ "context": self.context(), "query": query, "params": FILTER_ARTISTS });
-        let data = self.post("search", body).await?;
+    /// Executa uma busca com o `filter` indicado e converte cada item do
+    /// `musicShelfRenderer` retornado via `build`. Compartilhado entre
+    /// `search_artists`, `search_albums` e `search_playlists`, que só
+    /// diferem no tipo de saída e no filtro usado.
+    async fn search_shelf<T>(
+        &self,
+        query: &str,
+        filter: &str,
+        build: impl Fn(&Value) -> T,
+    ) -> YtMusicResult<Vec<T>> {
+        let body = json!({ "context": self.context(), "query": query, "params": filter });
+        let data = self.post(EP_SEARCH, body).await?;
         let mut out = Vec::new();
         if let Some(shelf) = find_key(&data, "musicShelfRenderer") {
             if let Some(items) = shelf.get("contents").and_then(|c| c.as_array()) {
                 for item in items {
-                    let Some(r) = item.get("musicResponsiveListItemRenderer") else {
-                        continue;
-                    };
-                    let texts = flex_texts(r);
-                    let browse_id = top_browse_id(r);
-                    out.push(Artist {
-                        browse_id,
-                        name: texts.first().cloned().unwrap_or_default(),
-                        subtitle: texts.get(1).cloned().unwrap_or_default(),
-                        thumbnail: extract_thumbnail(r),
-                    });
+                    if let Some(r) = item.get("musicResponsiveListItemRenderer") {
+                        out.push(build(r));
+                    }
                 }
             }
         }
         Ok(out)
+    }
+
+    /// Busca apenas artistas.
+    pub async fn search_artists(&self, query: &str) -> YtMusicResult<Vec<Artist>> {
+        self.search_shelf(query, FILTER_ARTISTS, |r| {
+            let texts = flex_texts(r);
+            Artist {
+                browse_id: top_browse_id(r),
+                name: texts.first().cloned().unwrap_or_default(),
+                subtitle: texts.get(1).cloned().unwrap_or_default(),
+                thumbnail: extract_thumbnail(r),
+            }
+        })
+        .await
     }
 
     /// Busca apenas álbuns. O modelo é o mesmo das playlists: o `browseId`
     /// (`MPRE…`) abre pelo endpoint `browse`, cujo parser já entende o
     /// `musicShelfRenderer` dos álbuns.
     pub async fn search_albums(&self, query: &str) -> YtMusicResult<Vec<Playlist>> {
-        let body = json!({ "context": self.context(), "query": query, "params": FILTER_ALBUMS });
-        let data = self.post("search", body).await?;
-        let mut out = Vec::new();
-        if let Some(shelf) = find_key(&data, "musicShelfRenderer") {
-            if let Some(items) = shelf.get("contents").and_then(|c| c.as_array()) {
-                for item in items {
-                    let Some(r) = item.get("musicResponsiveListItemRenderer") else {
-                        continue;
-                    };
-                    let texts = flex_texts(r);
-                    let browse_id = top_browse_id(r);
-                    out.push(Playlist {
-                        browse_id,
-                        title: texts.first().cloned().unwrap_or_default(),
-                        subtitle: texts.get(1).cloned().unwrap_or_default(),
-                        thumbnail: extract_thumbnail(r),
-                    });
-                }
-            }
-        }
-        Ok(out)
+        self.search_shelf(query, FILTER_ALBUMS, build_playlist)
+            .await
     }
 
     /// Busca apenas playlists.
     pub async fn search_playlists(&self, query: &str) -> YtMusicResult<Vec<Playlist>> {
-        let body = json!({ "context": self.context(), "query": query, "params": FILTER_PLAYLISTS });
-        let data = self.post("search", body).await?;
-        let mut out = Vec::new();
-        if let Some(shelf) = find_key(&data, "musicShelfRenderer") {
-            if let Some(items) = shelf.get("contents").and_then(|c| c.as_array()) {
-                for item in items {
-                    let Some(r) = item.get("musicResponsiveListItemRenderer") else {
-                        continue;
-                    };
-                    let texts = flex_texts(r);
-                    let browse_id = top_browse_id(r);
-                    out.push(Playlist {
-                        browse_id,
-                        title: texts.first().cloned().unwrap_or_default(),
-                        subtitle: texts.get(1).cloned().unwrap_or_default(),
-                        thumbnail: extract_thumbnail(r),
-                    });
-                }
-            }
-        }
-        Ok(out)
+        self.search_shelf(query, FILTER_PLAYLISTS, build_playlist)
+            .await
     }
 
     /// Faz o parsing do "shelf" de músicas retornado pela busca.
@@ -500,16 +518,7 @@ impl YtMusicClient {
         let duration = fixed_duration(r)
             .or_else(|| segments.iter().rev().find(|s| s.contains(':')).cloned())
             .unwrap_or_default();
-        // Mesmo filtro de `parse_panel_video` (parse.rs): descarta a duração
-        // e o texto de contagem de visualizações (comum em uploads de
-        // usuários, sem álbum), senão eles são exibidos como se fossem o
-        // álbum da faixa.
-        let album = segments
-            .iter()
-            .skip(1)
-            .find(|s| !s.contains(':') && !s.ends_with("views") && !s.contains("visualiz"))
-            .cloned()
-            .unwrap_or_default();
+        let album = pick_album(&segments);
 
         Some(Track {
             video_id,
@@ -543,7 +552,7 @@ impl YtMusicClient {
 
         // Playlists usam prefixo "VL"; browse aceita o id como veio na busca.
         let body = json!({ "context": self.context(), "browseId": browse_id });
-        let data = self.post("browse", body).await?;
+        let data = self.post(EP_BROWSE, body).await?;
 
         let mut out = Vec::new();
         // Playlists comuns: musicPlaylistShelfRenderer. Álbuns: musicShelfRenderer.
@@ -569,7 +578,7 @@ impl YtMusicClient {
             pages += 1;
 
             let body = json!({ "context": self.context(), "continuation": tok });
-            let Ok(cont) = self.post("browse", body).await else {
+            let Ok(cont) = self.post(EP_BROWSE, body).await else {
                 break;
             };
 
@@ -599,7 +608,7 @@ impl YtMusicClient {
     pub async fn get_lyrics(&self, video_id: &str) -> YtMusicResult<Option<Lyrics>> {
         // 1) endpoint "next" -> descobrir a aba de letras (browseId "MPLY...").
         let next_body = json!({ "context": self.context(), "videoId": video_id });
-        let next = self.post("next", next_body).await?;
+        let next = self.post(EP_NEXT, next_body).await?;
 
         let mut lyrics_id: Option<String> = None;
         if let Some(tabs) = find_key(&next, "tabs").and_then(|t| t.as_array()) {
@@ -633,7 +642,7 @@ impl YtMusicClient {
         // apenas com a identidade de cliente do app Android — o WEB_REMIX
         // só retorna o texto plano do Musixmatch para esse mesmo browseId.
         let android_body = json!({ "context": self.context_android(), "browseId": lyrics_id });
-        if let Ok(data) = self.post_anonymous("browse", android_body).await {
+        if let Ok(data) = self.post_anonymous(EP_BROWSE, android_body).await {
             let lines = parse_timed_lyrics(&data);
             if !lines.is_empty() {
                 return Ok(Some(Lyrics::Synced(lines)));
@@ -642,7 +651,7 @@ impl YtMusicClient {
 
         // 2b) Sem letras sincronizadas: volta para o texto plano (WEB_REMIX).
         let body = json!({ "context": self.context(), "browseId": lyrics_id });
-        let data = self.post("browse", body).await?;
+        let data = self.post(EP_BROWSE, body).await?;
         if let Some(desc) = find_key(&data, "description") {
             let text = join_runs(desc);
             if !text.is_empty() {
@@ -659,6 +668,19 @@ impl Default for YtMusicClient {
     }
 }
 
+/// Converte um item de `musicShelfRenderer` em `Playlist`. Compartilhado por
+/// `search_albums` e `search_playlists`, que montam o mesmo tipo a partir do
+/// mesmo formato de item.
+fn build_playlist(r: &Value) -> Playlist {
+    let texts = flex_texts(r);
+    Playlist {
+        browse_id: top_browse_id(r),
+        title: texts.first().cloned().unwrap_or_default(),
+        subtitle: texts.get(1).cloned().unwrap_or_default(),
+        thumbnail: extract_thumbnail(r),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,13 +688,13 @@ mod tests {
 
     #[test]
     fn authenticated_unauthorized_response_means_expired_session() {
-        let error = classify_status(true, StatusCode::UNAUTHORIZED, "browse");
+        let error = classify_status(true, StatusCode::UNAUTHORIZED, EP_BROWSE);
         assert!(matches!(error, YtMusicError::SessionExpired { .. }));
     }
 
     #[test]
     fn anonymous_forbidden_response_remains_an_http_error() {
-        let error = classify_status(false, StatusCode::FORBIDDEN, "browse");
+        let error = classify_status(false, StatusCode::FORBIDDEN, EP_BROWSE);
         assert!(matches!(error, YtMusicError::HttpStatus { .. }));
     }
 }

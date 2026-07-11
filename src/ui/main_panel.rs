@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Pa
 use ratatui::Frame;
 
 use crate::app::{App, Focus, Section};
+use crate::config::{HomeDensity, VisualizerStyle};
 use crate::home::{HomeCard, HomeCardKind, HomeShelf};
 use crate::theme::Theme;
 
@@ -424,12 +425,24 @@ const GRID_MIN_WIDTH: u16 = 70;
 /// stretches to `list_area.width / columns` so there's no ragged empty
 /// margin on the right (see `draw_home_grid`).
 const CARD_WIDTH: u16 = 24;
-/// Height (rows) of one card: title, subtitle, footer.
-const CARD_HEIGHT: u16 = 3;
+
+/// Height (rows) of one card for the given Home density: "comfortable" is
+/// title, subtitle, footer (3 rows); "compact" drops the subtitle row and
+/// stays at 2 (title, footer) — navigation and card count are unaffected,
+/// only the vertical footprint changes.
+fn card_height(density: HomeDensity) -> u16 {
+    match density {
+        HomeDensity::Comfortable => 3,
+        HomeDensity::Compact => 2,
+    }
+}
+
 /// Height of one shelf block in grid mode: a 1-row header plus one row of
-/// cards. Vertical scrolling moves by whole shelves, so this is also the
-/// scroll granularity.
-const SHELF_HEIGHT: u16 = 1 + CARD_HEIGHT;
+/// cards sized per `card_height`. Vertical scrolling moves by whole
+/// shelves, so this is also the scroll granularity.
+fn shelf_height(density: HomeDensity) -> u16 {
+    1 + card_height(density)
+}
 
 fn draw_home_sections(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
@@ -586,6 +599,8 @@ fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Them
     }
     let columns = (area.width / CARD_WIDTH).max(1) as usize;
     app.home_columns = columns;
+    let density = app.home_density;
+    let shelf_h = shelf_height(density);
 
     let view = app.home_view();
     if view.is_empty() {
@@ -610,7 +625,7 @@ fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Them
     // Vertical window: scroll by whole shelves so the selected one is
     // visible, clamped so the view never scrolls past the last shelf.
     let total_shelves = view.shelves.len();
-    let visible_shelf_count = (area.height / SHELF_HEIGHT).max(1) as usize;
+    let visible_shelf_count = (area.height / shelf_h).max(1) as usize;
     let max_scroll = total_shelves.saturating_sub(visible_shelf_count);
     let mut shelf_scroll = 0usize;
     if let Some(sel) = selected_shelf {
@@ -634,7 +649,7 @@ fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Them
         if y >= bottom {
             break;
         }
-        let this_height = SHELF_HEIGHT.min(bottom - y);
+        let this_height = shelf_h.min(bottom - y);
         let header_height = this_height.min(1);
         let cards_height = this_height.saturating_sub(header_height);
 
@@ -685,6 +700,7 @@ fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Them
                 columns,
                 selected,
                 theme,
+                density,
             );
         }
         y += cards_height;
@@ -719,6 +735,7 @@ fn draw_shelf_cards(
     columns: usize,
     selected: Option<usize>,
     theme: &'static Theme,
+    density: HomeDensity,
 ) {
     if area.width == 0 || area.height == 0 || columns == 0 {
         return;
@@ -739,15 +756,23 @@ fn draw_shelf_cards(
             height: area.height,
         };
         let is_selected = selected == Some(shelf_base + card_index);
-        draw_card(f, card_rect, card, is_selected, theme);
+        draw_card(f, card_rect, card, is_selected, theme, density);
     }
 }
 
-/// One card: title (bold), subtitle and a footer with the item's type glyph
-/// and duration. The selected card gets `theme.highlight_bg` across all
-/// three lines, an accented title, and a provider badge appended to the
-/// footer — the "metadata reveal" that only shows up on the focused card.
-fn draw_card(f: &mut Frame, area: Rect, card: &HomeCard, selected: bool, theme: &'static Theme) {
+/// One card: title (bold), an optional subtitle (dropped in "compact"
+/// density), and a footer with the item's type glyph and duration. The
+/// selected card gets `theme.selected_card` across all its lines, an
+/// accented title, and a provider badge appended to the footer — the
+/// "metadata reveal" that only shows up on the focused card.
+fn draw_card(
+    f: &mut Frame,
+    area: Rect,
+    card: &HomeCard,
+    selected: bool,
+    theme: &'static Theme,
+    density: HomeDensity,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -770,16 +795,19 @@ fn draw_card(f: &mut Frame, area: Rect, card: &HomeCard, selected: bool, theme: 
     let footer_main = crate::ui::truncate_chars(&format!("{glyph}{duration_part}"), inner_width);
 
     let title_fg = if selected { theme.accent } else { theme.text };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!(" {title}"),
-            Style::default().fg(title_fg).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" {title}"),
+        Style::default().fg(title_fg).add_modifier(Modifier::BOLD),
+    ))];
+    // "compact" density drops the subtitle row entirely (2-line card:
+    // título + rodapé) instead of just leaving it blank, so the shelf's
+    // vertical footprint actually shrinks (see `card_height`).
+    if density == HomeDensity::Comfortable {
+        lines.push(Line::from(Span::styled(
             format!(" {subtitle}"),
             Style::default().fg(theme.muted),
-        )),
-    ];
+        )));
+    }
 
     let mut footer_spans = vec![Span::styled(
         format!(" {footer_main}"),
@@ -792,14 +820,14 @@ fn draw_card(f: &mut Frame, area: Rect, card: &HomeCard, selected: bool, theme: 
         let remaining = (area.width as usize).saturating_sub(used);
         if remaining > 3 {
             let badge = crate::ui::take_width(&format!(" ◆ {} ", card.provider), remaining);
-            footer_spans.push(Span::styled(badge, Style::default().fg(theme.secondary)));
+            footer_spans.push(Span::styled(badge, Style::default().fg(theme.provider_badge)));
         }
     }
     lines.push(Line::from(footer_spans));
 
     let mut paragraph = Paragraph::new(lines);
     if selected {
-        paragraph = paragraph.style(Style::default().bg(theme.highlight_bg));
+        paragraph = paragraph.style(Style::default().bg(theme.selected_card));
     }
     f.render_widget(paragraph, area);
 }
@@ -836,13 +864,18 @@ fn draw_player_panel(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     draw_panel_title(f, app, rows[0], theme);
-    draw_bars(
-        f,
-        app.visualizer.bars(),
-        app.visualizer.peaks(),
-        rows[1],
-        theme,
-    );
+    // "off" draws only the title row above — no bar glyphs at all — leaving
+    // the rest of the panel blank instead of splitting it further.
+    if app.visualizer_style != VisualizerStyle::Off {
+        draw_bars(
+            f,
+            app.visualizer.bars(),
+            app.visualizer.peaks(),
+            rows[1],
+            theme,
+            app.visualizer_style,
+        );
+    }
 }
 
 /// Compact "▶ Title — Artist" line above the bars.
@@ -860,9 +893,12 @@ fn draw_panel_title(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme)
 /// Cava-style bars: one column per entry in `bars`, each a stack of Unicode
 /// eighth-block glyphs sized to that bar's smoothed height, plus a slowly
 /// falling "peak cap" marking each bar's recent maximum (Winamp-style).
-/// Cells are colored by their own height in the panel — quiet bars stay in
-/// the player color, tall bars grade through secondary into accent — so
-/// every loud bar reads as a vertical gradient.
+/// In `Gradient` style, cells are colored by their own height in the panel —
+/// quiet bars stay in the player color, tall bars grade through secondary
+/// into accent — so every loud bar reads as a vertical gradient. `Mono`
+/// keeps every filled cell in `theme.player` instead, no matter the row;
+/// peak caps are unaffected either way. Never called with `Off` — the
+/// caller (`draw_player_panel`) skips this function entirely in that case.
 // Precomputed "glyph + trailing space" static slices: with the Home screen's
 // fast (~60ms) redraw tier, this function runs often, so each cell is a
 // `&'static str` lookup rather than a fresh `format!()` allocation.
@@ -870,7 +906,14 @@ const BAR_GLYPHS: [&str; 9] = ["  ", "▁ ", "▂ ", "▃ ", "▄ ", "▅ ", "�
 /// Glyph do peak cap (linha fina no alto da célula onde o pico está).
 const PEAK_GLYPH: &str = "▔ ";
 
-fn draw_bars(f: &mut Frame, bars: &[f32], peaks: &[f32], area: Rect, theme: &'static Theme) {
+fn draw_bars(
+    f: &mut Frame,
+    bars: &[f32],
+    peaks: &[f32],
+    area: Rect,
+    theme: &'static Theme,
+    style: VisualizerStyle,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -881,9 +924,12 @@ fn draw_bars(f: &mut Frame, bars: &[f32], peaks: &[f32], area: Rect, theme: &'st
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows as usize);
     for row in 0..rows {
         let row_from_bottom = (rows - 1 - row) as f32;
-        // Fração de altura desta linha no painel: gradiente por célula.
+        // Fração de altura desta linha no painel: gradiente por célula
+        // (ignorada em `Mono`, que sempre usa `theme.player`).
         let fraction = (row_from_bottom + 1.0) / rows as f32;
-        let color = if fraction > 0.66 {
+        let color = if style == VisualizerStyle::Mono {
+            theme.player
+        } else if fraction > 0.66 {
             theme.accent
         } else if fraction > 0.33 {
             theme.secondary

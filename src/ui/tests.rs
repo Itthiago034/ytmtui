@@ -9,6 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 
 use crate::app::{App, Focus, Section};
+use crate::config::{HomeDensity, VisualizerStyle};
 use crate::models::Track;
 
 /// Renders one frame at the given size and returns the resulting buffer.
@@ -35,6 +36,20 @@ fn rows(buffer: &Buffer) -> Vec<String> {
 /// Full buffer content as a single newline-joined string.
 fn text(buffer: &Buffer) -> String {
     rows(buffer).join("\n")
+}
+
+/// Renders one frame and returns just the playback summary's track/title
+/// row — three rows up from the bottom (below it: the progress bar, then
+/// the status bar). Isolating this row matters because the Home player
+/// panel's own title (`draw_panel_title` in `main_panel.rs`) always
+/// truncates with an ellipsis regardless of `reduced_motion`, so asserting
+/// on the whole buffer would give a false positive/negative for marquee
+/// tests. Only valid for heights at/above `MIN_FULL_HEIGHT`, where the
+/// two-row playback summary is actually drawn.
+fn track_row(app: &mut App, width: u16, height: u16) -> String {
+    let buffer = render(app, width, height);
+    let idx = buffer.area.height.saturating_sub(3);
+    rows(&buffer)[idx as usize].clone()
 }
 
 /// Finds the (x, y) of the first cell where `needle` starts, matching
@@ -159,6 +174,68 @@ fn playing_state_shows_track_progress_and_state_glyph() {
     assert!(content.contains("▶"), "playing glyph:\n{content}");
 }
 
+/// Feeds a pure 440Hz tone into `app.visualizer` and runs enough frames that
+/// its bars settle to a clearly non-zero state — shared by the visualizer
+/// style tests below, where a real signal is needed to tell "no glyphs
+/// because off" apart from "no glyphs because bars happen to be empty".
+fn feed_a_tone(app: &mut App) {
+    use crate::visualizer::SampleChunk;
+    let mut phase = 0.0f32;
+    for _ in 0..3 {
+        let mut chunk = SampleChunk {
+            len: 1024,
+            channels: 1,
+            sample_rate: 44_100,
+            ..Default::default()
+        };
+        for slot in chunk.data.iter_mut() {
+            *slot = ((phase * std::f32::consts::TAU).sin() * 20_000.0) as i16;
+            phase += 440.0 / 44_100.0;
+        }
+        app.visualizer.push_samples(&chunk);
+        app.visualizer.compute_frame();
+    }
+    assert!(
+        app.visualizer.bars().iter().any(|&b| b > 0.1),
+        "sanity check: a real tone should light up at least one bar"
+    );
+}
+
+/// Bar/peak glyphs unique to `draw_bars` — not used anywhere else in the UI
+/// (the wordmark logo only uses `█`/`▀`), so their absence is a reliable
+/// signal that no bars were drawn at all.
+const BAR_ONLY_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '▔'];
+
+#[test]
+fn visualizer_off_draws_no_bar_glyphs_in_the_player_panel() {
+    let mut app = playing_app();
+    app.visualizer_style = VisualizerStyle::Off;
+    feed_a_tone(&mut app);
+
+    let buffer = render(&mut app, 100, 20);
+    let content = text(&buffer);
+    for glyph in BAR_ONLY_GLYPHS {
+        assert!(
+            !content.contains(glyph),
+            "visualizer off must not draw bar glyph {glyph:?}:\n{content}"
+        );
+    }
+}
+
+#[test]
+fn visualizer_gradient_draws_bar_glyphs_when_a_tone_is_playing() {
+    let mut app = playing_app();
+    debug_assert!(app.visualizer_style == VisualizerStyle::Gradient, "default style");
+    feed_a_tone(&mut app);
+
+    let buffer = render(&mut app, 100, 20);
+    let content = text(&buffer);
+    assert!(
+        BAR_ONLY_GLYPHS.iter().any(|&g| content.contains(g)),
+        "gradient style should draw at least one bar glyph while a tone plays:\n{content}"
+    );
+}
+
 #[test]
 fn long_titles_are_truncated_with_an_ellipsis() {
     let mut app = playing_app();
@@ -173,6 +250,54 @@ fn long_titles_are_truncated_with_an_ellipsis() {
     assert!(
         !content.contains(&long_title),
         "full long title must not be rendered"
+    );
+}
+
+#[test]
+fn marquee_slides_the_playback_summary_title_across_playback_positions() {
+    let mut app = playing_app();
+    let long_title = "Supercalifragilistic ".repeat(12);
+    if let Some(t) = app.current.as_mut() {
+        t.title = long_title;
+    }
+    // `reduced_motion` stays at its default (false).
+
+    app.player.seek_to(std::time::Duration::from_secs(0));
+    let row_at_0 = track_row(&mut app, 80, 24);
+    app.player.seek_to(std::time::Duration::from_secs(5));
+    let row_at_5 = track_row(&mut app, 80, 24);
+
+    assert!(
+        !row_at_0.contains('…'),
+        "the marquee slides text, it never appends an ellipsis:\n{row_at_0}"
+    );
+    assert_ne!(
+        row_at_0, row_at_5,
+        "the marquee must slide between different playback positions"
+    );
+}
+
+#[test]
+fn reduced_motion_disables_the_marquee_and_falls_back_to_ellipsis_truncation() {
+    let mut app = playing_app();
+    let long_title = "Supercalifragilistic ".repeat(12);
+    if let Some(t) = app.current.as_mut() {
+        t.title = long_title;
+    }
+    app.reduced_motion = true;
+
+    app.player.seek_to(std::time::Duration::from_secs(0));
+    let row_at_0 = track_row(&mut app, 80, 24);
+    app.player.seek_to(std::time::Duration::from_secs(5));
+    let row_at_5 = track_row(&mut app, 80, 24);
+
+    assert!(
+        row_at_0.contains('…'),
+        "reduced motion falls back to ellipsis truncation:\n{row_at_0}"
+    );
+    assert_eq!(
+        row_at_0, row_at_5,
+        "reduced motion must not slide the title between different playback positions"
     );
 }
 
@@ -485,6 +610,34 @@ fn home_grid_highlights_the_selected_card_and_reveals_its_provider_badge() {
         buffer[(x2, y2)].bg,
         theme.highlight_bg,
         "the non-selected card in the same shelf is not highlighted"
+    );
+}
+
+#[test]
+fn home_density_compact_renders_two_line_cards_without_a_subtitle_row() {
+    let mut app = grid_home_app();
+    app.home_density = HomeDensity::Compact;
+    app.list_state.select(Some(0));
+
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+
+    // Both cards' subtitles are "Curated" in `grid_home_app`; compact
+    // density drops the subtitle row entirely, so it must never appear.
+    assert!(
+        !content.contains("Curated"),
+        "compact density must drop the subtitle row:\n{content}"
+    );
+
+    // The two cards still land on the same row (side by side) — only the
+    // per-card height shrank, not the grid layout itself.
+    let buffer_rows = rows(&buffer);
+    let shared_row = buffer_rows
+        .iter()
+        .find(|r| r.contains("First collection") && r.contains("Second collection"));
+    assert!(
+        shared_row.is_some(),
+        "two card titles still share the same row in compact density:\n{content}"
     );
 }
 

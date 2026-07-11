@@ -14,7 +14,7 @@ use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::config::Config;
+use crate::config::{AnimationSpeed, ArtworkMode, Config, HomeDensity, VisualizerStyle};
 use crate::home::{HomeCardPayload, HomeDirection, HomeView};
 use crate::models::{Artist, Playlist, SearchResults, Track};
 use crate::player::AudioPlayer;
@@ -362,6 +362,24 @@ pub struct App {
     pub sync_interval: std::time::Duration,
     /// When the last background sync fired.
     pub last_synced: std::time::Instant,
+
+    // Aparência / animações (Etapa 5). Todos os cinco vêm da config e ainda
+    // não são editáveis em runtime — `save_config` sempre relê e preserva o
+    // que já está em disco, no mesmo padrão de `sync_interval_secs`.
+    /// Modo de exibição da capa do álbum (consumido por `main.rs::build_picker`).
+    pub artwork_mode: ArtworkMode,
+    /// Densidade dos cards da grade da tela Início (consumido por `ui::main_panel`).
+    pub home_density: HomeDensity,
+    /// Estilo do visualizador de espectro do player. Chamado `visualizer_style`
+    /// (e não `visualizer`) para não colidir com o analisador FFT acima.
+    pub visualizer_style: VisualizerStyle,
+    /// Velocidade das animações. Apenas armazenada nesta etapa; o consumo
+    /// real chega na Etapa 6.
+    pub animation_speed: AnimationSpeed,
+    /// Reduz/desativa animações não essenciais. Consumido, por ora, só pelo
+    /// marquee de títulos longos em `ui::now_playing` (a Etapa 6 estende o
+    /// efeito ao wipe do karaokê e demais animações contínuas).
+    pub reduced_motion: bool,
 }
 
 impl App {
@@ -467,6 +485,11 @@ impl App {
             // hot loop of re-fetches.
             sync_interval: std::time::Duration::from_secs(config.sync_interval_secs.max(30)),
             last_synced: std::time::Instant::now(),
+            artwork_mode: ArtworkMode::from_config(&config.artwork_mode),
+            home_density: HomeDensity::from_config(&config.home_density),
+            visualizer_style: VisualizerStyle::from_config(&config.visualizer),
+            animation_speed: AnimationSpeed::from_config(&config.animation_speed),
+            reduced_motion: config.reduced_motion,
         })
     }
 
@@ -1002,6 +1025,14 @@ impl App {
             // Not editable at runtime yet; preserve whatever's on disk
             // rather than overwriting it with the in-memory Duration.
             sync_interval_secs: saved.sync_interval_secs,
+            // Same story as `sync_interval_secs` above: these five have no
+            // in-app editor yet, so whatever's on disk wins over the
+            // in-memory value loaded at startup.
+            artwork_mode: saved.artwork_mode,
+            home_density: saved.home_density,
+            visualizer: saved.visualizer,
+            animation_speed: saved.animation_speed,
+            reduced_motion: saved.reduced_motion,
         }
         .save();
     }
@@ -1984,6 +2015,11 @@ impl App {
             spinner_frame: 0,
             sync_interval: std::time::Duration::from_secs(300),
             last_synced: std::time::Instant::now(),
+            artwork_mode: ArtworkMode::Auto,
+            home_density: HomeDensity::Comfortable,
+            visualizer_style: VisualizerStyle::Gradient,
+            animation_speed: AnimationSpeed::Normal,
+            reduced_motion: false,
         }
     }
 }

@@ -87,7 +87,11 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
     let needed = crate::ui::display_width(&title) + crate::ui::display_width(&subtitle);
     // Título que não cabe vira um marquee deslizando com o relógio da faixa
     // (e congelando em pausa); com espaço de sobra, texto estático normal.
-    let mut middle = if needed > avail && avail >= 8 && app.current.is_some() {
+    // `reduced_motion` desativa esse deslizamento (volta ao truncamento com
+    // '…' abaixo) — a Etapa 6 estende o campo ao wipe do karaokê e a outras
+    // animações contínuas.
+    let mut middle = if needed > avail && avail >= 8 && app.current.is_some() && !app.reduced_motion
+    {
         let step = (app.player.position().as_millis() / 350) as usize;
         crate::ui::marquee_spans(
             &[(title.as_str(), title_style), (subtitle.as_str(), subtitle_style)],

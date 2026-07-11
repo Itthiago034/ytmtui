@@ -3,6 +3,7 @@
 //! Ponto de entrada: configura o terminal, cria o estado da aplicação e roda
 //! o laço principal de eventos/renderização.
 
+use ytmtui::config::ArtworkMode;
 use ytmtui::{app, event, mpris, player, ui};
 
 use std::io::{self, Stdout};
@@ -39,8 +40,9 @@ async fn main() -> Result<()> {
     let mut app = App::new()?;
 
     // Album-art support: real image protocols on terminals known to answer
-    // the capability query, Unicode half-blocks everywhere else.
-    app.picker = Some(build_picker());
+    // the capability query, Unicode half-blocks everywhere else — or no
+    // picker at all when `artwork_mode` is "off".
+    app.picker = build_picker(app.artwork_mode);
 
     // Avisa (uma vez) se faltar alguma ferramenta essencial de reprodução.
     let missing = player::missing_dependencies();
@@ -192,29 +194,49 @@ fn env_reports_image_support(
         || program.contains("ghostty")
 }
 
-/// Builds the album-art picker. Capable terminals are queried for their
-/// real protocol (Kitty graphics, Sixel, iTerm2) and font size; everywhere
-/// else half-blocks are used with the cell size reported by the windowing
-/// system, or a conservative guess when unavailable.
-fn build_picker() -> ratatui_image::picker::Picker {
+/// Whether `mode` wants a picker built at all. `Off` means no cover art is
+/// ever downloaded or drawn, so `build_picker` short-circuits before
+/// touching the terminal.
+fn wants_picker(mode: ArtworkMode) -> bool {
+    mode != ArtworkMode::Off
+}
+
+/// Whether `build_picker` should query the terminal for its real image
+/// protocol. Only `Auto` does — and only when the environment identifies a
+/// terminal known to answer the query; `HalfBlocks` always skips it (even
+/// on a capable terminal) to force the Unicode fallback.
+fn should_query_protocol(mode: ArtworkMode, env_supported: bool) -> bool {
+    mode == ArtworkMode::Auto && env_supported
+}
+
+/// Builds the album-art picker according to `mode`: `Auto` queries capable
+/// terminals for their real protocol (Kitty graphics, Sixel, iTerm2) and
+/// falls back to half-blocks otherwise; `HalfBlocks` always uses half-blocks
+/// (skipping the query entirely); `Off` returns `None`, so no picker is
+/// created and no cover art is ever drawn.
+fn build_picker(mode: ArtworkMode) -> Option<ratatui_image::picker::Picker> {
     use ratatui_image::picker::Picker;
 
-    let supported = env_reports_image_support(
+    if !wants_picker(mode) {
+        return None;
+    }
+
+    let env_supported = env_reports_image_support(
         std::env::var("TERM").ok().as_deref(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),
         std::env::var_os("KITTY_WINDOW_ID").is_some(),
         std::env::var_os("KONSOLE_VERSION").is_some(),
     );
-    if supported {
+    if should_query_protocol(mode, env_supported) {
         if let Ok(picker) = Picker::from_query_stdio() {
-            return picker;
+            return Some(picker);
         }
     }
     let font_size = crossterm::terminal::window_size()
         .ok()
         .and_then(|s| cell_size_from(s.columns, s.rows, s.width, s.height))
         .unwrap_or((8, 16));
-    Picker::from_fontsize(font_size)
+    Some(Picker::from_fontsize(font_size))
 }
 
 /// Cell size in pixels derived from the reported window size; `None` when
@@ -271,5 +293,24 @@ mod tests {
             false
         ));
         assert!(!env_reports_image_support(None, None, false, false));
+    }
+
+    #[test]
+    fn artwork_mode_off_never_wants_a_picker() {
+        assert!(!wants_picker(ArtworkMode::Off));
+        assert!(wants_picker(ArtworkMode::Auto));
+        assert!(wants_picker(ArtworkMode::HalfBlocks));
+    }
+
+    #[test]
+    fn only_auto_mode_queries_the_real_protocol() {
+        // Auto follows the terminal's reported support either way.
+        assert!(should_query_protocol(ArtworkMode::Auto, true));
+        assert!(!should_query_protocol(ArtworkMode::Auto, false));
+        // HalfBlocks always skips the query, even on a capable terminal.
+        assert!(!should_query_protocol(ArtworkMode::HalfBlocks, true));
+        assert!(!should_query_protocol(ArtworkMode::HalfBlocks, false));
+        // Off is moot (build_picker never gets this far), but stays false.
+        assert!(!should_query_protocol(ArtworkMode::Off, true));
     }
 }

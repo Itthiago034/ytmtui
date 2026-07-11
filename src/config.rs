@@ -27,6 +27,27 @@ pub struct Config {
     /// Intervalo (segundos) entre atualizações automáticas de Início e
     /// Biblioteca em segundo plano, enquanto o app está aberto.
     pub sync_interval_secs: u64,
+    /// Modo de exibição da capa do álbum: "auto" (consulta o protocolo real
+    /// do terminal), "halfblocks" (pula a consulta e usa blocos Unicode) ou
+    /// "off" (nenhuma capa é baixada/desenhada). Ver [`ArtworkMode`].
+    pub artwork_mode: String,
+    /// Densidade dos cards da grade da tela Início: "comfortable" (título +
+    /// subtítulo + rodapé) ou "compact" (título + rodapé, sem subtítulo).
+    /// Ver [`HomeDensity`].
+    pub home_density: String,
+    /// Estilo do visualizador de espectro do player: "gradient" (cor muda
+    /// com a altura da barra), "mono" (cor única de `theme.player`) ou
+    /// "off" (nenhuma barra desenhada). Ver [`VisualizerStyle`].
+    pub visualizer: String,
+    /// Velocidade das animações (marquee, wipe do karaokê, etc.): "normal",
+    /// "fast" ou "slow". Apenas armazenado nesta etapa — o consumo real
+    /// chega na Etapa 6. Ver [`AnimationSpeed`].
+    pub animation_speed: String,
+    /// Reduz/desativa animações não essenciais. Nesta etapa desativa apenas
+    /// o marquee de títulos longos em `now_playing.rs` (volta a truncar com
+    /// '…'); a Etapa 6 estende o efeito ao wipe do karaokê e a outras
+    /// animações contínuas.
+    pub reduced_motion: bool,
 }
 
 impl Default for Config {
@@ -39,6 +60,135 @@ impl Default for Config {
             theme: "Roxo".to_string(),
             username: None,
             sync_interval_secs: 300,
+            artwork_mode: "auto".to_string(),
+            home_density: "comfortable".to_string(),
+            visualizer: "gradient".to_string(),
+            animation_speed: "normal".to_string(),
+            reduced_motion: false,
+        }
+    }
+}
+
+/// Modo de exibição da capa do álbum (config: `artwork_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtworkMode {
+    /// Consulta o terminal pelo protocolo real de imagem (Kitty/Sixel/
+    /// iTerm2); cai para blocos Unicode quando não suportado.
+    Auto,
+    /// Nunca consulta o terminal: sempre usa blocos Unicode (half-blocks).
+    HalfBlocks,
+    /// Nenhuma capa é baixada nem desenhada.
+    Off,
+}
+
+impl ArtworkMode {
+    /// Interpreta o valor salvo na config; qualquer string desconhecida cai
+    /// no padrão (`Auto`) em vez de falhar.
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "halfblocks" => Self::HalfBlocks,
+            "off" => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+
+    /// Valor persistido na config.
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::HalfBlocks => "halfblocks",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Densidade dos cards da grade da tela Início (config: `home_density`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeDensity {
+    /// Três linhas por card: título, subtítulo, rodapé.
+    Comfortable,
+    /// Duas linhas por card: título, rodapé (sem subtítulo).
+    Compact,
+}
+
+impl HomeDensity {
+    /// Interpreta o valor salvo na config; qualquer string desconhecida cai
+    /// no padrão (`Comfortable`) em vez de falhar.
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "compact" => Self::Compact,
+            _ => Self::Comfortable,
+        }
+    }
+
+    /// Valor persistido na config.
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Comfortable => "comfortable",
+            Self::Compact => "compact",
+        }
+    }
+}
+
+/// Estilo do visualizador de espectro do player (config: `visualizer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualizerStyle {
+    /// Gradiente por altura da célula (cor muda de `player` a `accent`).
+    Gradient,
+    /// Cor única (`theme.player`) para todas as células, sem gradiente.
+    Mono,
+    /// Nenhuma barra é desenhada (só o título da faixa).
+    Off,
+}
+
+impl VisualizerStyle {
+    /// Interpreta o valor salvo na config; qualquer string desconhecida cai
+    /// no padrão (`Gradient`) em vez de falhar.
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "mono" => Self::Mono,
+            "off" => Self::Off,
+            _ => Self::Gradient,
+        }
+    }
+
+    /// Valor persistido na config.
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Gradient => "gradient",
+            Self::Mono => "mono",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Velocidade das animações (config: `animation_speed`). Armazenado e
+/// persistido desde já; o consumo real (ajustar a velocidade do marquee, do
+/// wipe do karaokê etc.) chega na Etapa 6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationSpeed {
+    Normal,
+    Fast,
+    Slow,
+}
+
+impl AnimationSpeed {
+    /// Interpreta o valor salvo na config; qualquer string desconhecida cai
+    /// no padrão (`Normal`) em vez de falhar.
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "fast" => Self::Fast,
+            "slow" => Self::Slow,
+            _ => Self::Normal,
+        }
+    }
+
+    /// Valor persistido na config.
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Fast => "fast",
+            Self::Slow => "slow",
         }
     }
 }
@@ -68,6 +218,94 @@ impl Config {
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(&path, json);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Estes testes desserializam JSON diretamente com `serde_json`, nunca
+    // tocando `Config::load`/`save` (que leriam/escreveriam o config.json
+    // real do usuário).
+
+    #[test]
+    fn old_config_without_the_new_fields_deserializes_with_defaults() {
+        let json = r#"{
+            "volume": 0.5,
+            "shuffle": true,
+            "repeat": "all",
+            "cookies": null,
+            "theme": "Oceano",
+            "username": null,
+            "sync_interval_secs": 120
+        }"#;
+        let config: Config = serde_json::from_str(json).expect("old config should deserialize");
+        assert_eq!(config.artwork_mode, "auto");
+        assert_eq!(config.home_density, "comfortable");
+        assert_eq!(config.visualizer, "gradient");
+        assert_eq!(config.animation_speed, "normal");
+        assert!(!config.reduced_motion);
+        // Campos antigos continuam lidos normalmente.
+        assert_eq!(config.volume, 0.5);
+        assert_eq!(config.theme, "Oceano");
+    }
+
+    #[test]
+    fn invalid_enum_strings_fall_back_to_the_default_variant() {
+        assert_eq!(ArtworkMode::from_config("xyz"), ArtworkMode::Auto);
+        assert_eq!(HomeDensity::from_config("xyz"), HomeDensity::Comfortable);
+        assert_eq!(VisualizerStyle::from_config("xyz"), VisualizerStyle::Gradient);
+        assert_eq!(AnimationSpeed::from_config("xyz"), AnimationSpeed::Normal);
+        // Vazio ou com caixa diferente também são "desconhecidos".
+        assert_eq!(ArtworkMode::from_config(""), ArtworkMode::Auto);
+        assert_eq!(ArtworkMode::from_config("Off"), ArtworkMode::Auto);
+    }
+
+    #[test]
+    fn invalid_artwork_mode_in_json_falls_back_to_default_via_parse() {
+        let json = r#"{"artwork_mode": "xyz"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        // O valor bruto é preservado pelo serde (é só uma String); é
+        // `ArtworkMode::from_config` que tolera o valor inválido.
+        assert_eq!(config.artwork_mode, "xyz");
+        assert_eq!(ArtworkMode::from_config(&config.artwork_mode), ArtworkMode::Auto);
+    }
+
+    #[test]
+    fn artwork_mode_roundtrips_through_config_strings() {
+        for mode in [ArtworkMode::Auto, ArtworkMode::HalfBlocks, ArtworkMode::Off] {
+            assert_eq!(ArtworkMode::from_config(mode.as_config()), mode);
+        }
+    }
+
+    #[test]
+    fn home_density_roundtrips_through_config_strings() {
+        for density in [HomeDensity::Comfortable, HomeDensity::Compact] {
+            assert_eq!(HomeDensity::from_config(density.as_config()), density);
+        }
+    }
+
+    #[test]
+    fn visualizer_style_roundtrips_through_config_strings() {
+        for style in [
+            VisualizerStyle::Gradient,
+            VisualizerStyle::Mono,
+            VisualizerStyle::Off,
+        ] {
+            assert_eq!(VisualizerStyle::from_config(style.as_config()), style);
+        }
+    }
+
+    #[test]
+    fn animation_speed_roundtrips_through_config_strings() {
+        for speed in [
+            AnimationSpeed::Normal,
+            AnimationSpeed::Fast,
+            AnimationSpeed::Slow,
+        ] {
+            assert_eq!(AnimationSpeed::from_config(speed.as_config()), speed);
         }
     }
 }

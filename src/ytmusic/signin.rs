@@ -83,18 +83,21 @@ fn firefox_xdg_profile(home: &Path) -> Option<PathBuf> {
 
 /// Detects browsers with a usable cookie store under `home`, as
 /// `--cookies-from-browser` argument values (possibly carrying an explicit
-/// `firefox:<profile-path>` for XDG Firefox setups).
+/// `firefox:<profile-path>` for XDG Firefox setups). Firefox is attempted
+/// first; Chromium-family sessions remain ordered fallbacks.
 pub fn detect_browsers(home: &Path) -> Vec<String> {
-    let mut out: Vec<String> = CHROMIUM_CANDIDATES
-        .iter()
-        .filter(|(_, dir)| chromium_has_cookies(&home.join(dir)))
-        .map(|(name, _)| name.to_string())
-        .collect();
+    let mut out = Vec::new();
     if home.join(".mozilla/firefox").is_dir() {
         out.push("firefox".to_string());
     } else if let Some(profile) = firefox_xdg_profile(home) {
         out.push(format!("firefox:{}", profile.display()));
     }
+    out.extend(
+        CHROMIUM_CANDIDATES
+            .iter()
+            .filter(|(_, dir)| chromium_has_cookies(&home.join(dir)))
+            .map(|(name, _)| name.to_string()),
+    );
     out
 }
 
@@ -150,7 +153,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_browsers_requires_a_real_cookie_store() {
+    fn detect_browsers_prefers_firefox_and_requires_chromium_cookie_store() {
         let home = tempfile::tempdir().expect("temporary home");
         assert!(detect_browsers(home.path()).is_empty());
 
@@ -163,14 +166,15 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".mozilla/firefox")).unwrap();
         assert_eq!(detect_browsers(home.path()), vec!["firefox"]);
 
-        // Once the cookie db exists, Brave is preferred.
+        // Once the cookie db exists, Brave becomes the fallback; Firefox
+        // stays first so `g` uses the account the user chose there.
         std::fs::write(
             home.path()
                 .join(".config/BraveSoftware/Brave-Browser/Default/Cookies"),
             "",
         )
         .unwrap();
-        assert_eq!(detect_browsers(home.path()), vec!["brave", "firefox"]);
+        assert_eq!(detect_browsers(home.path()), vec!["firefox", "brave"]);
     }
 
     #[test]

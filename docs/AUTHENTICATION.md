@@ -29,6 +29,10 @@ data, personalized recommendations, and like/unlike actions.
    to `~/.config/ytmtui/cookies.txt`, and reconnects without requiring a full
    app restart.
 
+Automatic detection tries Firefox first, then supported Chromium-family
+browsers as fallbacks. This avoids silently choosing a different YouTube
+account from Brave or Chrome when Firefox is available.
+
 If the browser has no valid YouTube Music session, sign in there first and
 press `g` again.
 

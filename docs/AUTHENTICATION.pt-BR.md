@@ -28,6 +28,10 @@ da biblioteca, recomendações personalizadas e curtir/descurtir.
 5. O ytmtui importa cookies via `yt-dlp --cookies-from-browser`, salva em
    `~/.config/ytmtui/cookies.txt` e reconecta sem exigir reiniciar o app.
 
+A detecção automática tenta primeiro o Firefox e depois usa navegadores da
+família Chromium como fallback. Isso evita escolher silenciosamente outra
+conta do YouTube no Brave ou Chrome quando o Firefox está disponível.
+
 Se o navegador não tiver uma sessão válida do YouTube Music, faça login nele e
 pressione `g` de novo.
 

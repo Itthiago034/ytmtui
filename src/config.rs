@@ -50,14 +50,32 @@ fn config_path() -> Option<PathBuf> {
 
 impl Config {
     /// Carrega a configuração do disco; retorna o padrão em caso de erro.
-    pub fn load() -> Self {
+    ///
+    /// Se o arquivo existir mas estiver corrompido (JSON inválido), uma cópia
+    /// é preservada em `config.json.bak` antes de cair no padrão, e um aviso
+    /// é retornado para que o chamador possa avisar o usuário em vez de
+    /// simplesmente descartar o arquivo em silêncio.
+    pub fn load() -> (Self, Option<String>) {
         let Some(path) = config_path() else {
-            return Self::default();
+            return (Self::default(), None);
         };
         let Ok(contents) = std::fs::read_to_string(&path) else {
-            return Self::default();
+            return (Self::default(), None);
         };
-        serde_json::from_str(&contents).unwrap_or_default()
+        match serde_json::from_str(&contents) {
+            Ok(config) => (config, None),
+            Err(e) => {
+                let backup = path.with_extension("json.bak");
+                let _ = std::fs::copy(&path, &backup);
+                (
+                    Self::default(),
+                    Some(format!(
+                        "Configuração corrompida ({e}); revertida ao padrão. Backup salvo em {}",
+                        backup.display()
+                    )),
+                )
+            }
+        }
     }
 
     /// Salva a configuração no disco (falhas são ignoradas silenciosamente).
@@ -67,7 +85,7 @@ impl Config {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
+            let _ = crate::fs_util::atomic_write(&path, json.as_bytes());
         }
     }
 }

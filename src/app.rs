@@ -172,6 +172,9 @@ pub enum Msg {
     CookiesImported {
         path: String,
         browser: String,
+        /// Set when the export succeeded but a non-fatal issue occurred
+        /// (e.g. the cookie file's permissions could not be restricted).
+        warning: Option<String>,
     },
     /// Radio built around `seed` (a track played from the search results):
     /// similar tracks to append to the queue *behind* what's playing —
@@ -330,7 +333,7 @@ impl App {
         list_state.select(Some(0));
 
         // Carrega preferências persistidas.
-        let config = Config::load();
+        let (config, config_warning) = Config::load();
 
         let default_cookies = dirs::config_dir().map(|dir| dir.join("ytmtui/cookies.txt"));
         let resolution = resolve_cookie_path(
@@ -340,7 +343,7 @@ impl App {
         );
         let cookies = resolution.path;
 
-        let mut player = AudioPlayer::new()?;
+        let (mut player, player_warning) = AudioPlayer::new();
         player.set_volume(config.volume);
 
         let (client, authentication) = match cookies.as_deref() {
@@ -377,6 +380,10 @@ impl App {
                 "Session expired. Press g to sign in again from your browser.".to_string()
             }
         };
+        // Avisos de inicialização (config corrompida, thread de áudio) têm
+        // prioridade sobre a mensagem de status padrão: são acionáveis e
+        // não deveriam ser silenciosamente encobertos por ela.
+        let status = player_warning.or(config_warning).unwrap_or(status);
 
         Ok(Self {
             running: true,
@@ -576,7 +583,7 @@ impl App {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(json) = serde_json::to_string_pretty(&self.recent) {
-            let _ = std::fs::write(path, json);
+            let _ = crate::fs_util::atomic_write(&path, json.as_bytes());
         }
     }
 
@@ -735,10 +742,11 @@ impl App {
             for browser in browsers {
                 let _ = tx.send(Msg::Status(format!("Importando cookies de {browser}…")));
                 match export_browser_cookies(&browser, &dest) {
-                    Ok(()) => {
+                    Ok(warning) => {
                         let _ = tx.send(Msg::CookiesImported {
                             path: dest.to_string_lossy().into_owned(),
                             browser,
+                            warning,
                         });
                         return;
                     }
@@ -814,7 +822,10 @@ impl App {
     pub fn save_config(&self) {
         // Nunca apaga um caminho de cookies válido já salvo: se o app subiu
         // sem cookies (self.cookies == None), preserva o que estiver em disco.
-        let saved = Config::load();
+        // O aviso de corrupção já foi mostrado uma vez em `App::new`; aqui
+        // só precisamos do valor (o padrão é seguro caso o arquivo já tenha
+        // sido reescrito nesse meio tempo).
+        let (saved, _) = Config::load();
         let cookies = self.cookies.clone().or(saved.cookies);
         // Só persiste um username se for personalizado (mantém o que já existia
         // em vez de gravar o nome obtido da API automaticamente).
@@ -1501,7 +1512,11 @@ impl App {
                         self.player.play_file(path);
                     }
                 }
-                Msg::CookiesImported { path, browser } => {
+                Msg::CookiesImported {
+                    path,
+                    browser,
+                    warning,
+                } => {
                     self.busy = false;
                     match YtMusicClient::with_cookies(&path) {
                         Ok(client) => {
@@ -1510,8 +1525,14 @@ impl App {
                             self.authentication = AuthenticationState::Authenticated;
                             self.account_name = None;
                             let name = browser.split(':').next().unwrap_or(&browser);
-                            self.status =
-                                format!("✔ Conectado via {name}. Carregando suas músicas…");
+                            self.status = match warning {
+                                Some(w) => format!(
+                                    "✔ Conectado via {name} (⚠ {w}). Carregando suas músicas…"
+                                ),
+                                None => {
+                                    format!("✔ Conectado via {name}. Carregando suas músicas…")
+                                }
+                            };
                             self.load_account();
                             self.load_home();
                             self.load_library();
@@ -1597,7 +1618,7 @@ impl App {
         Self {
             running: true,
             client: YtMusicClient::new(),
-            player: AudioPlayer::new().expect("audio thread should start"),
+            player: AudioPlayer::new().0,
             visualizer: SpectrumAnalyzer::new(),
             tx,
             rx,

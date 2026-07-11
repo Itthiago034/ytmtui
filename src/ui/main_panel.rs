@@ -420,6 +420,11 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     if app.home.is_empty() && app.recent.is_empty() {
         let text = if app.busy() {
             format!("{} Loading recommendations…", app.spinner())
+        } else if let Some(err) = &app.home_error {
+            // No cache to fall back on: the empty state itself carries the
+            // error and the retry hint, in place of the generic messages
+            // below.
+            format!("{err} — Press R to retry.")
         } else if app.is_authenticated() {
             "No recommendations are available. Press / to search.".to_string()
         } else {
@@ -456,6 +461,24 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Cached shelves exist: a failed background refresh never replaces them
+    // (see `Msg::HomeFailed`) — it only earns a small retryable banner above
+    // the still-visible content, instead of blanking the whole Home screen.
+    let list_area = if app.home_error.is_some() && area.height > 1 {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        let banner = Paragraph::new(Span::styled(
+            "⚠ Couldn't refresh recommendations — press R to retry",
+            Style::default().fg(theme.player),
+        ));
+        f.render_widget(banner, rows[0]);
+        rows[1]
+    } else {
+        area
+    };
+
     let selected = app.list_state.selected();
     let mut items: Vec<ListItem> = Vec::new();
     let mut shadow_selected: Option<usize> = None;
@@ -466,10 +489,10 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     if !app.recent.is_empty() {
         items.push(ListItem::new(section_header(
             "Recently played",
-            area.width as usize,
+            list_area.width as usize,
             theme,
         )));
-        let track_width = area.width.saturating_sub(2) as usize;
+        let track_width = list_area.width.saturating_sub(2) as usize;
         let current_id = app.current.as_ref().map(|t| t.video_id.clone());
         for (i, t) in app.recent.iter().enumerate() {
             if selected == Some(flat_idx) {
@@ -484,7 +507,7 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     for section in &app.home {
         items.push(ListItem::new(section_header(
             &section.title,
-            area.width as usize,
+            list_area.width as usize,
             theme,
         )));
         for p in &section.items {
@@ -501,7 +524,7 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     // "shadow" ListState remaps it to the right row before rendering.
     let mut shadow_state = app.list_state.clone();
     shadow_state.select(shadow_selected);
-    render_list_borderless(f, app, area, items, &shadow_state);
+    render_list_borderless(f, app, list_area, items, &shadow_state);
 }
 
 /// Section header row: accent title followed by a dim rule to the edge,
@@ -838,6 +861,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ("", ""),
         ("General", ""),
         ("  ?", "this help"),
+        ("  R", "refresh Home and Library"),
         ("  q  or  Ctrl+C", "quit"),
     ];
     let lines: Vec<Line> = rows

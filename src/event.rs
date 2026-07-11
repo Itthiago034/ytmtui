@@ -68,6 +68,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         // Modos de reprodução.
         KeyCode::Char('z') => app.toggle_shuffle(),
         KeyCode::Char('r') => app.cycle_repeat(),
+        // Recarrega Home + Biblioteca manualmente (mesmo caminho do sync de
+        // fundo periódico) — sobretudo o jeito de sair do banner de erro da
+        // Home sem esperar o próximo ciclo automático.
+        KeyCode::Char('R') => {
+            app.sync_home_and_library();
+            app.status = "Atualizando recomendações e biblioteca…".to_string();
+        }
         // Adiciona a faixa selecionada à fila.
         KeyCode::Char('a') => app.enqueue_selected(),
         // Gerência da fila (apenas com a seção Fila aberta e em foco).
@@ -295,5 +302,19 @@ mod tests {
         handle_key(&mut search, key(KeyCode::Right));
         assert_eq!(search.focus, Focus::Main);
         assert_eq!(search.list_state.selected(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn shift_r_triggers_a_home_and_library_reload() {
+        let mut app = App::new_for_tests();
+        assert!(!app.is_loading(), "idle before the key is pressed");
+
+        handle_key(&mut app, key(KeyCode::Char('R')));
+
+        assert!(
+            app.is_loading(),
+            "R kicks off the same reload as the background sync"
+        );
+        assert!(app.status.contains("Atualizando"));
     }
 }

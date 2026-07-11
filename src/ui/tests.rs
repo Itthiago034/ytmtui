@@ -347,6 +347,56 @@ fn home_section_highlight_lands_on_the_right_item_despite_header_rows() {
 }
 
 #[test]
+fn home_shows_a_retry_banner_above_cached_shelves_when_a_refresh_fails() {
+    use crate::models::{HomeSection, Playlist};
+
+    let mut app = App::new_for_tests();
+    app.focus = Focus::Main;
+    app.home = vec![HomeSection {
+        title: "Quick picks".to_string(),
+        items: vec![Playlist {
+            browse_id: "VL1".to_string(),
+            title: "Cached pick".to_string(),
+            ..Default::default()
+        }],
+    }];
+    app.home_error = Some("Could not load recommendations: sem rede".to_string());
+
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+
+    assert!(
+        content.contains("press R to retry"),
+        "retry banner visible above the cache:\n{content}"
+    );
+    // The cached shelf keeps rendering underneath the banner.
+    assert!(
+        content.contains("Cached pick"),
+        "cached shelf still visible during the failed refresh:\n{content}"
+    );
+}
+
+#[test]
+fn home_empty_state_shows_the_error_and_the_retry_hint_without_a_cache() {
+    let mut app = App::new_for_tests();
+    app.focus = Focus::Main;
+    app.home_error = Some("Could not load recommendations: sem rede".to_string());
+    assert!(app.home.is_empty() && app.recent.is_empty());
+
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+
+    assert!(
+        content.contains("sem rede"),
+        "empty-state surfaces the error message:\n{content}"
+    );
+    assert!(
+        content.contains("Press R to retry"),
+        "empty-state hints at the retry key:\n{content}"
+    );
+}
+
+#[test]
 fn search_input_line_appears_while_typing() {
     let mut app = App::new_for_tests();
     app.input_mode = true;

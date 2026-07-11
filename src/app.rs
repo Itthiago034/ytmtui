@@ -140,6 +140,11 @@ pub enum Msg {
     SearchResults(SearchResults),
     LibraryPlaylists(Vec<Playlist>),
     HomeSections(Vec<crate::models::HomeSection>),
+    /// `load_home` failed with something other than `SessionExpired`. Kept
+    /// distinct from the generic `Error` so its handler can leave `self.home`
+    /// untouched — cached shelves stay on screen instead of the whole Home
+    /// screen flipping to an error message.
+    HomeFailed(String),
     RadioTracks(Vec<Track>),
     AccountName(Option<String>),
     PlaylistTracks {
@@ -270,6 +275,12 @@ pub struct App {
     /// Últimas faixas reproduzidas (histórico local em `recent.json`),
     /// exibidas como o primeiro grupo da tela Início e tocáveis com Enter.
     pub recent: Vec<Track>,
+    /// Set when the last `load_home` failed with something other than an
+    /// expired session; cleared on the next successful load or the next
+    /// loading attempt. Cached `home`/`recent` shelves are never cleared by
+    /// a failed refresh, so this only drives the small retry banner/empty
+    /// state — it never hides content that's still valid.
+    pub home_error: Option<String>,
     /// videoIds curtidos nesta sessão (para alternar curtir/descurtir).
     pub liked: std::collections::HashSet<String>,
     /// Autoplay: continuar com uma rádio quando a fila termina.
@@ -418,6 +429,7 @@ impl App {
             library: Vec::new(),
             home: Vec::new(),
             recent: load_recent(),
+            home_error: None,
             liked: std::collections::HashSet::new(),
             autoplay: true,
             pending_radio_seed: None,
@@ -540,6 +552,9 @@ impl App {
         if !self.provider.capabilities().home {
             return;
         }
+        // A new attempt supersedes whatever error the last one left behind:
+        // the loading state itself is the feedback while it's in flight.
+        self.home_error = None;
         self.begin_task();
         let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
@@ -548,11 +563,13 @@ impl App {
                 Ok(sections) => {
                     let _ = tx.send(Msg::HomeSections(sections));
                 }
+                Err(ProviderError::SessionExpired) => {
+                    let _ = tx.send(Msg::SessionExpired);
+                }
                 Err(error) => {
-                    let _ = tx.send(client_error_message(
-                        "Could not load recommendations",
-                        error,
-                    ));
+                    let _ = tx.send(Msg::HomeFailed(format!(
+                        "Could not load recommendations: {error}"
+                    )));
                 }
             }
         });
@@ -1637,6 +1654,7 @@ impl App {
                 }
                 Msg::HomeSections(sections) => {
                     self.finish_task();
+                    self.home_error = None;
                     let was_empty = self.home.is_empty();
                     let previous_key = (self.section == Section::Inicio)
                         .then(|| self.list_state.selected())
@@ -1657,6 +1675,14 @@ impl App {
                         self.list_state
                             .select((count > 0).then_some(new_index).flatten());
                     }
+                }
+                Msg::HomeFailed(message) => {
+                    self.finish_task();
+                    self.home_error = Some(message);
+                    // `self.home`/`self.recent` are deliberately left alone:
+                    // whatever shelves were already cached stay on screen,
+                    // per the empty-state/banner split in `draw_home_sections`.
+                    self.status = "⚠ Falha ao carregar recomendações — R recarrega.".to_string();
                 }
                 Msg::RadioTracks(tracks) => {
                     if tracks.is_empty() {
@@ -1913,6 +1939,7 @@ impl App {
             home: Vec::new(),
             // Sem leitura do recent.json real: histórico começa vazio.
             recent: Vec::new(),
+            home_error: None,
             liked: std::collections::HashSet::new(),
             autoplay: true,
             pending_radio_seed: None,
@@ -2670,5 +2697,58 @@ mod tests {
         let message =
             client_error_message("Could not load library", ProviderError::SessionExpired);
         assert!(matches!(message, Msg::SessionExpired));
+    }
+
+    #[test]
+    fn home_failed_preserves_cached_shelves_and_clears_the_spinner() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        app.begin_task();
+
+        app.tx
+            .send(Msg::HomeFailed("boom".to_string()))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.home.len(),
+            2,
+            "cached shelves survive a failed background refresh"
+        );
+        assert_eq!(app.home_error.as_deref(), Some("boom"));
+        assert!(!app.is_loading(), "the spinner is released on failure");
+        assert!(
+            app.status.contains('R'),
+            "status hints at the retry key: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn home_sections_success_clears_a_previous_error() {
+        let mut app = App::new_for_tests();
+        app.home_error = Some("boom".to_string());
+
+        app.tx.send(Msg::HomeSections(Vec::new())).unwrap();
+        app.drain_messages();
+
+        assert!(
+            app.home_error.is_none(),
+            "a successful load clears the stale error"
+        );
+    }
+
+    #[test]
+    fn load_home_without_the_home_capability_creates_no_task() {
+        let mut mock = crate::provider::mock::MockProvider::default();
+        mock.capabilities.home = false;
+        let mut app = App::with_provider(std::sync::Arc::new(mock));
+
+        app.load_home();
+
+        assert!(
+            !app.is_loading(),
+            "no capability means no task, hence no spinner"
+        );
     }
 }

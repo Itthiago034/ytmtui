@@ -105,6 +105,10 @@ impl HomeView {
         self.shelves.iter().map(|shelf| shelf.cards.len()).sum()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn flat_card(&self, index: usize) -> Option<&HomeCard> {
         self.shelves
             .iter()

@@ -128,6 +128,34 @@ async fn provider_errors_surface_in_the_status_bar_and_clear_the_spinner() {
 }
 
 #[tokio::test]
+async fn a_failed_home_refresh_keeps_cached_shelves_and_sets_home_error() {
+    let mut mock = MockProvider::authenticated();
+    mock.fail_with = Some("sem rede".to_string());
+    let mut app = App::with_provider(Arc::new(mock));
+    // Simulates shelves left over from an earlier successful load.
+    app.home = vec![HomeSection {
+        title: "Quick picks".to_string(),
+        items: vec![playlist("VL1", "Mix 1")],
+    }];
+
+    app.load_home();
+    assert!(app.is_loading(), "the refresh turns on the spinner");
+    drain_until_idle(&mut app).await;
+
+    assert_eq!(
+        app.home.len(),
+        1,
+        "cached shelves survive a failed background refresh"
+    );
+    assert_eq!(app.home[0].items[0].title, "Mix 1");
+    assert!(
+        app.home_error.is_some(),
+        "the failure is recorded for the retry banner"
+    );
+    assert!(!app.is_loading(), "spinner released after the failure");
+}
+
+#[tokio::test]
 async fn an_expired_session_from_any_provider_flips_the_auth_state() {
     let mut mock = MockProvider::authenticated();
     mock.expire_session = true;

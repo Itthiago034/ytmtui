@@ -110,48 +110,57 @@ pub fn detect_browsers(home: &Path) -> Vec<String> {
 /// Exports YouTube Music cookies from `browser` into `dest` (Netscape
 /// format) using `yt-dlp --cookies-from-browser` — the same recipe as
 /// `scripts/refresh-cookies.sh`, but callable from inside the app. Writes to
-/// a temp file first and only replaces `dest` after confirming the export
-/// contains a `SAPISID` cookie (what the API authentication derives from).
-pub fn export_browser_cookies(browser: &str, dest: &Path) -> Result<(), String> {
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
+/// a uniquely-named temp file first (via `tempfile`, so two concurrent
+/// instances can't race on the same path) and only replaces `dest` after
+/// confirming the export contains a `SAPISID` cookie (what the API
+/// authentication derives from).
+///
+/// Returns `Ok(Some(warning))` when the export succeeded but the cookie
+/// file's permissions could not be restricted to the owner — the caller
+/// should still treat this as success, just surface the warning, since the
+/// session secret is usable either way.
+pub fn export_browser_cookies(browser: &str, dest: &Path) -> Result<Option<String>, String> {
+    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
+    let tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|e| format!("could not create temp file: {e}"))?;
+
+    let output = std::process::Command::new("yt-dlp")
+        .arg("--cookies-from-browser")
+        .arg(browser)
+        .arg("--cookies")
+        .arg(tmp.path())
+        .args(["--skip-download", "--no-warnings", "-O", "%(title)s"])
+        // Any watchable URL works; visiting one is what makes yt-dlp
+        // load the browser jar and save it to --cookies on exit.
+        .arg("https://www.youtube.com/watch?v=jNQXAC9IVRw")
+        .output()
+        .map_err(|e| format!("could not run yt-dlp: {e}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(err.lines().last().unwrap_or("yt-dlp failed").to_string());
     }
-    let tmp = dest.with_extension(format!("import-{}.tmp", std::process::id()));
-    let result = (|| {
-        let output = std::process::Command::new("yt-dlp")
-            .arg("--cookies-from-browser")
-            .arg(browser)
-            .arg("--cookies")
-            .arg(&tmp)
-            .args(["--skip-download", "--no-warnings", "-O", "%(title)s"])
-            // Any watchable URL works; visiting one is what makes yt-dlp
-            // load the browser jar and save it to --cookies on exit.
-            .arg("https://www.youtube.com/watch?v=jNQXAC9IVRw")
-            .output()
-            .map_err(|e| format!("could not run yt-dlp: {e}"))?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err(err.lines().last().unwrap_or("yt-dlp failed").to_string());
-        }
-        let cookies = std::fs::read_to_string(&tmp)
-            .map_err(|e| format!("yt-dlp produced no cookie file: {e}"))?;
-        if !cookies.contains("SAPISID") {
-            return Err(format!(
-                "no YouTube session in {browser} — sign in to music.youtube.com there first"
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, dest).map_err(|e| format!("could not save cookies: {e}"))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let cookies = std::fs::read_to_string(tmp.path())
+        .map_err(|e| format!("yt-dlp produced no cookie file: {e}"))?;
+    if !cookies.contains("SAPISID") {
+        return Err(format!(
+            "no YouTube session in {browser} — sign in to music.youtube.com there first"
+        ));
     }
-    result
+
+    #[cfg(unix)]
+    let permission_warning = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600))
+            .err()
+            .map(|e| format!("could not restrict cookie file permissions: {e}"))
+    };
+    #[cfg(not(unix))]
+    let permission_warning = None;
+
+    tmp.persist(dest)
+        .map_err(|e| format!("could not save cookies: {e}"))?;
+    Ok(permission_warning)
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ Get from a fresh machine to your first track in a few minutes.
 | `yt-dlp` | Resolving YouTube Music audio | Essential for playback |
 | `ffmpeg` | Remuxing AAC/M4A to ADTS | Essential for reliable playback |
 | `deno` | Recent `yt-dlp` JavaScript challenges | Recommended |
-| Rust 1.75+ | Building from source | Not needed for prebuilt releases |
+| Rust 1.88+ | Building from source | Not needed for prebuilt releases |
 | ALSA dev libs | Linux audio builds | Usually `libasound2-dev` on Debian/Ubuntu |
 
 On macOS and Windows, `rodio` uses the native audio stack. On Linux, make

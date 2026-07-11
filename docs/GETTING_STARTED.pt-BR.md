@@ -11,7 +11,7 @@ Saia de uma máquina limpa para a primeira música tocando em poucos minutos.
 | `yt-dlp` | Resolver o áudio do YouTube Music | Essencial para reprodução |
 | `ffmpeg` | Remuxar AAC/M4A para ADTS | Essencial para playback confiável |
 | `deno` | Desafios JavaScript recentes do `yt-dlp` | Recomendado |
-| Rust 1.75+ | Compilar do código-fonte | Não precisa para releases prontas |
+| Rust 1.88+ | Compilar do código-fonte | Não precisa para releases prontas |
 | libs ALSA dev | Builds de áudio no Linux | Geralmente `libasound2-dev` no Debian/Ubuntu |
 
 No macOS e Windows, o `rodio` usa a pilha de áudio nativa. No Linux, confirme

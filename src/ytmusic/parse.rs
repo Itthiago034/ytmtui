@@ -223,6 +223,23 @@ pub fn extract_continuation(value: &Value) -> Option<String> {
     None
 }
 
+/// Escolhe, entre os segmentos de metadado após o artista (segmento 0), o
+/// primeiro que parece um álbum — descartando duração (`"3:45"`) e contagem
+/// de visualizações (`"1.2M views"`/`"visualizações"`), que aparecem no
+/// lugar do álbum em uploads de usuário sem álbum associado. Usado tanto
+/// para `playlistPanelVideoRenderer` (rádio/fila) quanto para
+/// `musicResponsiveListItemRenderer` (listas/busca), cujos segmentos vêm
+/// como `&str` e `String` respectivamente.
+pub fn pick_album<S: AsRef<str>>(segments: &[S]) -> String {
+    segments
+        .iter()
+        .skip(1)
+        .map(AsRef::as_ref)
+        .find(|s| !s.contains(':') && !s.ends_with("views") && !s.contains("visualiz"))
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Converte um `playlistPanelVideoRenderer` (item de fila/rádio) em `Track`.
 pub fn parse_panel_video(r: &Value) -> Option<crate::ytmusic::Track> {
     let video_id = r
@@ -245,12 +262,7 @@ pub fn parse_panel_video(r: &Value) -> Option<crate::ytmusic::Track> {
         .unwrap_or_default();
     let segments: Vec<&str> = byline.split('•').map(|s| s.trim()).collect();
     let artist = segments.first().map(|s| s.to_string()).unwrap_or_default();
-    let album = segments
-        .iter()
-        .skip(1)
-        .find(|s| !s.contains(':') && !s.ends_with("views") && !s.contains("visualiz"))
-        .map(|s| s.to_string())
-        .unwrap_or_default();
+    let album = pick_album(&segments);
     let duration = r.get("lengthText").map(join_runs).unwrap_or_default();
     Some(crate::ytmusic::Track {
         video_id,

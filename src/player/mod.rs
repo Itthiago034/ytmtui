@@ -7,12 +7,12 @@
 
 use anyhow::{anyhow, Result};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use rodio::{Decoder, OutputStream, Sink};
 
@@ -28,6 +28,14 @@ const SAMPLE_CHANNEL_CAPACITY: usize = 8;
 /// Nome da thread de áudio. O hook de panic em `main.rs` usa esse nome para
 /// ignorar panics capturados aqui (evita bagunçar o terminal em modo raw).
 pub const AUDIO_THREAD_NAME: &str = "ytmtui-audio";
+
+/// Tempo máximo para o download de áudio via `yt-dlp` antes de matar o
+/// processo e desistir, evitando travar a reprodução indefinidamente em caso
+/// de instabilidade de rede.
+const YT_DLP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Tempo máximo para o remux/transcode via `ffmpeg`.
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Verifica se um binário externo está disponível no `PATH`.
 ///
@@ -79,6 +87,15 @@ pub struct SharedState {
     pub active: bool,
 }
 
+/// Trava o estado compartilhado, recuperando de um mutex envenenado em vez de
+/// propagar o panic: um panic isolado enquanto a trava está ativa não deveria
+/// derrubar todas as chamadas seguintes de reprodução.
+fn lock_state(state: &Mutex<SharedState>) -> MutexGuard<'_, SharedState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Handle público do player usado pela aplicação.
 pub struct AudioPlayer {
     tx: Sender<Cmd>,
@@ -92,26 +109,36 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     /// Inicializa a thread de áudio e retorna o handle.
-    pub fn new() -> Result<Self> {
+    ///
+    /// Nunca falha: se o SO não conseguir criar a thread de áudio, o handle
+    /// ainda é construído (comandos enviados a ele simplesmente não terão
+    /// efeito, já que a ponta receptora foi descartada junto com a thread),
+    /// e a mensagem de aviso retornada explica o que aconteceu para que o
+    /// chamador possa exibi-la em vez de derrubar o app inteiro.
+    pub fn new() -> (Self, Option<String>) {
         let (tx, rx) = mpsc::channel::<Cmd>();
         let (sample_tx, sample_rx) = mpsc::sync_channel::<SampleChunk>(SAMPLE_CHANNEL_CAPACITY);
         let state = Arc::new(Mutex::new(SharedState::default()));
         let state_thread = state.clone();
 
-        std::thread::Builder::new()
+        let warning = std::thread::Builder::new()
             .name(AUDIO_THREAD_NAME.to_string())
             .spawn(move || {
                 audio_thread(rx, state_thread, sample_tx);
             })
-            .expect("falha ao iniciar a thread de áudio");
+            .err()
+            .map(|e| format!("Não foi possível iniciar o áudio: {e}"));
 
-        Ok(Self {
-            tx,
-            state,
-            volume: 0.8,
-            paused: false,
-            sample_rx,
-        })
+        (
+            Self {
+                tx,
+                state,
+                volume: 0.8,
+                paused: false,
+                sample_rx,
+            },
+            warning,
+        )
     }
 
     /// Drena os lotes de amostras decodificadas acumulados desde a última
@@ -128,7 +155,7 @@ impl AudioPlayer {
     pub fn play_file(&mut self, path: PathBuf) {
         self.paused = false;
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock_state(&self.state);
             s.finished = false;
             s.active = true;
             s.position = Duration::ZERO;
@@ -156,7 +183,7 @@ impl AudioPlayer {
     pub fn stop(&mut self) {
         self.paused = false;
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock_state(&self.state);
             s.active = false;
             s.finished = false;
             s.position = Duration::ZERO;
@@ -186,7 +213,7 @@ impl AudioPlayer {
     pub fn seek_forward(&mut self, secs: u64) {
         let target = self.position() + Duration::from_secs(secs);
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock_state(&self.state);
             s.position = target;
         }
         let _ = self.tx.send(Cmd::Seek(target));
@@ -196,7 +223,7 @@ impl AudioPlayer {
     pub fn seek_backward(&mut self, secs: u64) {
         let target = self.position().saturating_sub(Duration::from_secs(secs));
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock_state(&self.state);
             s.position = target;
         }
         let _ = self.tx.send(Cmd::Seek(target));
@@ -212,12 +239,12 @@ impl AudioPlayer {
 
     /// Posição atual da faixa.
     pub fn position(&self) -> Duration {
-        self.state.lock().unwrap().position
+        lock_state(&self.state).position
     }
 
     /// Retorna `true` se a faixa terminou (e reseta a flag).
     pub fn take_finished(&self) -> bool {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_state(&self.state);
         if s.finished {
             s.finished = false;
             true
@@ -275,7 +302,7 @@ fn audio_thread(
                         // mark the track as finished so the app advances or
                         // surfaces an error instead of appearing stuck on
                         // "playing" forever.
-                        let mut s = state.lock().unwrap();
+                        let mut s = lock_state(&state);
                         s.active = false;
                         s.finished = true;
                     }
@@ -306,7 +333,7 @@ fn audio_thread(
                 if let Some(s) = &sink {
                     // `try_seek` pode falhar para alguns formatos; ignoramos o erro.
                     if s.try_seek(pos).is_ok() {
-                        let mut st = state.lock().unwrap();
+                        let mut st = lock_state(&state);
                         st.position = pos;
                     }
                 }
@@ -317,7 +344,7 @@ fn audio_thread(
 
         // Atualiza posição e detecta fim da faixa.
         if let Some(s) = &sink {
-            let mut st = state.lock().unwrap();
+            let mut st = lock_state(&state);
             st.position = s.get_pos();
             if st.active && s.empty() {
                 st.finished = true;
@@ -387,12 +414,13 @@ fn prepare_for_playback(src: PathBuf) -> PathBuf {
 
     // 1) Remux sem re-encode para ADTS (rápido).
     let aac = src.with_extension("aac");
-    let copied = Command::new("ffmpeg")
+    let mut copy_cmd = Command::new("ffmpeg");
+    copy_cmd
         .args(["-y", "-loglevel", "error", "-i"])
         .arg(&src)
         .args(["-vn", "-c:a", "copy", "-f", "adts"])
-        .arg(&aac)
-        .status();
+        .arg(&aac);
+    let copied = status_with_timeout(&mut copy_cmd, FFMPEG_TIMEOUT);
     if matches!(copied, Ok(s) if s.success()) && file_is_non_empty(&aac) {
         let _ = std::fs::remove_file(&src);
         return aac;
@@ -401,12 +429,13 @@ fn prepare_for_playback(src: PathBuf) -> PathBuf {
 
     // 2) Fallback: transcodifica para mp3 (cobre opus/webm).
     let mp3 = src.with_extension("mp3");
-    let encoded = Command::new("ffmpeg")
+    let mut encode_cmd = Command::new("ffmpeg");
+    encode_cmd
         .args(["-y", "-loglevel", "error", "-i"])
         .arg(&src)
         .args(["-vn", "-acodec", "libmp3lame", "-q:a", "2"])
-        .arg(&mp3)
-        .status();
+        .arg(&mp3);
+    let encoded = status_with_timeout(&mut encode_cmd, FFMPEG_TIMEOUT);
     if matches!(encoded, Ok(s) if s.success()) && file_is_non_empty(&mp3) {
         let _ = std::fs::remove_file(&src);
         return mp3;
@@ -419,6 +448,67 @@ fn prepare_for_playback(src: PathBuf) -> PathBuf {
 
 fn file_is_non_empty(p: &std::path::Path) -> bool {
     std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
+}
+
+/// Lê um stream até o fim em uma thread separada, para não travar a leitura
+/// dos pipes de stdout/stderr enquanto o processo continua rodando.
+fn read_to_end_in_thread<R: Read + Send + 'static>(mut r: R) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = r.read_to_end(&mut buf);
+        buf
+    })
+}
+
+/// Como `Command::output()`, mas mata o processo e retorna erro de timeout
+/// se ele não terminar dentro de `timeout` — evita travar a reprodução
+/// indefinidamente quando `yt-dlp`/`ffmpeg` ficam presos numa chamada de rede.
+fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Result<Output> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let stdout_handle = child.stdout.take().map(read_to_end_in_thread);
+    let stderr_handle = child.stderr.take().map(read_to_end_in_thread);
+
+    let status = wait_with_timeout(&mut child, timeout)?;
+
+    let stdout = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Como `Command::status()`, mas com o mesmo limite de tempo de
+/// [`output_with_timeout`].
+fn status_with_timeout(cmd: &mut Command, timeout: Duration) -> std::io::Result<ExitStatus> {
+    let mut child = cmd.spawn()?;
+    wait_with_timeout(&mut child, timeout)
+}
+
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<ExitStatus> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("comando excedeu o tempo limite de {timeout:?}"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Resolve e baixa o áudio de uma faixa do YouTube Music para um arquivo
@@ -469,8 +559,7 @@ pub fn download_audio(watch_url: &str, video_id: &str, cookies: Option<&str>) ->
         cmd.arg("--cookies").arg(c);
     }
 
-    let output = cmd
-        .output()
+    let output = output_with_timeout(&mut cmd, YT_DLP_TIMEOUT)
         .map_err(|e| anyhow!("não foi possível executar o yt-dlp ({e}). Ele está instalado?"))?;
 
     if !output.status.success() {
@@ -519,4 +608,88 @@ pub fn download_audio(watch_url: &str, video_id: &str, cookies: Option<&str>) ->
     newest
         .map(|(p, _)| prepare_for_playback(p))
         .ok_or_else(|| anyhow!("arquivo de áudio não encontrado após o download"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_playable_ext_accepts_only_direct_decoder_formats() {
+        for ext in ["aac", "mp3", "ogg", "oga", "flac", "wav"] {
+            assert!(is_playable_ext(ext), "{ext} should be playable directly");
+        }
+        for ext in ["m4a", "mp4", "webm", "opus", "part", ""] {
+            assert!(!is_playable_ext(ext), "{ext} should need remuxing first");
+        }
+    }
+
+    #[test]
+    fn find_cached_matches_by_stem_and_requires_a_playable_extension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("abc123.mp3"), b"fake audio").unwrap();
+
+        assert_eq!(
+            find_cached(dir.path(), "abc123"),
+            Some(dir.path().join("abc123.mp3"))
+        );
+        assert_eq!(find_cached(dir.path(), "missing"), None);
+
+        // A `.part`/`.ytdl` leftover from an interrupted download must not
+        // be picked up as a finished, playable file.
+        std::fs::write(dir.path().join("def456.part"), b"partial").unwrap();
+        assert_eq!(find_cached(dir.path(), "def456"), None);
+    }
+
+    #[test]
+    fn lock_state_recovers_from_a_poisoned_mutex() {
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let poisoned = state.clone();
+        // Panicking while holding the lock poisons the mutex.
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("simulated panic while holding the lock");
+        })
+        .join();
+
+        // A plain `.lock().unwrap()` would panic here; `lock_state` must not.
+        let mut guard = lock_state(&state);
+        guard.position = Duration::from_secs(1);
+        drop(guard);
+        assert_eq!(lock_state(&state).position, Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_with_timeout_captures_stdout_of_a_fast_command() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo hello"]);
+        let output = output_with_timeout(&mut cmd, Duration::from_secs(5)).expect("should finish");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_with_timeout_kills_a_command_that_overruns() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 5"]);
+        let start = Instant::now();
+        let err =
+            output_with_timeout(&mut cmd, Duration::from_millis(100)).expect_err("should time out");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the overrunning process should be killed instead of waited out"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_with_timeout_reports_the_exit_status_of_a_fast_command() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let status = status_with_timeout(&mut cmd, Duration::from_secs(5)).expect("should finish");
+        assert!(status.success());
+    }
 }

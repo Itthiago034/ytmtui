@@ -3,6 +3,7 @@
 pub mod app;
 pub mod config;
 pub mod event;
+pub(crate) mod fs_util;
 pub mod lyrics;
 pub mod player;
 pub mod theme;

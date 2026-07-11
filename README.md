@@ -99,7 +99,7 @@ runtime dependencies are missing. For source builds and first-run guidance, see
 | `yt-dlp` | Resolves YouTube Music audio streams |
 | `ffmpeg` | Remuxes AAC/M4A for reliable playback |
 | `deno` | Helps recent `yt-dlp` JavaScript challenges |
-| Rust 1.75+ | Required only when building from source |
+| Rust 1.88+ | Required only when building from source |
 | ALSA dev libs | Needed for Linux source builds with audio |
 
 ## Development

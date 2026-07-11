@@ -697,4 +697,45 @@ mod tests {
         let error = classify_status(false, StatusCode::FORBIDDEN, EP_BROWSE);
         assert!(matches!(error, YtMusicError::HttpStatus { .. }));
     }
+
+    #[test]
+    fn too_many_requests_is_classified_as_rate_limited() {
+        let error = classify_status(true, StatusCode::TOO_MANY_REQUESTS, EP_SEARCH);
+        assert!(matches!(error, YtMusicError::RateLimited { .. }));
+        let error = classify_status(false, StatusCode::TOO_MANY_REQUESTS, EP_SEARCH);
+        assert!(matches!(error, YtMusicError::RateLimited { .. }));
+    }
+
+    fn err(endpoint: &str) -> YtMusicError {
+        YtMusicError::HttpStatus {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            endpoint: endpoint.to_string(),
+        }
+    }
+
+    #[test]
+    fn first_error_picks_the_first_err_in_order() {
+        // Regression test: the original chain built with `.or()` omitted one
+        // of the four results, so a failure only in that position could
+        // reach an `unwrap()` on `None`. Every position is exercised here.
+        let picked =
+            first_error::<(), (), (), ()>(Err(err("songs")), Ok(()), Ok(()), Err(err("playlists")));
+        assert!(
+            matches!(picked, Some(YtMusicError::HttpStatus { endpoint, .. }) if endpoint == "songs")
+        );
+
+        let picked = first_error::<(), (), (), ()>(Ok(()), Ok(()), Err(err("albums")), Ok(()));
+        assert!(
+            matches!(picked, Some(YtMusicError::HttpStatus { endpoint, .. }) if endpoint == "albums")
+        );
+
+        let picked = first_error::<(), (), (), ()>(Ok(()), Ok(()), Ok(()), Err(err("playlists")));
+        assert!(
+            matches!(picked, Some(YtMusicError::HttpStatus { endpoint, .. }) if endpoint == "playlists")
+        );
+
+        let picked: Option<YtMusicError> =
+            first_error::<(), (), (), ()>(Ok(()), Ok(()), Ok(()), Ok(()));
+        assert!(picked.is_none());
+    }
 }

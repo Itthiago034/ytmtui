@@ -609,3 +609,87 @@ pub fn download_audio(watch_url: &str, video_id: &str, cookies: Option<&str>) ->
         .map(|(p, _)| prepare_for_playback(p))
         .ok_or_else(|| anyhow!("arquivo de áudio não encontrado após o download"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_playable_ext_accepts_only_direct_decoder_formats() {
+        for ext in ["aac", "mp3", "ogg", "oga", "flac", "wav"] {
+            assert!(is_playable_ext(ext), "{ext} should be playable directly");
+        }
+        for ext in ["m4a", "mp4", "webm", "opus", "part", ""] {
+            assert!(!is_playable_ext(ext), "{ext} should need remuxing first");
+        }
+    }
+
+    #[test]
+    fn find_cached_matches_by_stem_and_requires_a_playable_extension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("abc123.mp3"), b"fake audio").unwrap();
+
+        assert_eq!(
+            find_cached(dir.path(), "abc123"),
+            Some(dir.path().join("abc123.mp3"))
+        );
+        assert_eq!(find_cached(dir.path(), "missing"), None);
+
+        // A `.part`/`.ytdl` leftover from an interrupted download must not
+        // be picked up as a finished, playable file.
+        std::fs::write(dir.path().join("def456.part"), b"partial").unwrap();
+        assert_eq!(find_cached(dir.path(), "def456"), None);
+    }
+
+    #[test]
+    fn lock_state_recovers_from_a_poisoned_mutex() {
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let poisoned = state.clone();
+        // Panicking while holding the lock poisons the mutex.
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("simulated panic while holding the lock");
+        })
+        .join();
+
+        // A plain `.lock().unwrap()` would panic here; `lock_state` must not.
+        let mut guard = lock_state(&state);
+        guard.position = Duration::from_secs(1);
+        drop(guard);
+        assert_eq!(lock_state(&state).position, Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_with_timeout_captures_stdout_of_a_fast_command() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo hello"]);
+        let output = output_with_timeout(&mut cmd, Duration::from_secs(5)).expect("should finish");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_with_timeout_kills_a_command_that_overruns() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 5"]);
+        let start = Instant::now();
+        let err =
+            output_with_timeout(&mut cmd, Duration::from_millis(100)).expect_err("should time out");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the overrunning process should be killed instead of waited out"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_with_timeout_reports_the_exit_status_of_a_fast_command() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let status = status_with_timeout(&mut cmd, Duration::from_secs(5)).expect("should finish");
+        assert!(status.success());
+    }
+}

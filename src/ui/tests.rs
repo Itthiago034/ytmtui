@@ -37,6 +37,26 @@ fn text(buffer: &Buffer) -> String {
     rows(buffer).join("\n")
 }
 
+/// Finds the (x, y) of the first cell where `needle` starts, matching
+/// consecutive cells directly rather than byte-offsets into a joined
+/// `String` (which would misalign with columns behind any multi-byte
+/// preceding cell).
+fn find_cell(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    let chars: Vec<char> = needle.chars().collect();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let matches = chars.iter().enumerate().all(|(i, c)| {
+                let cx = x + i as u16;
+                cx < buffer.area.width && buffer[(cx, y)].symbol() == c.to_string()
+            });
+            if matches {
+                return (x, y);
+            }
+        }
+    }
+    panic!("'{needle}' not found in rendered buffer");
+}
+
 fn track(title: &str, artist: &str, duration: &str, duration_secs: u64, id: &str) -> Track {
     Track {
         video_id: id.to_string(),
@@ -242,14 +262,19 @@ fn selection_highlight_and_scrollbar_stay_visible() {
 fn home_shows_recent_tracks_group_and_search_shows_mixed_groups() {
     use crate::models::{Artist, Playlist};
 
-    // Home: local history renders as the first group.
+    // Home: local history renders as the first group. Rendered narrow (below
+    // the grid's width threshold) so this exercises the flat-list mode,
+    // whose header wording predates (and differs from) the `HomeView` model
+    // the grid mode reads its shelf titles from ("Continue listening" — see
+    // `home_grid_shows_two_shelves_side_by_side_with_a_selected_card_badge`
+    // below for that wording in grid mode).
     let mut app = App::new_for_tests();
     app.focus = Focus::Main;
     app.recent = vec![track("Yellow", "Coldplay", "4:27", 267, "vid1")];
-    let buffer = render(&mut app, 100, 30);
+    let buffer = render(&mut app, 50, 20);
     let content = text(&buffer);
     assert!(
-        content.contains("Recently played"),
+        content.contains("Continue listening"),
         "recent group header:\n{content}"
     );
     assert!(content.contains("Yellow"), "recent track row:\n{content}");
@@ -344,6 +369,192 @@ fn home_section_highlight_lands_on_the_right_item_despite_header_rows() {
         !row_is_highlighted(first_pick_row),
         "the non-selected item's row should not be highlighted"
     );
+}
+
+/// Two shelves, the first with two cards — enough to exercise the grid's
+/// side-by-side layout and its per-shelf vertical stacking.
+fn grid_home_app() -> App {
+    use crate::models::{HomeSection, Playlist};
+
+    let mut app = App::new_for_tests();
+    app.focus = Focus::Main;
+    app.home = vec![
+        HomeSection {
+            title: "Quick picks".to_string(),
+            items: vec![
+                Playlist {
+                    browse_id: "VL1".to_string(),
+                    title: "First collection".to_string(),
+                    subtitle: "Curated".to_string(),
+                    thumbnail: None,
+                    ..Default::default()
+                },
+                Playlist {
+                    browse_id: "VL2".to_string(),
+                    title: "Second collection".to_string(),
+                    subtitle: "Curated".to_string(),
+                    thumbnail: None,
+                    ..Default::default()
+                },
+            ],
+        },
+        HomeSection {
+            title: "Mixed for you".to_string(),
+            items: vec![Playlist {
+                browse_id: "VL3".to_string(),
+                title: "Third collection".to_string(),
+                subtitle: "Curated".to_string(),
+                thumbnail: None,
+                ..Default::default()
+            }],
+        },
+    ];
+    app
+}
+
+#[test]
+fn home_grid_shows_two_shelves_with_cards_side_by_side_in_wide_terminals() {
+    let mut app = grid_home_app();
+    app.list_state.select(Some(0));
+
+    // 100 columns wide comfortably clears the grid's width threshold once
+    // the nav column and the Home block's border are subtracted.
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+
+    assert!(
+        content.contains("Quick picks"),
+        "first shelf header:\n{content}"
+    );
+    assert!(
+        content.contains("Mixed for you"),
+        "second shelf header:\n{content}"
+    );
+
+    // Both cards of the first shelf land on the same buffer row — proof
+    // they're laid out side by side rather than stacked.
+    let buffer_rows = rows(&buffer);
+    let shared_row = buffer_rows
+        .iter()
+        .find(|r| r.contains("First collection") && r.contains("Second collection"));
+    assert!(
+        shared_row.is_some(),
+        "two cards side by side on the same row:\n{content}"
+    );
+
+    assert!(
+        app.home_columns > 1,
+        "grid mode computes columns > 1 for a wide panel, got {}",
+        app.home_columns
+    );
+}
+
+#[test]
+fn home_grid_highlights_the_selected_card_and_reveals_its_provider_badge() {
+    let mut app = grid_home_app();
+    // Select the shelf's first card ("First collection").
+    app.list_state.select(Some(0));
+
+    let buffer = render(&mut app, 100, 30);
+    let theme = app.theme();
+    let content = text(&buffer);
+
+    // The provider badge — the "metadata reveal" — appears exactly once,
+    // on the selected card only.
+    let badge = format!("◆ {}", app.provider.id());
+    assert_eq!(
+        content.matches(&badge).count(),
+        1,
+        "badge shown only on the selected card:\n{content}"
+    );
+
+    let (x, y) = find_cell(&buffer, "First collection");
+    assert_eq!(
+        buffer[(x, y)].bg,
+        theme.highlight_bg,
+        "selected card's title row is highlighted"
+    );
+    assert_eq!(
+        buffer[(x, y)].fg,
+        theme.accent,
+        "selected card's title uses the accent color"
+    );
+
+    let (x2, y2) = find_cell(&buffer, "Second collection");
+    assert_ne!(
+        buffer[(x2, y2)].bg,
+        theme.highlight_bg,
+        "the non-selected card in the same shelf is not highlighted"
+    );
+}
+
+#[test]
+fn narrow_home_keeps_the_flat_list_and_a_single_column_even_with_many_cards() {
+    let mut app = grid_home_app();
+    app.list_state.select(Some(0));
+
+    // Below the grid's width threshold: must render exactly as the old flat
+    // list did — one item per row, never two cards sharing a row.
+    let buffer = render(&mut app, 50, 20);
+    let content = text(&buffer);
+
+    assert!(
+        content.contains("First collection"),
+        "first item still visible:\n{content}"
+    );
+    let buffer_rows = rows(&buffer);
+    let shared_row = buffer_rows
+        .iter()
+        .find(|r| r.contains("First collection") && r.contains("Second collection"));
+    assert!(
+        shared_row.is_none(),
+        "narrow Home never puts two items on the same row:\n{content}"
+    );
+    assert_eq!(
+        app.home_columns, 1,
+        "narrow Home reports a single column for move_home's benefit"
+    );
+}
+
+#[test]
+fn home_error_banner_coexists_with_the_grid() {
+    let mut app = grid_home_app();
+    app.list_state.select(Some(0));
+    app.home_error = Some("Could not load recommendations: sem rede".to_string());
+
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+
+    assert!(
+        content.contains("press R to retry"),
+        "retry banner visible above the grid:\n{content}"
+    );
+    assert!(
+        content.contains("Quick picks") && content.contains("First collection"),
+        "cached shelves still render as a grid underneath the banner:\n{content}"
+    );
+    assert!(
+        app.home_columns > 1,
+        "the banner doesn't force a fallback to list mode"
+    );
+}
+
+#[test]
+fn home_grid_never_panics_on_minimal_areas() {
+    // The generic `very_small_terminals_never_panic` test never populates
+    // `home`/`recent`, so it never exercises the grid's card-drawing code
+    // (only the empty-state branch). This drives that code directly across
+    // a range of widths at/above the grid threshold and very short heights.
+    for width in [70u16, 80, 100] {
+        for height in [0u16, 1, 2, 3, 4, 8] {
+            let mut app = grid_home_app();
+            app.list_state.select(Some(0));
+            render(&mut app, width, height);
+
+            app.list_state.select(Some(2)); // last card, different shelf
+            render(&mut app, width, height);
+        }
+    }
 }
 
 #[test]

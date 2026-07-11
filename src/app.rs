@@ -275,6 +275,9 @@ pub struct App {
     /// Últimas faixas reproduzidas (histórico local em `recent.json`),
     /// exibidas como o primeiro grupo da tela Início e tocáveis com Enter.
     pub recent: Vec<Track>,
+    /// Persistir o histórico em disco? `true` só em [`App::new`];
+    /// [`App::with_provider`] mantém tudo em memória.
+    persist_recent: bool,
     /// Set when the last `load_home` failed with something other than an
     /// expired session; cleared on the next successful load or the next
     /// loading attempt. Cached `home`/`recent` shelves are never cleared by
@@ -429,6 +432,7 @@ impl App {
             library: Vec::new(),
             home: Vec::new(),
             recent: load_recent(),
+            persist_recent: true,
             home_error: None,
             liked: std::collections::HashSet::new(),
             autoplay: true,
@@ -646,6 +650,13 @@ impl App {
         self.recent.retain(|t| t.video_id != track.video_id);
         self.recent.insert(0, track.clone());
         self.recent.truncate(RECENT_CAP);
+        // Persistência só quando o app foi construído a partir do disco
+        // (`App::new`). `with_provider` (testes/injeção) fica em memória —
+        // um teste que toca uma faixa não pode escrever no recent.json
+        // real do usuário.
+        if !self.persist_recent {
+            return;
+        }
         let Some(path) = recent_path() else { return };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -1937,8 +1948,10 @@ impl App {
             search_mixed: false,
             library: Vec::new(),
             home: Vec::new(),
-            // Sem leitura do recent.json real: histórico começa vazio.
+            // Sem leitura do recent.json real: histórico começa vazio e
+            // nunca é gravado de volta (persist_recent = false).
             recent: Vec::new(),
+            persist_recent: false,
             home_error: None,
             liked: std::collections::HashSet::new(),
             autoplay: true,

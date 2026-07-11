@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Pa
 use ratatui::Frame;
 
 use crate::app::{App, Focus, Section};
+use crate::home::{HomeCard, HomeCardKind, HomeShelf};
 use crate::theme::Theme;
 
 /// Desenha o conteúdo do painel principal de acordo com a seção ativa.
@@ -337,7 +338,7 @@ const PLAYER_PANEL_HEIGHT: u16 = 7;
 /// there's enough height — splits the inside into a player panel (track
 /// title + spectrum bars) above the usual recommendations list. Short
 /// terminals degrade to just the list/message, exactly like before.
-fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
+fn draw_home(f: &mut Frame, app: &mut App, area: Rect, block: Block) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -409,55 +410,33 @@ const LOGO: [&str; 3] = [
 ];
 const TAGLINE: &str = "YouTube Music in your terminal";
 
-/// The recommendations list (or its empty/loading message), without a
-/// border of its own — the border now belongs to the whole Home area.
-/// Sections are shown as non-selectable header rows interleaved with their
-/// items in one flat scrollable list (v1 scope: full section contents, no
-/// per-section cap/"show more" — overflow uses the existing scrollbar,
-/// exactly like the old flat list did).
-fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
+/// The recommendations area (or its empty/loading message), without a
+/// border of its own — the border now belongs to the whole Home area. Wide
+/// areas (`width >= GRID_MIN_WIDTH`) render a 2D grid of cards per shelf;
+/// narrower ones degrade to the original flat list.
+///
+/// Below this width, the Home grid degrades to the flat list exactly as it
+/// rendered before this feature. Evaluated against the width this function
+/// actually receives (inside the Home border, after the nav column and any
+/// player panel split), not the raw terminal width.
+const GRID_MIN_WIDTH: u16 = 70;
+/// Minimum width of one card column in grid mode; the real per-card width
+/// stretches to `list_area.width / columns` so there's no ragged empty
+/// margin on the right (see `draw_home_grid`).
+const CARD_WIDTH: u16 = 24;
+/// Height (rows) of one card: title, subtitle, footer.
+const CARD_HEIGHT: u16 = 3;
+/// Height of one shelf block in grid mode: a 1-row header plus one row of
+/// cards. Vertical scrolling moves by whole shelves, so this is also the
+/// scroll granularity.
+const SHELF_HEIGHT: u16 = 1 + CARD_HEIGHT;
+
+fn draw_home_sections(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     if app.home.is_empty() && app.recent.is_empty() {
-        let text = if app.busy() {
-            format!("{} Loading recommendations…", app.spinner())
-        } else if let Some(err) = &app.home_error {
-            // No cache to fall back on: the empty state itself carries the
-            // error and the retry hint, in place of the generic messages
-            // below.
-            format!("{err} — Press R to retry.")
-        } else if app.is_authenticated() {
-            "No recommendations are available. Press / to search.".to_string()
-        } else {
-            "Sign in to see recommendations — press g.".to_string()
-        };
-
-        let mut lines: Vec<Line> = Vec::new();
-        // Identity moment: the wordmark and tagline, when there's room.
-        if area.width as usize >= LOGO[0].chars().count() + 2 && area.height >= 10 {
-            let pad = (area.height as usize).saturating_sub(LOGO.len() + 4) / 3;
-            for _ in 0..pad {
-                lines.push(Line::from(""));
-            }
-            for row in LOGO {
-                lines.push(Line::from(Span::styled(
-                    row,
-                    Style::default().fg(theme.accent),
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                TAGLINE,
-                Style::default().fg(theme.secondary),
-            )));
-            lines.push(Line::from(""));
-        }
-        lines.push(Line::from(Span::styled(
-            text,
-            Style::default().fg(theme.muted),
-        )));
-        let msg = Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false });
-        f.render_widget(msg, area);
+        // Nothing to page through either way; keep the list-mode default.
+        app.home_columns = 1;
+        draw_home_empty_state(f, app, area, theme);
         return;
     }
 
@@ -479,6 +458,66 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
         area
     };
 
+    if list_area.width < GRID_MIN_WIDTH {
+        app.home_columns = 1;
+        draw_home_list(f, app, list_area, theme);
+        return;
+    }
+
+    draw_home_grid(f, app, list_area, theme);
+}
+
+/// Loading/empty/error placeholder shown when there is nothing at all to
+/// list yet — same message and wordmark regardless of grid vs. list mode.
+fn draw_home_empty_state(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme) {
+    let text = if app.busy() {
+        format!("{} Loading recommendations…", app.spinner())
+    } else if let Some(err) = &app.home_error {
+        // No cache to fall back on: the empty state itself carries the
+        // error and the retry hint, in place of the generic messages
+        // below.
+        format!("{err} — Press R to retry.")
+    } else if app.is_authenticated() {
+        "No recommendations are available. Press / to search.".to_string()
+    } else {
+        "Sign in to see recommendations — press g.".to_string()
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    // Identity moment: the wordmark and tagline, when there's room.
+    if area.width as usize >= LOGO[0].chars().count() + 2 && area.height >= 10 {
+        let pad = (area.height as usize).saturating_sub(LOGO.len() + 4) / 3;
+        for _ in 0..pad {
+            lines.push(Line::from(""));
+        }
+        for row in LOGO {
+            lines.push(Line::from(Span::styled(
+                row,
+                Style::default().fg(theme.accent),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            TAGLINE,
+            Style::default().fg(theme.secondary),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        text,
+        Style::default().fg(theme.muted),
+    )));
+    let msg = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+    f.render_widget(msg, area);
+}
+
+/// Narrow-terminal (and pre-grid) rendering: sections as non-selectable
+/// header rows interleaved with one row per item in a single flat scrollable
+/// list (v1 scope: full section contents, no per-section cap/"show more" —
+/// overflow uses the existing scrollbar, exactly like the old flat list
+/// did).
+fn draw_home_list(f: &mut Frame, app: &App, list_area: Rect, theme: &'static Theme) {
     let selected = app.list_state.selected();
     let mut items: Vec<ListItem> = Vec::new();
     let mut shadow_selected: Option<usize> = None;
@@ -488,7 +527,7 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     // `App::open_selected_home`, which plays indices below `recent.len()`.
     if !app.recent.is_empty() {
         items.push(ListItem::new(section_header(
-            "Recently played",
+            "Continue listening",
             list_area.width as usize,
             theme,
         )));
@@ -525,6 +564,244 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     let mut shadow_state = app.list_state.clone();
     shadow_state.select(shadow_selected);
     render_list_borderless(f, app, list_area, items, &shadow_state);
+}
+
+/// Wide-terminal rendering: one shelf per vertical block, each a header row
+/// followed by a single row of cards. Uses `App::home_view` (the same 2D
+/// projection `move_home` navigates) so flattened selection indices always
+/// line up with what's drawn here.
+///
+/// Scrolling: vertical scrolling moves by whole shelves (never splitting one
+/// mid-row) to keep the selected shelf on screen; horizontal scrolling is
+/// per-shelf and keeps the selected card on screen, showing the first
+/// `columns` cards for every other shelf. Overflow in either direction is
+/// signaled with a `‹`/`›` marker appended to that shelf's header, rather
+/// than a scrollbar — there's no single flat viewport to attach one to.
+fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Theme) {
+    // The caller only takes this path once `area.width >= GRID_MIN_WIDTH`,
+    // but a zero height is still possible on very short terminals.
+    if area.width == 0 || area.height == 0 {
+        app.home_columns = 1;
+        return;
+    }
+    let columns = (area.width / CARD_WIDTH).max(1) as usize;
+    app.home_columns = columns;
+
+    let view = app.home_view();
+    if view.is_empty() {
+        return;
+    }
+    let selected = app.list_state.selected();
+
+    // Running flat-index base of each shelf, to map a shelf-local column
+    // back to the flattened index `list_state` uses.
+    let mut bases = Vec::with_capacity(view.shelves.len());
+    let mut base = 0usize;
+    for shelf in &view.shelves {
+        bases.push(base);
+        base += shelf.cards.len();
+    }
+    let selected_shelf = selected.and_then(|idx| {
+        view.shelves.iter().enumerate().find_map(|(i, shelf)| {
+            (idx >= bases[i] && idx < bases[i] + shelf.cards.len()).then_some(i)
+        })
+    });
+
+    // Vertical window: scroll by whole shelves so the selected one is
+    // visible, clamped so the view never scrolls past the last shelf.
+    let total_shelves = view.shelves.len();
+    let visible_shelf_count = (area.height / SHELF_HEIGHT).max(1) as usize;
+    let max_scroll = total_shelves.saturating_sub(visible_shelf_count);
+    let mut shelf_scroll = 0usize;
+    if let Some(sel) = selected_shelf {
+        if sel >= visible_shelf_count {
+            shelf_scroll = sel - visible_shelf_count + 1;
+        }
+    }
+    shelf_scroll = shelf_scroll.min(max_scroll);
+    let shelf_end = (shelf_scroll + visible_shelf_count).min(total_shelves);
+
+    let bottom = area.y.saturating_add(area.height);
+    let mut y = area.y;
+    let visible_shelves = view
+        .shelves
+        .iter()
+        .zip(bases.iter().copied())
+        .enumerate()
+        .skip(shelf_scroll)
+        .take(shelf_end - shelf_scroll);
+    for (shelf_idx, (shelf, shelf_base)) in visible_shelves {
+        if y >= bottom {
+            break;
+        }
+        let this_height = SHELF_HEIGHT.min(bottom - y);
+        let header_height = this_height.min(1);
+        let cards_height = this_height.saturating_sub(header_height);
+
+        // Per-shelf horizontal window: only the selected shelf scrolls past
+        // its first `columns` cards, and only far enough to keep the
+        // selection visible.
+        let local_selected = (selected_shelf == Some(shelf_idx))
+            .then(|| selected.map(|idx| idx - shelf_base))
+            .flatten();
+        let offset = horizontal_offset(local_selected, shelf.cards.len(), columns);
+        let can_scroll_left = offset > 0;
+        let can_scroll_right = offset + columns < shelf.cards.len();
+
+        if header_height > 0 {
+            let header_rect = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: header_height,
+            };
+            let marker = match (can_scroll_left, can_scroll_right) {
+                (true, true) => " ‹›",
+                (true, false) => " ‹",
+                (false, true) => " ›",
+                (false, false) => "",
+            };
+            let title = format!("{}{marker}", shelf.title);
+            f.render_widget(
+                Paragraph::new(section_header(&title, header_rect.width as usize, theme)),
+                header_rect,
+            );
+        }
+        y += header_height;
+
+        if cards_height > 0 {
+            let cards_rect = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: cards_height,
+            };
+            draw_shelf_cards(
+                f,
+                cards_rect,
+                shelf,
+                shelf_base,
+                offset,
+                columns,
+                selected,
+                theme,
+            );
+        }
+        y += cards_height;
+    }
+}
+
+/// Smallest per-shelf horizontal offset (in cards) that keeps
+/// `local_selected` inside the visible `columns`-wide window. Shelves with
+/// no selected card default to offset 0 — their first `columns` cards.
+fn horizontal_offset(local_selected: Option<usize>, card_count: usize, columns: usize) -> usize {
+    let Some(local) = local_selected else {
+        return 0;
+    };
+    let max_offset = card_count.saturating_sub(columns);
+    if local < columns {
+        0
+    } else {
+        (local + 1 - columns).min(max_offset)
+    }
+}
+
+/// One row of cards for a single shelf: up to `columns` cards starting at
+/// `offset`, each stretched to `area.width / columns` so the row fills the
+/// available width without a ragged margin.
+#[allow(clippy::too_many_arguments)]
+fn draw_shelf_cards(
+    f: &mut Frame,
+    area: Rect,
+    shelf: &HomeShelf,
+    shelf_base: usize,
+    offset: usize,
+    columns: usize,
+    selected: Option<usize>,
+    theme: &'static Theme,
+) {
+    if area.width == 0 || area.height == 0 || columns == 0 {
+        return;
+    }
+    let col_width = area.width / columns as u16;
+    if col_width == 0 {
+        return;
+    }
+    for slot in 0..columns {
+        let card_index = offset + slot;
+        let Some(card) = shelf.cards.get(card_index) else {
+            break;
+        };
+        let card_rect = Rect {
+            x: area.x + slot as u16 * col_width,
+            y: area.y,
+            width: col_width,
+            height: area.height,
+        };
+        let is_selected = selected == Some(shelf_base + card_index);
+        draw_card(f, card_rect, card, is_selected, theme);
+    }
+}
+
+/// One card: title (bold), subtitle and a footer with the item's type glyph
+/// and duration. The selected card gets `theme.highlight_bg` across all
+/// three lines, an accented title, and a provider badge appended to the
+/// footer — the "metadata reveal" that only shows up on the focused card.
+fn draw_card(f: &mut Frame, area: Rect, card: &HomeCard, selected: bool, theme: &'static Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    // One leading column of padding, matching the rest of the file's rows.
+    let inner_width = (area.width as usize).saturating_sub(1);
+
+    let title = crate::ui::truncate_chars(&card.title, inner_width);
+    let subtitle = crate::ui::truncate_chars(&card.subtitle, inner_width);
+
+    let glyph = match card.kind {
+        HomeCardKind::Track => "♪",
+        HomeCardKind::Album => "▤",
+        HomeCardKind::Playlist => "♫",
+    };
+    let duration_part = if card.duration.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", card.duration)
+    };
+    let footer_main = crate::ui::truncate_chars(&format!("{glyph}{duration_part}"), inner_width);
+
+    let title_fg = if selected { theme.accent } else { theme.text };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(" {title}"),
+            Style::default().fg(title_fg).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(" {subtitle}"),
+            Style::default().fg(theme.muted),
+        )),
+    ];
+
+    let mut footer_spans = vec![Span::styled(
+        format!(" {footer_main}"),
+        Style::default().fg(theme.muted),
+    )];
+    if selected {
+        // The provider badge only reveals on the focused card — everyone
+        // else keeps the plain type-glyph-plus-duration footer.
+        let used = crate::ui::display_width(&footer_main) + 1; // +1 for the leading space above
+        let remaining = (area.width as usize).saturating_sub(used);
+        if remaining > 3 {
+            let badge = crate::ui::take_width(&format!(" ◆ {} ", card.provider), remaining);
+            footer_spans.push(Span::styled(badge, Style::default().fg(theme.secondary)));
+        }
+    }
+    lines.push(Line::from(footer_spans));
+
+    let mut paragraph = Paragraph::new(lines);
+    if selected {
+        paragraph = paragraph.style(Style::default().bg(theme.highlight_bg));
+    }
+    f.render_widget(paragraph, area);
 }
 
 /// Section header row: accent title followed by a dim rule to the edge,

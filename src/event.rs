@@ -113,7 +113,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Left | KeyCode::Char('h')
             if app.section == Section::Inicio && app.focus == Focus::Main =>
         {
-            app.move_home(HomeDirection::Left)
+            // No primeiro card de um shelf, "←" não circula para o último
+            // card do mesmo shelf — devolve o foco à sidebar, como em
+            // qualquer outra seção.
+            let current = app.list_state.selected().unwrap_or(0);
+            if app.home_view().is_first_in_shelf(current) {
+                app.focus = Focus::Sidebar;
+            } else {
+                app.move_home(HomeDirection::Left);
+            }
         }
         KeyCode::Right | KeyCode::Char('l')
             if app.section == Section::Inicio && app.focus == Focus::Main =>
@@ -302,6 +310,39 @@ mod tests {
         handle_key(&mut search, key(KeyCode::Right));
         assert_eq!(search.focus, Focus::Main);
         assert_eq!(search.list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn home_left_on_the_first_card_of_a_shelf_returns_focus_to_the_sidebar() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.focus = Focus::Main;
+        app.home_columns = 3;
+        app.recent = (1..=3)
+            .map(|i| crate::models::Track {
+                video_id: format!("t{i}"),
+                ..Default::default()
+            })
+            .collect();
+
+        // Index 0 is the first card of the (only) shelf: "←" hands focus
+        // back to the sidebar instead of circling to the shelf's last card.
+        app.list_state.select(Some(0));
+        handle_key(&mut app, key(KeyCode::Left));
+        assert_eq!(app.focus, Focus::Sidebar);
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "selection itself is untouched, only focus moves"
+        );
+
+        // Index 1 is a middle card: "←" behaves as before, circling within
+        // the shelf and keeping focus on the main panel.
+        app.focus = Focus::Main;
+        app.list_state.select(Some(1));
+        handle_key(&mut app, key(KeyCode::Left));
+        assert_eq!(app.focus, Focus::Main);
+        assert_eq!(app.list_state.selected(), Some(0));
     }
 
     #[tokio::test]

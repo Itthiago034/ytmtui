@@ -43,9 +43,14 @@ impl Mpris {
     /// Registra o player no D-Bus da sessão. Retorna `None` em ambientes sem
     /// D-Bus (TTY puro, containers) — o app segue funcionando sem MPRIS.
     pub fn new(tx: UnboundedSender<Msg>) -> Option<Self> {
+        // Sufixo `.instance<pid>` (padrão MPRIS, como o VLC): um segundo
+        // ytmtui aberto não colide com o nome do primeiro — a souvlaki
+        // responde a `NameTaken` com um panic dentro da própria thread,
+        // que imprimiria por cima da TUI.
+        let dbus_name = format!("ytmtui.instance{}", std::process::id());
         let mut controls = MediaControls::new(PlatformConfig {
             display_name: "ytmtui",
-            dbus_name: "ytmtui",
+            dbus_name: &dbus_name,
             hwnd: None,
         })
         .ok()?;

@@ -123,6 +123,24 @@ impl HomeView {
             .position(|card| &card.key == key)
     }
 
+    /// Verdadeiro quando `index` é o primeiro card do seu shelf (coluna 0 na
+    /// lista achatada). Usado pela navegação: `←` no primeiro card de um
+    /// shelf devolve o foco à sidebar em vez de circular para o último card
+    /// do mesmo shelf — ver `event.rs`.
+    pub fn is_first_in_shelf(&self, index: usize) -> bool {
+        let mut base = 0usize;
+        for shelf in &self.shelves {
+            let end = base + shelf.cards.len();
+            if index < end {
+                return index == base;
+            }
+            base = end;
+        }
+        // Índice fora de qualquer shelf (lista vazia ou índice inválido):
+        // não há shelf para circular, então trata como "primeiro".
+        true
+    }
+
     pub fn move_index(&self, current: usize, direction: HomeDirection, columns: usize) -> usize {
         let columns = columns.max(1);
         let mut base = 0usize;
@@ -285,5 +303,30 @@ mod tests {
         assert_eq!(view.move_index(2, HomeDirection::Down, 3), 4);
         assert_eq!(view.move_index(4, HomeDirection::Down, 3), 6);
         assert_eq!(view.move_index(7, HomeDirection::Up, 3), 4);
+    }
+
+    #[test]
+    fn is_first_in_shelf_only_true_at_each_shelfs_leading_column() {
+        let recent = recent_tracks(); // 2 cards: flat indices 0, 1
+        let sections = provider_sections(); // shelf of 2, then shelf of 1: indices 2,3 | 4
+        let view = HomeView::project("ytmusic", &recent, &sections);
+
+        assert!(view.is_first_in_shelf(0), "first card of the recent shelf");
+        assert!(
+            !view.is_first_in_shelf(1),
+            "second card of the recent shelf"
+        );
+        assert!(
+            view.is_first_in_shelf(2),
+            "first card of the 'Quick picks' shelf"
+        );
+        assert!(
+            !view.is_first_in_shelf(3),
+            "second card of the 'Quick picks' shelf"
+        );
+        assert!(
+            view.is_first_in_shelf(4),
+            "the 'Made for you' shelf has only one card, so it's also first"
+        );
     }
 }

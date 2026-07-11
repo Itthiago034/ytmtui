@@ -99,7 +99,7 @@ veja [Primeiros Passos](docs/GETTING_STARTED.pt-BR.md).
 | `yt-dlp` | Resolve streams de áudio do YouTube Music |
 | `ffmpeg` | Remuxa AAC/M4A para playback confiável |
 | `deno` | Ajuda em desafios JavaScript recentes do `yt-dlp` |
-| Rust 1.75+ | Necessário só para compilar do código-fonte |
+| Rust 1.88+ | Necessário só para compilar do código-fonte |
 | libs ALSA dev | Necessárias para builds Linux com áudio |
 
 ## Desenvolvimento

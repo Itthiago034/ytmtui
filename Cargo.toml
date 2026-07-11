@@ -2,7 +2,7 @@
 name = "ytmtui"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 description = "Cliente TUI para YouTube Music escrito em Rust com Ratatui"
 authors = ["Itthiago <kiyottiago@gmail.com>"]
 license = "MIT"

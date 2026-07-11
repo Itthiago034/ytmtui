@@ -1,0 +1,48 @@
+# Config for `cargo deny check` (license/advisory/dependency auditing).
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+ignore = [
+    # `paste` is an unmaintained proc-macro helper pulled in transitively by
+    # ratatui and rav1e/image; there's no safe upgrade path since we don't
+    # control those crates' dependency choice, and it carries no known
+    # vulnerability, only an unmaintained-status warning.
+    { id = "RUSTSEC-2024-0436", reason = "transitive dep of ratatui/rav1e, no upstream fix available" },
+]
+
+[licenses]
+# Permissive licenses actually used across the dependency tree (verified via
+# `cargo deny check licenses`). Add to this list only after checking why a
+# new license shows up, not just to silence a failure.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "BSL-1.0",
+    "MPL-2.0",
+    "NCSA",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# The dependency tree naturally carries a few duplicated major versions
+# (windows-*, thiserror, rand, ...); flag but don't fail on them.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"

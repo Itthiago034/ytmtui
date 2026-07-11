@@ -676,6 +676,48 @@ fn home_grid_highlights_the_selected_card_and_reveals_its_provider_badge() {
         theme.highlight_bg,
         "the non-selected card in the same shelf is not highlighted"
     );
+    assert_eq!(
+        buffer[(x2, y2)].bg,
+        theme.surface,
+        "the non-selected card still has a visible card surface"
+    );
+
+    // The provider badge belongs to the selected card's lower frame, not
+    // to a free-floating footer row inside the content.
+    let (_, badge_y) = find_cell(&buffer, &badge);
+    let badge_row = &rows(&buffer)[badge_y as usize];
+    assert!(
+        badge_row.contains('╰') && badge_row.contains('╯'),
+        "provider badge integrated into the rounded lower frame:\n{content}"
+    );
+}
+
+#[test]
+fn home_grid_gives_every_card_a_rounded_frame_and_horizontal_gutter() {
+    let mut app = grid_home_app();
+    app.list_state.select(Some(0));
+
+    let buffer = render(&mut app, 100, 30);
+    let content = text(&buffer);
+    let buffer_rows = rows(&buffer);
+
+    // The first shelf has two cards on one row. Both must have their own
+    // rounded frame rather than reading as columns in one flat table.
+    let shared_top = buffer_rows
+        .iter()
+        .find(|row| row.matches('╭').count() >= 2 && row.matches('╮').count() >= 2)
+        .unwrap_or_else(|| panic!("two independently framed cards:\n{content}"));
+    assert!(
+        shared_top.contains("╮ ╭"),
+        "one-column gutter between neighboring card frames:\n{content}"
+    );
+
+    // All three fixture cards — including the unselected card on the second
+    // shelf — receive a real rounded frame.
+    assert!(
+        content.matches('╭').count() >= 3 && content.matches('╯').count() >= 3,
+        "every card has rounded top and bottom corners:\n{content}"
+    );
 }
 
 #[test]

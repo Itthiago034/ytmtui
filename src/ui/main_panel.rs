@@ -425,6 +425,9 @@ const GRID_MIN_WIDTH: u16 = 70;
 /// stretches to `list_area.width / columns` so there's no ragged empty
 /// margin on the right (see `draw_home_grid`).
 const CARD_WIDTH: u16 = 24;
+/// One blank terminal column between neighboring card frames. Without this
+/// gutter, adjacent borders visually merge back into a table.
+const CARD_GAP: u16 = 1;
 
 /// Height (rows) of one card for the given Home density: "comfortable" is
 /// title, subtitle, footer (3 rows); "compact" drops the subtitle row and
@@ -432,8 +435,9 @@ const CARD_WIDTH: u16 = 24;
 /// only the vertical footprint changes.
 fn card_height(density: HomeDensity) -> u16 {
     match density {
-        HomeDensity::Comfortable => 3,
-        HomeDensity::Compact => 2,
+        // Content rows plus the rounded top/bottom frame.
+        HomeDensity::Comfortable => 5,
+        HomeDensity::Compact => 4,
     }
 }
 
@@ -695,16 +699,7 @@ fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Them
                 height: cards_height,
             };
             draw_shelf_cards(
-                f,
-                cards_rect,
-                shelf,
-                shelf_base,
-                offset,
-                columns,
-                selected,
-                theme,
-                density,
-                reveal,
+                f, cards_rect, shelf, shelf_base, offset, columns, selected, theme, density, reveal,
             );
         }
         y += cards_height;
@@ -757,7 +752,7 @@ fn draw_shelf_cards(
         let card_rect = Rect {
             x: area.x + slot as u16 * col_width,
             y: area.y,
-            width: col_width,
+            width: col_width.saturating_sub(CARD_GAP),
             height: area.height,
         };
         let is_selected = selected == Some(shelf_base + card_index);
@@ -821,12 +816,12 @@ fn current_reveal_stage(app: &App) -> RevealStage {
     reveal_stage(scaled_ms, app.reduced_motion)
 }
 
-/// One card: title (bold), an optional subtitle (dropped in "compact"
-/// density), and a footer with the item's type glyph and duration. The
-/// selected card gets `theme.selected_card` across all its lines; the
-/// accented title and the provider badge appended to the footer — the
-/// "metadata reveal" that only shows up on the focused card — phase in over
-/// `reveal` (see [`RevealStage`]) instead of appearing instantly.
+/// One rounded card: title (bold), an optional subtitle (dropped in
+/// "compact" density), and a footer with the item's type glyph and duration.
+/// Every card has a surface and frame so the grid reads as a collection of
+/// objects instead of a text table. The selected card gets the accent border
+/// and `theme.selected_card` background; its provider badge is integrated
+/// into the lower frame and phases in over `reveal` (see [`RevealStage`]).
 fn draw_card(
     f: &mut Frame,
     area: Rect,
@@ -836,11 +831,47 @@ fn draw_card(
     density: HomeDensity,
     reveal: RevealStage,
 ) {
-    if area.width == 0 || area.height == 0 {
+    if area.width < 2 || area.height < 2 {
         return;
     }
-    // One leading column of padding, matching the rest of the file's rows.
-    let inner_width = (area.width as usize).saturating_sub(1);
+    let card_bg = if selected {
+        theme.selected_card
+    } else {
+        theme.surface
+    };
+    let border_style = if selected {
+        Style::default()
+            .fg(theme.accent)
+            .bg(card_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border).bg(card_bg)
+    };
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .style(Style::default().bg(card_bg));
+    if selected && reveal == RevealStage::Full {
+        let badge_width = (area.width as usize).saturating_sub(4);
+        let badge = crate::ui::take_width(&format!(" ◆ {} ", card.provider), badge_width);
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                badge,
+                Style::default()
+                    .fg(theme.provider_badge)
+                    .bg(card_bg)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // One leading content column inside the frame, matching the rest of the
+    // file's rows without crowding the left border.
+    let inner_width = (inner.width as usize).saturating_sub(1);
 
     let title = crate::ui::truncate_chars(&card.title, inner_width);
     let subtitle = crate::ui::truncate_chars(&card.subtitle, inner_width);
@@ -861,7 +892,11 @@ fn draw_card(
     // onward — during `Background` it still reads as a normal card, just
     // with the selection background already showing.
     let title_accented = selected && reveal != RevealStage::Background;
-    let title_fg = if title_accented { theme.accent } else { theme.text };
+    let title_fg = if title_accented {
+        theme.accent
+    } else {
+        theme.text
+    };
     let mut lines = vec![Line::from(Span::styled(
         format!(" {title}"),
         Style::default().fg(title_fg).add_modifier(Modifier::BOLD),
@@ -876,30 +911,16 @@ fn draw_card(
         )));
     }
 
-    let mut footer_spans = vec![Span::styled(
+    let footer_spans = vec![Span::styled(
         format!(" {footer_main}"),
         Style::default().fg(theme.muted),
     )];
-    if selected && reveal == RevealStage::Full {
-        // The provider badge only reveals on the focused card, and only
-        // once the reveal has reached its final stage — everyone else (and
-        // an earlier stage) keeps the plain type-glyph-plus-duration footer.
-        let used = crate::ui::display_width(&footer_main) + 1; // +1 for the leading space above
-        let remaining = (area.width as usize).saturating_sub(used);
-        if remaining > 3 {
-            let badge = crate::ui::take_width(&format!(" ◆ {} ", card.provider), remaining);
-            footer_spans.push(Span::styled(badge, Style::default().fg(theme.provider_badge)));
-        }
-    }
     lines.push(Line::from(footer_spans));
 
-    let mut paragraph = Paragraph::new(lines);
-    if selected {
-        // The background shows from `Background` onward — it's the very
-        // first thing to reveal.
-        paragraph = paragraph.style(Style::default().bg(theme.selected_card));
-    }
-    f.render_widget(paragraph, area);
+    // The selected background still appears from the first reveal stage;
+    // non-selected cards keep the quieter theme surface.
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(card_bg));
+    f.render_widget(paragraph, inner);
 }
 
 /// Section header row: accent title followed by a dim rule to the edge,

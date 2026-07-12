@@ -17,9 +17,11 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 pub use auth::Auth;
+pub use parse::AccountIdentity;
 pub use provider::{Bootstrap, YtMusic};
 
 use crate::models::{Artist, CollectionKind, HomeSection, Lyrics, Playlist, SearchResults, Track};
+use crate::provider::SignInAccount;
 use parse::*;
 
 const BASE: &str = "https://music.youtube.com/youtubei/v1";
@@ -53,6 +55,7 @@ pub enum YtMusicError {
     },
     Transport(reqwest::Error),
     InvalidResponse(reqwest::Error),
+    InvalidCredentials(auth::AuthError),
 }
 
 impl fmt::Display for YtMusicError {
@@ -67,6 +70,7 @@ impl fmt::Display for YtMusicError {
             }
             Self::Transport(error) => write!(f, "request failed: {error}"),
             Self::InvalidResponse(error) => write!(f, "invalid API response: {error}"),
+            Self::InvalidCredentials(error) => write!(f, "invalid credentials: {error}"),
         }
     }
 }
@@ -77,6 +81,33 @@ impl From<reqwest::Error> for YtMusicError {
     fn from(error: reqwest::Error) -> Self {
         Self::Transport(error)
     }
+}
+
+impl From<auth::AuthError> for YtMusicError {
+    fn from(error: auth::AuthError) -> Self {
+        Self::InvalidCredentials(error)
+    }
+}
+
+fn account_indices_from_slots<T>(slots: &[Option<T>]) -> Vec<u8> {
+    let mut found = Vec::new();
+    let mut empty_after_match = 0;
+    for (index, slot) in slots.iter().take(10).enumerate() {
+        match slot {
+            Some(_) => {
+                found.push(index as u8);
+                empty_after_match = 0;
+            }
+            None if !found.is_empty() => {
+                empty_after_match += 1;
+                if empty_after_match == 2 {
+                    break;
+                }
+            }
+            None => {}
+        }
+    }
+    found
 }
 
 fn classify_status(
@@ -359,6 +390,18 @@ impl YtMusicClient {
         Ok(())
     }
 
+    /// Obtém a identidade da conta logada (via `account/account_menu`).
+    ///
+    /// Retorna `None` se anônimo ou se a identidade não puder ser extraída.
+    pub async fn get_account_identity(&self) -> YtMusicResult<Option<AccountIdentity>> {
+        if !self.is_authenticated() {
+            return Ok(None);
+        }
+        let body = json!({ "context": self.context() });
+        let data = self.post("account/account_menu", body).await?;
+        Ok(parse::parse_account_identity(&data))
+    }
+
     /// Obtém o nome da conta logada (via `account/account_menu`).
     ///
     /// Retorna `None` se anônimo ou se o nome não puder ser extraído.
@@ -369,6 +412,43 @@ impl YtMusicClient {
         let body = json!({ "context": self.context() });
         let data = self.post("account/account_menu", body).await?;
         Ok(parse::parse_account_name(&data))
+    }
+
+    /// Enumera as contas Google identificáveis contidas em um cookie jar.
+    pub async fn enumerate_cookie_accounts(path: &str) -> YtMusicResult<Vec<SignInAccount>> {
+        let mut slots = Vec::new();
+
+        for index in 0..=9 {
+            let client = Self::with_cookies_for_account(path, index)?;
+            let identity = match client.get_account_identity().await {
+                Ok(identity) => identity,
+                Err(YtMusicError::SessionExpired { .. }) => None,
+                Err(error) => return Err(error),
+            };
+            slots.push(identity);
+
+            if let Some(last_match) = account_indices_from_slots(&slots).last().copied() {
+                if slots.len() >= usize::from(last_match) + 3 {
+                    break;
+                }
+            }
+        }
+
+        let mut accounts = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for index in account_indices_from_slots(&slots) {
+            let identity = slots[usize::from(index)]
+                .as_ref()
+                .expect("account index comes from a populated slot");
+            if seen.insert((identity.name.clone(), identity.handle.clone())) {
+                accounts.push(SignInAccount {
+                    index,
+                    name: identity.name.clone(),
+                    handle: identity.handle.clone(),
+                });
+            }
+        }
+        Ok(accounts)
     }
 
     /// Busca completa: músicas, artistas, álbuns e playlists.
@@ -701,6 +781,12 @@ impl Default for YtMusicClient {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    #[test]
+    fn account_probe_stops_after_two_empty_slots_after_match() {
+        let slots = [Some("A"), Some("B"), None, None, Some("ignored")];
+        assert_eq!(account_indices_from_slots(&slots), vec![0, 1]);
+    }
 
     #[test]
     fn authenticated_client_keeps_selected_auth_user() {

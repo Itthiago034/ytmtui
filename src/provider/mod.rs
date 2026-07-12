@@ -104,6 +104,17 @@ pub struct SignInSummary {
     pub credentials_path: Option<String>,
 }
 
+/// Conta Google disponível dentro de uma sessão de cookies autenticada.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignInAccount {
+    /// Valor enviado em `X-Goog-AuthUser` para selecionar esta conta.
+    pub index: u8,
+    /// Nome de exibição informado pelo menu de conta do YouTube Music.
+    pub name: String,
+    /// Handle público do canal, quando disponível.
+    pub handle: Option<String>,
+}
+
 /// Um serviço de música por trás da interface.
 ///
 /// Contratos de execução:

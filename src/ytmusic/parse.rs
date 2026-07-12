@@ -6,6 +6,12 @@
 
 use serde_json::Value;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountIdentity {
+    pub name: String,
+    pub handle: Option<String>,
+}
+
 /// Procura recursivamente pela primeira ocorrência de uma chave em um `Value`.
 pub fn find_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     match value {
@@ -66,25 +72,25 @@ pub fn join_runs(text_obj: &Value) -> String {
     }
 }
 
+/// Extrai a identidade da conta a partir de um único cabeçalho ativo do menu.
+pub fn parse_account_identity(data: &Value) -> Option<AccountIdentity> {
+    let header = find_key(data, "activeAccountHeaderRenderer")?;
+    let account_name = header.get("accountName").map(join_runs).unwrap_or_default();
+    let handle = header
+        .get("channelHandle")
+        .map(join_runs)
+        .filter(|text| !text.is_empty());
+    let name = if account_name.is_empty() {
+        handle.clone()?
+    } else {
+        account_name
+    };
+    Some(AccountIdentity { name, handle })
+}
+
 /// Extrai o nome (ou handle) da conta a partir de `account/account_menu`.
 pub fn parse_account_name(data: &Value) -> Option<String> {
-    if let Some(header) = find_key(data, "activeAccountHeaderRenderer") {
-        for key in ["accountName", "channelHandle"] {
-            if let Some(field) = header.get(key) {
-                let text = join_runs(field);
-                if !text.is_empty() {
-                    return Some(text);
-                }
-            }
-        }
-    }
-    if let Some(name) = find_key(data, "accountName") {
-        let text = join_runs(name);
-        if !text.is_empty() {
-            return Some(text);
-        }
-    }
-    None
+    parse_account_identity(data).map(|identity| identity.name)
 }
 
 /// Extrai a URL da thumbnail em melhor resolução de um item.
@@ -317,6 +323,17 @@ pub fn parse_timed_lyrics(data: &Value) -> Vec<crate::models::LyricLine> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn account_identity_keeps_name_and_handle() {
+        let data = serde_json::json!({"activeAccountHeaderRenderer": {
+            "accountName": {"runs": [{"text": "Thiago Santos"}]},
+            "channelHandle": {"runs": [{"text": "@thiagosantos"}]}
+        }});
+        let identity = parse_account_identity(&data).unwrap();
+        assert_eq!(identity.name, "Thiago Santos");
+        assert_eq!(identity.handle.as_deref(), Some("@thiagosantos"));
+    }
 
     #[test]
     fn parse_duration_handles_formats() {

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-12
 
-**Status:** Approved direction, pending written-spec review
+**Status:** Approved
 
 **Target:** the next ytmtui release after `v0.2.0`
 

@@ -11,6 +11,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::{signin, stream, YtMusicClient, YtMusicError};
+use crate::config::AuthenticationConfig;
 use crate::models::{HomeSection, Lyrics, Playlist, SearchResults, Track};
 use crate::provider::{
     AuthState, Capabilities, MusicProvider, ProviderError, Result, SignInSummary,
@@ -52,7 +53,10 @@ impl YtMusic {
     /// Constrói o provedor resolvendo os cookies de `$YTM_COOKIES`, da
     /// configuração ou do caminho padrão (`~/.config/ytmtui/cookies.txt`),
     /// nesta ordem.
-    pub fn from_environment(configured_cookies: Option<String>) -> (Self, Bootstrap) {
+    pub fn from_environment(
+        configured_cookies: Option<String>,
+        authentication: AuthenticationConfig,
+    ) -> (Self, Bootstrap) {
         let default = dirs::config_dir().map(|dir| dir.join("ytmtui/cookies.txt"));
         let resolution = signin::resolve_cookie_path(
             std::env::var("YTM_COOKIES").ok(),
@@ -60,10 +64,12 @@ impl YtMusic {
             default,
         );
         let (client, auth) = match resolution.path.as_deref() {
-            Some(path) => match YtMusicClient::with_cookies(path) {
-                Ok(client) => (client, AuthState::Authenticated),
-                Err(_) => (YtMusicClient::new(), AuthState::InvalidCredentials),
-            },
+            Some(path) => {
+                match YtMusicClient::with_cookies_for_account(path, authentication.auth_user) {
+                    Ok(client) => (client, AuthState::Authenticated),
+                    Err(_) => (YtMusicClient::new(), AuthState::InvalidCredentials),
+                }
+            }
             None => (YtMusicClient::new(), AuthState::Anonymous),
         };
         let provider = Self {

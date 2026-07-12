@@ -415,8 +415,10 @@ impl App {
 
         // Raiz de composição: o único ponto em que o provedor concreto
         // aparece — daqui em diante o app só conhece o contrato.
-        let (provider, bootstrap) =
-            crate::ytmusic::YtMusic::from_environment(config.cookies.clone());
+        let (provider, bootstrap) = crate::ytmusic::YtMusic::from_environment(
+            config.cookies.clone(),
+            config.authentication.clone(),
+        );
         let provider: Arc<dyn MusicProvider> = Arc::new(provider);
         let authentication = bootstrap.auth;
         let cookies = bootstrap.cookies;
@@ -1093,6 +1095,7 @@ impl App {
             shuffle: self.shuffle,
             repeat: self.repeat.as_config().to_string(),
             cookies,
+            authentication: saved.authentication,
             theme: self.theme().name.to_string(),
             username,
             // Not editable at runtime yet; preserve whatever's on disk

@@ -108,6 +108,8 @@ pub struct YtMusicClient {
     http: reqwest::Client,
     /// Dados de autenticação (quando logado via cookies).
     auth: Option<Arc<Auth>>,
+    /// Índice da conta Google selecionada dentro da sessão de cookies.
+    auth_user: u8,
 }
 
 impl YtMusicClient {
@@ -125,16 +127,40 @@ impl YtMusicClient {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .expect("falha ao construir cliente HTTP");
-        Self { http, auth: None }
+        Self {
+            http,
+            auth: None,
+            auth_user: 0,
+        }
     }
 
     /// Cria um cliente autenticado a partir de um arquivo de cookies (Netscape).
     ///
     /// Se os cookies forem inválidos/incompletos, retorna um cliente anônimo.
-    pub fn with_cookies(path: &str) -> std::result::Result<Self, auth::AuthError> {
+    pub fn with_cookies_for_account(
+        path: &str,
+        auth_user: u8,
+    ) -> std::result::Result<Self, auth::AuthError> {
         let mut client = Self::new();
         client.auth = Some(Arc::new(Auth::from_cookie_file(path)?));
+        client.auth_user = auth_user;
         Ok(client)
+    }
+
+    pub fn with_cookies(path: &str) -> std::result::Result<Self, auth::AuthError> {
+        Self::with_cookies_for_account(path, 0)
+    }
+
+    #[cfg(test)]
+    fn new_with_auth_user_for_test(auth_user: u8) -> Self {
+        let mut client = Self::new();
+        client.auth_user = auth_user;
+        client
+    }
+
+    #[cfg(test)]
+    fn auth_user(&self) -> u8 {
+        self.auth_user
     }
 
     /// Indica se o cliente está autenticado (login por cookies bem-sucedido).
@@ -204,7 +230,7 @@ impl YtMusicClient {
             req = req
                 .header("Cookie", a.cookie_header.clone())
                 .header("Authorization", a.authorization_header())
-                .header("X-Goog-AuthUser", "0")
+                .header("X-Goog-AuthUser", self.auth_user.to_string())
                 .header("X-Origin", auth::ORIGIN);
         }
 
@@ -675,6 +701,12 @@ impl Default for YtMusicClient {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    #[test]
+    fn authenticated_client_keeps_selected_auth_user() {
+        let client = YtMusicClient::new_with_auth_user_for_test(3);
+        assert_eq!(client.auth_user(), 3);
+    }
 
     #[test]
     fn authenticated_unauthorized_response_means_expired_session() {

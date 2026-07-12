@@ -7,6 +7,15 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthenticationConfig {
+    pub browser: Option<String>,
+    pub profile: Option<String>,
+    pub auth_user: u8,
+}
 
 /// Preferências persistidas entre execuções.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +29,8 @@ pub struct Config {
     pub repeat: String,
     /// Caminho opcional para arquivo de cookies do yt-dlp.
     pub cookies: Option<String>,
+    /// Preferências da conta usada na autenticação do YouTube Music.
+    pub authentication: AuthenticationConfig,
     /// Nome do tema de cores (ver `crate::theme::THEMES`).
     pub theme: String,
     /// Nome de exibição personalizado (sobrepõe o nome vindo da conta).
@@ -57,6 +68,7 @@ impl Default for Config {
             shuffle: false,
             repeat: "off".to_string(),
             cookies: None,
+            authentication: AuthenticationConfig::default(),
             theme: "Roxo".to_string(),
             username: None,
             sync_interval_secs: 300,
@@ -225,15 +237,23 @@ impl Config {
         serde_json::from_str(&contents).unwrap_or_default()
     }
 
+    /// Salva a configuração de forma atômica, propagando falhas ao chamador.
+    pub fn try_save(&self) -> anyhow::Result<()> {
+        let path = config_path()
+            .ok_or_else(|| anyhow::anyhow!("não foi possível localizar o diretório de config"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+            let mut temporary = NamedTempFile::new_in(parent)?;
+            serde_json::to_writer_pretty(temporary.as_file_mut(), self)?;
+            temporary.as_file().sync_all()?;
+            temporary.persist(&path)?;
+        }
+        Ok(())
+    }
+
     /// Salva a configuração no disco (falhas são ignoradas silenciosamente).
     pub fn save(&self) {
-        let Some(path) = config_path() else { return };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
-        }
+        let _ = self.try_save();
     }
 }
 
@@ -244,6 +264,26 @@ mod tests {
     // Estes testes desserializam JSON diretamente com `serde_json`, nunca
     // tocando `Config::load`/`save` (que leriam/escreveriam o config.json
     // real do usuário).
+
+    #[test]
+    fn legacy_config_defaults_to_account_zero() {
+        let config: Config = serde_json::from_str(r#"{"cookies":"/tmp/cookies"}"#).unwrap();
+        assert_eq!(config.authentication, AuthenticationConfig::default());
+        assert_eq!(config.authentication.auth_user, 0);
+    }
+
+    #[test]
+    fn authentication_preference_roundtrips() {
+        let mut config = Config::default();
+        config.authentication = AuthenticationConfig {
+            browser: Some("firefox".into()),
+            profile: Some("default-release".into()),
+            auth_user: 2,
+        };
+        let decoded: Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(decoded.authentication, config.authentication);
+    }
 
     #[test]
     fn old_config_without_the_new_fields_deserializes_with_defaults() {

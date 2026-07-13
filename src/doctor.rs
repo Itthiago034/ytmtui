@@ -7,8 +7,10 @@ use std::time::Duration;
 
 use crate::config::{AuthenticationConfig, Config};
 use crate::ytmusic::auth::Auth;
-use crate::ytmusic::signin::{detect_browser_candidates, BrowserCandidate};
-use crate::ytmusic::YtMusicClient;
+use crate::ytmusic::{
+    detect_browser_candidates, resolve_cookie_path, BrowserCandidate, CookiePathResolution,
+    YtMusicClient,
+};
 
 const RUNTIME: &str = "Runtime";
 const AUTHENTICATION: &str = "Authentication";
@@ -119,12 +121,24 @@ fn version_flags(command: &str) -> &'static [&'static str] {
 pub async fn run() -> Report {
     let initial = tokio::task::spawn_blocking(|| {
         let config = Config::load();
-        let cookie_path = diagnostic_cookie_path(&config);
+        let resolution = diagnostic_cookie_path(
+            std::env::var("YTM_COOKIES").ok(),
+            config.cookies.clone(),
+            Config::path().and_then(|path| path.parent().map(|parent| parent.join("cookies.txt"))),
+        );
+        let cookie_path = resolution.path.map(PathBuf::from);
+        let missing_requested_path = resolution.missing_requested_path.is_some();
         let cookie_is_file = cookie_path.as_deref().is_some_and(is_regular_file);
-        (config, cookie_path, cookie_is_file, dirs::home_dir())
+        (
+            config,
+            cookie_path,
+            missing_requested_path,
+            cookie_is_file,
+            dirs::home_dir(),
+        )
     })
     .await;
-    let Ok((config, cookie_path, cookie_is_file, home)) = initial else {
+    let Ok((config, cookie_path, missing_requested_path, cookie_is_file, home)) = initial else {
         return Report::new(vec![Check::failure(
             RUNTIME,
             "diagnostic worker",
@@ -153,7 +167,12 @@ pub async fn run() -> Report {
     };
 
     tokio::task::spawn_blocking(move || {
-        collect_with_backend(&backend, &config, cookie_path.as_deref())
+        collect_with_backend(
+            &backend,
+            &config,
+            cookie_path.as_deref(),
+            missing_requested_path,
+        )
     })
     .await
     .unwrap_or_else(|_| {
@@ -166,22 +185,12 @@ pub async fn run() -> Report {
     })
 }
 
-fn diagnostic_cookie_path(config: &Config) -> Option<PathBuf> {
-    std::env::var_os("YTM_COOKIES")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            config
-                .cookies
-                .as_deref()
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-        })
-        .or_else(|| {
-            Config::path()
-                .and_then(|path| path.parent().map(|parent| parent.join("cookies.txt")))
-                .filter(|path| path.is_file())
-        })
+fn diagnostic_cookie_path(
+    environment: Option<String>,
+    configured: Option<String>,
+    default: Option<PathBuf>,
+) -> CookiePathResolution {
+    resolve_cookie_path(environment, configured, default)
 }
 
 fn is_regular_file(path: &Path) -> bool {
@@ -227,6 +236,7 @@ fn collect_with_backend<B: DoctorBackend + ?Sized>(
     backend: &B,
     config: &Config,
     cookie_path: Option<&Path>,
+    missing_requested_path: bool,
 ) -> Report {
     let mut checks = Vec::new();
     for (command, required) in [("yt-dlp", true), ("ffmpeg", true), ("deno", false)] {
@@ -267,6 +277,18 @@ fn collect_with_backend<B: DoctorBackend + ?Sized>(
         }
     }
 
+    if missing_requested_path {
+        checks.push(Check::warning(
+            AUTHENTICATION,
+            "requested cookie file",
+            if cookie_path.is_some() {
+                "missing; using an available fallback"
+            } else {
+                "missing; no fallback session was found"
+            },
+        ));
+    }
+
     match cookie_path {
         None => checks.push(Check::warning(
             AUTHENTICATION,
@@ -300,7 +322,7 @@ fn collect_with_backend<B: DoctorBackend + ?Sized>(
                         AUTHENTICATION,
                         Severity::Warning,
                         "cookie file",
-                        "valid but permissions are broader than 0600",
+                        "valid but permissions are not 0600",
                         Some("run chmod 600 on the configured cookie file".into()),
                     )),
                     None => checks.push(Check::ok(
@@ -633,7 +655,7 @@ fn find_ascii_case_insensitive(input: &str, needle: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::ytmusic::signin::BrowserCandidate;
+    use crate::ytmusic::BrowserCandidate;
     use std::path::Path;
 
     fn system_backend_for_test() -> SystemDoctorBackend {
@@ -643,6 +665,54 @@ mod tests {
             account: Ok(None),
             connectivity: Ok(()),
         }
+    }
+
+    #[test]
+    fn missing_environment_cookie_uses_valid_configured_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-environment.txt");
+        let configured = directory.path().join("configured.txt");
+        let default = directory.path().join("default.txt");
+        std::fs::write(&configured, "configured").unwrap();
+        std::fs::write(&default, "default").unwrap();
+
+        let resolution = diagnostic_cookie_path(
+            Some(missing.to_string_lossy().into_owned()),
+            Some(configured.to_string_lossy().into_owned()),
+            Some(default),
+        );
+
+        assert_eq!(
+            resolution.path.as_deref(),
+            Some(configured.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            resolution.missing_requested_path.as_deref(),
+            Some(missing.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn missing_configured_cookie_uses_valid_default_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-configured.txt");
+        let default = directory.path().join("default.txt");
+        std::fs::write(&default, "default").unwrap();
+
+        let resolution = diagnostic_cookie_path(
+            None,
+            Some(missing.to_string_lossy().into_owned()),
+            Some(default.clone()),
+        );
+
+        assert_eq!(
+            resolution.path.as_deref(),
+            Some(default.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            resolution.missing_requested_path.as_deref(),
+            Some(missing.to_string_lossy().as_ref())
+        );
     }
 
     #[test]
@@ -694,10 +764,10 @@ mod tests {
             }
         }
 
-        fn broad_permissions() -> Self {
+        fn nonstandard_permissions() -> Self {
             Self {
                 failed: false,
-                mode: Some(0o644),
+                mode: Some(0o400),
             }
         }
     }
@@ -755,6 +825,7 @@ mod tests {
             &FakeDoctorBackend::healthy(),
             &Config::default(),
             Some(Path::new("/tmp/cookies")),
+            false,
         );
         let text = report.render();
         assert!(
@@ -770,6 +841,7 @@ mod tests {
             &FakeDoctorBackend::failed(),
             &Config::default(),
             Some(Path::new("/tmp/cookies")),
+            false,
         );
         assert_eq!(report.exit_code(), 1);
         assert!(report.render().contains("install ffmpeg"));
@@ -778,21 +850,45 @@ mod tests {
 
     #[test]
     fn anonymous_authentication_is_a_warning() {
-        let report = collect_with_backend(&FakeDoctorBackend::healthy(), &Config::default(), None);
+        let report = collect_with_backend(
+            &FakeDoctorBackend::healthy(),
+            &Config::default(),
+            None,
+            false,
+        );
         assert_eq!(report.exit_code(), 0);
         assert!(report.render().contains("no configured session"));
     }
 
     #[test]
-    fn broad_cookie_permissions_warn_with_a_private_mode_hint() {
+    fn missing_requested_cookie_is_reported_separately_from_the_selected_fallback() {
         let report = collect_with_backend(
-            &FakeDoctorBackend::broad_permissions(),
+            &FakeDoctorBackend::healthy(),
+            &Config::default(),
+            Some(Path::new("/tmp/selected-fallback")),
+            true,
+        );
+        let text = report.render();
+
+        assert_eq!(report.exit_code(), 0);
+        assert!(text.contains("requested cookie file: missing; using an available fallback"));
+        assert!(!text.contains("/tmp/selected-fallback"));
+    }
+
+    #[test]
+    fn non_0600_cookie_permissions_warn_with_a_private_mode_hint() {
+        let report = collect_with_backend(
+            &FakeDoctorBackend::nonstandard_permissions(),
             &Config::default(),
             Some(Path::new("/tmp/cookies")),
+            false,
         );
 
         assert_eq!(report.exit_code(), 0);
-        assert!(report.render().contains("chmod 600"));
+        let text = report.render();
+        assert!(text.contains("permissions are not 0600"));
+        assert!(!text.contains("broader"));
+        assert!(text.contains("chmod 600"));
     }
 
     struct CredentialDetailBackend;
@@ -841,6 +937,7 @@ mod tests {
             &CredentialDetailBackend,
             &Config::default(),
             Some(Path::new("/tmp/cookies")),
+            false,
         );
         let text = report.render();
         let lowercase = text.to_ascii_lowercase();

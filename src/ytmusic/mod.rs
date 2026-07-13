@@ -8,7 +8,7 @@
 pub mod auth;
 mod parse;
 mod provider;
-pub(crate) mod signin;
+mod signin;
 mod stream;
 
 use std::fmt;
@@ -19,6 +19,9 @@ use serde_json::{json, Value};
 pub use auth::Auth;
 pub use parse::AccountIdentity;
 pub use provider::{Bootstrap, YtMusic};
+pub(crate) use signin::{
+    detect_browser_candidates, resolve_cookie_path, BrowserCandidate, CookiePathResolution,
+};
 
 use crate::models::{Artist, CollectionKind, HomeSection, Lyrics, Playlist, SearchResults, Track};
 use crate::provider::SignInAccount;

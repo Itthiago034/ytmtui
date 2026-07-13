@@ -128,17 +128,19 @@ impl Report {
 }
 
 pub fn sanitize_detail(detail: &str, home: Option<&Path>) -> String {
-    let with_home_redacted = home
-        .and_then(Path::to_str)
-        .filter(|home| !home.is_empty())
-        .map_or_else(|| detail.to_owned(), |home| detail.replace(home, "$HOME"));
+    let home = home.and_then(Path::to_str).filter(|home| !home.is_empty());
 
-    with_home_redacted
+    let sanitized = detail
         .split(['\r', '\n'])
         .filter(|line| !line.is_empty())
-        .map(sanitize_line)
+        .map(|line| sanitize_line(line, home))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+
+    match home {
+        Some(home) => sanitized.replace(home, "$HOME"),
+        None => sanitized,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -156,7 +158,7 @@ impl CredentialMarker {
     ];
 }
 
-fn sanitize_line(line: &str) -> String {
+fn sanitize_line(line: &str, home: Option<&str>) -> String {
     let mut output = String::with_capacity(line.len());
     let mut remaining = line;
 
@@ -166,27 +168,20 @@ fn sanitize_line(line: &str) -> String {
 
         match marker {
             CredentialMarker::Sapisid => {
-                let value_end = remaining
-                    .find(|character: char| character == ';' || character.is_whitespace())
-                    .unwrap_or(remaining.len());
+                let value_end = remaining.find(';').unwrap_or(remaining.len());
                 output.push_str("[redacted]");
                 remaining = &remaining[value_end..];
             }
-            CredentialMarker::Authorization => {
+            CredentialMarker::Authorization | CredentialMarker::Cookie => {
                 let value_start = remaining.len() - remaining.trim_start().len();
                 output.push(' ');
                 output.push_str("[redacted]");
                 let value = &remaining[value_start..];
-                if let Some(home_start) = home_path_start(value) {
+                if let Some(home_token) = home.and_then(|home| actual_home_path_token(value, home))
+                {
                     output.push(' ');
-                    remaining = &value[home_start..];
-                } else {
-                    remaining = "";
+                    output.push_str(home_token);
                 }
-            }
-            CredentialMarker::Cookie => {
-                output.push(' ');
-                output.push_str("[redacted]");
                 remaining = "";
             }
         }
@@ -196,15 +191,23 @@ fn sanitize_line(line: &str) -> String {
     output
 }
 
-fn home_path_start(value: &str) -> Option<usize> {
-    value.match_indices("$HOME").find_map(|(offset, _)| {
-        let follows_whitespace = value[..offset]
-            .chars()
-            .next_back()
-            .is_some_and(char::is_whitespace);
-        let suffix = &value[offset + "$HOME".len()..];
-        let starts_path = suffix.is_empty() || suffix.starts_with('/');
-        (follows_whitespace && starts_path).then_some(offset)
+fn actual_home_path_token<'a>(value: &'a str, home: &str) -> Option<&'a str> {
+    value.match_indices(home).find_map(|(offset, _)| {
+        let starts_token = offset == 0
+            || value[..offset]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let suffix = &value[offset + home.len()..];
+        let extends_home_path = suffix.is_empty() || home.ends_with('/') || suffix.starts_with('/');
+        if !starts_token || !extends_home_path {
+            return None;
+        }
+
+        let suffix_end = suffix
+            .find(|character: char| character == ';' || character.is_whitespace())
+            .unwrap_or(suffix.len());
+        Some(&value[offset..offset + home.len() + suffix_end])
     })
 }
 
@@ -301,6 +304,46 @@ mod tests {
         assert!(!sanitized.contains("synthetic-first-token"));
         assert!(!sanitized.contains("synthetic-second-token"));
         assert!(sanitized.ends_with("safe detail"));
+    }
+
+    #[test]
+    fn authorization_preserves_only_the_actual_home_path_token() {
+        let source = concat!(
+            "Authorization: SAPISIDHASH synthetic-credential ",
+            "/home/alice/profile synthetic-second-token"
+        );
+
+        let sanitized = sanitize_detail(source, Some(Path::new("/home/alice")));
+
+        assert!(!sanitized.contains("synthetic-credential"));
+        assert!(!sanitized.contains("synthetic-second-token"));
+        assert!(!sanitized.contains("/home/alice"));
+        assert!(sanitized.contains("$HOME/profile"));
+    }
+
+    #[test]
+    fn literal_home_placeholder_does_not_bypass_authorization_redaction() {
+        let source = concat!(
+            "Authorization: SAPISIDHASH synthetic-credential ",
+            "$HOME/profile synthetic-second-token"
+        );
+
+        let sanitized = sanitize_detail(source, None);
+
+        assert!(!sanitized.contains("synthetic-credential"));
+        assert!(!sanitized.contains("synthetic-second-token"));
+        assert!(!sanitized.contains("$HOME/profile"));
+    }
+
+    #[test]
+    fn sapisid_redaction_continues_through_whitespace_to_cookie_delimiter() {
+        let source = "SAPISID=\"synthetic-first synthetic-second\"; safe detail";
+
+        let sanitized = sanitize_detail(source, None);
+
+        assert!(!sanitized.contains("synthetic-first"));
+        assert!(!sanitized.contains("synthetic-second"));
+        assert!(sanitized.ends_with("; safe detail"));
     }
 
     #[test]

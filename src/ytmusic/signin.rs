@@ -10,6 +10,9 @@ use std::time::Duration;
 use crate::config::AuthenticationConfig;
 use crate::provider::SignInAccount;
 
+// Task 3 transition: these narrowly scoped non-test allowances are removed
+// when Task 4 wires the preparation seam into the production provider.
+#[cfg_attr(not(test), allow(dead_code))]
 const PREPARED_FILE_PREFIX: &str = ".ytmtui-signin-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,12 +52,14 @@ impl BrowserCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct CandidateFailure {
     pub method: String,
     pub profile_label: Option<String>,
     pub reason: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl CandidateFailure {
     fn sanitized(candidate: &BrowserCandidate, reason: String) -> Self {
         Self {
@@ -66,6 +71,7 @@ impl CandidateFailure {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct PreparedCredentials {
     pub path: PathBuf,
     pub candidate: BrowserCandidate,
@@ -74,6 +80,7 @@ pub struct PreparedCredentials {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum SignInError {
     BrowserNotFound,
     ExportFailed(String),
@@ -90,6 +97,7 @@ impl fmt::Debug for SignInError {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl SignInError {
     fn sanitized_reason(&self) -> &'static str {
         match self {
@@ -112,11 +120,13 @@ impl fmt::Display for SignInError {
 
 impl std::error::Error for SignInError {}
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub trait SignInBackend: Send + Sync {
     fn export(&self, candidate: &BrowserCandidate, destination: &Path) -> Result<(), SignInError>;
     fn accounts(&self, path: &Path) -> Result<Vec<SignInAccount>, SignInError>;
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn prepare_with_backend<B>(
     candidates: Vec<BrowserCandidate>,
     config_dir: &Path,
@@ -181,6 +191,7 @@ where
     Err(SignInError::AllCandidatesFailed(failures))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn restrict_permissions(path: &Path) -> Result<(), SignInError> {
     #[cfg(unix)]
     {
@@ -191,6 +202,7 @@ fn restrict_permissions(path: &Path) -> Result<(), SignInError> {
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn cleanup_stale_prepared_files(config_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(config_dir) else {
         return;
@@ -221,6 +233,7 @@ fn cleanup_stale_prepared_files(config_dir: &Path) {
 }
 
 #[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn owned_by_current_user(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
 
@@ -233,6 +246,7 @@ fn owned_by_current_user(metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(not(test), allow(dead_code))]
 fn owned_by_current_user(_metadata: &std::fs::Metadata) -> bool {
     false
 }
@@ -453,7 +467,15 @@ pub fn export_browser_cookies(browser: &str, dest: &Path) -> Result<(), String> 
 /// details are intentionally discarded at this boundary; callers receive only
 /// typed errors whose display text is sanitized.
 #[derive(Debug, Default, Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct SystemSignInBackend;
+
+fn block_on_current_runtime<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::runtime::Handle::current().block_on(future)
+}
 
 impl SignInBackend for SystemSignInBackend {
     fn export(&self, candidate: &BrowserCandidate, destination: &Path) -> Result<(), SignInError> {
@@ -479,19 +501,8 @@ impl SignInBackend for SystemSignInBackend {
 
     fn accounts(&self, path: &Path) -> Result<Vec<SignInAccount>, SignInError> {
         let path = path.to_string_lossy().into_owned();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| SignInError::Io(error.to_string()))?;
-            runtime
-                .block_on(super::YtMusicClient::enumerate_cookie_accounts(&path))
-                .map_err(|_| {
-                    SignInError::AccountValidationFailed("account enumeration failed".into())
-                })
-        })
-        .join()
-        .map_err(|_| SignInError::AccountValidationFailed("account enumeration failed".into()))?
+        block_on_current_runtime(super::YtMusicClient::enumerate_cookie_accounts(&path))
+            .map_err(|_| SignInError::AccountValidationFailed("account enumeration failed".into()))
     }
 }
 
@@ -575,6 +586,7 @@ mod tests {
         let prepared =
             prepare_with_backend(test_candidates(), temp.path(), &backend, &|_| {}).unwrap();
         assert_eq!(prepared.candidate.method, "firefox");
+        assert_eq!(prepared.accounts.len(), 1);
         assert_eq!(backend.attempts(), vec!["firefox"]);
     }
 
@@ -638,9 +650,25 @@ mod tests {
 
     #[test]
     fn typed_error_debug_output_is_sanitized() {
-        let error = SignInError::ExportFailed("cookie=secret raw stderr".into());
+        let errors = [
+            SignInError::ExportFailed("cookie=secret raw stderr".into()),
+            SignInError::NoYouTubeSession,
+            SignInError::AccountValidationFailed("raw API body".into()),
+        ];
 
-        assert_eq!(format!("{error:?}"), "browser export failed");
+        assert_eq!(format!("{:?}", errors[0]), "browser export failed");
+        assert_eq!(format!("{:?}", errors[1]), "no YouTube session");
+        assert_eq!(format!("{:?}", errors[2]), "account validation failed");
+    }
+
+    #[tokio::test]
+    async fn blocking_backend_work_uses_the_existing_runtime() {
+        let _backend = SystemSignInBackend;
+        let value = tokio::task::spawn_blocking(|| block_on_current_runtime(async { 42 }))
+            .await
+            .unwrap();
+
+        assert_eq!(value, 42);
     }
 
     #[test]

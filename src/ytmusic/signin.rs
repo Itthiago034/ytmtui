@@ -11,6 +11,7 @@ use crate::config::AuthenticationConfig;
 use crate::provider::SignInAccount;
 
 const PREPARED_FILE_PREFIX: &str = ".ytmtui-signin-";
+const NETSCAPE_COOKIE_HEADER: &str = "# Netscape HTTP Cookie File\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserCandidate {
@@ -140,6 +141,12 @@ where
             .tempfile_in(config_dir)
             .map_err(|error| SignInError::Io(error.to_string()))?;
         restrict_permissions(temporary.path())?;
+        // `yt-dlp --cookies` treats an existing destination as an input file
+        // first. A secure, pre-created but empty tempfile is therefore
+        // rejected before browser export. Keep the private tempfile and give
+        // it the minimal valid Netscape cookie-jar header it expects.
+        std::fs::write(temporary.path(), NETSCAPE_COOKIE_HEADER)
+            .map_err(|error| SignInError::Io(error.to_string()))?;
 
         if let Err(error) = backend.export(&candidate, temporary.path()) {
             let reason = error.sanitized_reason().to_string();
@@ -557,6 +564,50 @@ mod tests {
                 handle: None,
             }])
         }
+    }
+
+    struct NetscapeHeaderBackend;
+
+    impl SignInBackend for NetscapeHeaderBackend {
+        fn export(
+            &self,
+            _candidate: &BrowserCandidate,
+            destination: &Path,
+        ) -> Result<(), SignInError> {
+            let initial = std::fs::read_to_string(destination)
+                .map_err(|error| SignInError::Io(error.to_string()))?;
+            if !initial.starts_with("# Netscape HTTP Cookie File") {
+                return Err(SignInError::ExportFailed(
+                    "invalid cookie file header".into(),
+                ));
+            }
+            std::fs::write(destination, "exported cookies")
+                .map_err(|error| SignInError::Io(error.to_string()))
+        }
+
+        fn accounts(&self, _path: &Path) -> Result<Vec<SignInAccount>, SignInError> {
+            Ok(vec![SignInAccount {
+                index: 0,
+                name: "Thiago Santos".into(),
+                handle: None,
+            }])
+        }
+    }
+
+    #[test]
+    fn initializes_private_destination_as_a_netscape_cookie_file() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let prepared = prepare_with_backend(
+            vec![BrowserCandidate::firefox(None)],
+            temp.path(),
+            &NetscapeHeaderBackend,
+            &|_| {},
+        )
+        .unwrap();
+
+        assert_eq!(prepared.candidate.method, "firefox");
+        std::fs::remove_file(prepared.path).unwrap();
     }
 
     #[test]

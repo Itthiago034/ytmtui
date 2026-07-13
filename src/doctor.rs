@@ -207,6 +207,10 @@ fn actual_home_path_token<'a>(value: &'a str, home: &str) -> Option<&'a str> {
         let suffix_end = suffix
             .find(|character: char| character == ';' || character.is_whitespace())
             .unwrap_or(suffix.len());
+        if next_marker(&suffix[..suffix_end]).is_some() {
+            return None;
+        }
+
         Some(&value[offset..offset + home.len() + suffix_end])
     })
 }
@@ -333,6 +337,34 @@ mod tests {
         assert!(!sanitized.contains("synthetic-credential"));
         assert!(!sanitized.contains("synthetic-second-token"));
         assert!(!sanitized.contains("$HOME/profile"));
+    }
+
+    #[test]
+    fn nested_sapisid_marker_invalidates_a_preserved_home_token() {
+        let source = concat!(
+            "Authorization: Bearer synthetic-outer-token ",
+            "/home/alice/SAPISID=synthetic-inner-token"
+        );
+
+        let sanitized = sanitize_detail(source, Some(Path::new("/home/alice")));
+
+        assert!(!sanitized.contains("synthetic-outer-token"));
+        assert!(!sanitized.contains("synthetic-inner-token"));
+        assert!(!sanitized.contains("SAPISID="));
+    }
+
+    #[test]
+    fn nested_header_marker_invalidates_a_preserved_home_token() {
+        let source = concat!(
+            "Authorization: Bearer synthetic-outer-token ",
+            "/home/alice/cOoKiE:synthetic-inner-token"
+        );
+
+        let sanitized = sanitize_detail(source, Some(Path::new("/home/alice")));
+
+        assert!(!sanitized.contains("synthetic-outer-token"));
+        assert!(!sanitized.contains("synthetic-inner-token"));
+        assert!(!sanitized.to_ascii_lowercase().contains("cookie:"));
     }
 
     #[test]

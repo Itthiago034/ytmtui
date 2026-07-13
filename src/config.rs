@@ -313,7 +313,10 @@ mod tests {
     fn invalid_enum_strings_fall_back_to_the_default_variant() {
         assert_eq!(ArtworkMode::from_config("xyz"), ArtworkMode::Auto);
         assert_eq!(HomeDensity::from_config("xyz"), HomeDensity::Comfortable);
-        assert_eq!(VisualizerStyle::from_config("xyz"), VisualizerStyle::Gradient);
+        assert_eq!(
+            VisualizerStyle::from_config("xyz"),
+            VisualizerStyle::Gradient
+        );
         assert_eq!(AnimationSpeed::from_config("xyz"), AnimationSpeed::Normal);
         // Vazio ou com caixa diferente também são "desconhecidos".
         assert_eq!(ArtworkMode::from_config(""), ArtworkMode::Auto);
@@ -327,7 +330,10 @@ mod tests {
         // O valor bruto é preservado pelo serde (é só uma String); é
         // `ArtworkMode::from_config` que tolera o valor inválido.
         assert_eq!(config.artwork_mode, "xyz");
-        assert_eq!(ArtworkMode::from_config(&config.artwork_mode), ArtworkMode::Auto);
+        assert_eq!(
+            ArtworkMode::from_config(&config.artwork_mode),
+            ArtworkMode::Auto
+        );
     }
 
     #[test]

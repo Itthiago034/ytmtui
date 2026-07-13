@@ -129,7 +129,10 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
         let interval = crate::ui::marquee_interval(app.animation_speed);
         let step = (app.player.position().as_millis() / interval) as usize;
         crate::ui::marquee_spans(
-            &[(title.as_str(), title_style), (subtitle.as_str(), subtitle_style)],
+            &[
+                (title.as_str(), title_style),
+                (subtitle.as_str(), subtitle_style),
+            ],
             avail,
             step,
         )

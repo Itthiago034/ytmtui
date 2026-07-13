@@ -1175,9 +1175,7 @@ impl App {
         }
         if self.shuffle {
             let unplayed: Vec<usize> = (0..len)
-                .filter(|&i| {
-                    i != idx && !self.shuffle_played.contains(&self.queue[i].video_id)
-                })
+                .filter(|&i| i != idx && !self.shuffle_played.contains(&self.queue[i].video_id))
                 .collect();
             if !unplayed.is_empty() {
                 let pick = (self.next_rand() % unplayed.len() as u64) as usize;
@@ -2596,9 +2594,11 @@ mod tests {
         app.current = Some(Track::default());
         app.loading_audio = true;
         app.lyrics = crate::lyrics::LyricsState::Plain("la la".to_string());
-        app.artwork_source = Some(image::DynamicImage::ImageRgb8(
-            image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3])),
-        ));
+        app.artwork_source = Some(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([1, 2, 3]),
+        )));
         app.queue = vec![Track::default(), Track::default()];
         app.queue_index = Some(1);
 
@@ -2728,7 +2728,11 @@ mod tests {
         assert_eq!(app.queue[1].video_id, "c");
         assert_eq!(app.queue[2].video_id, "b");
         assert_eq!(app.queue_index, Some(2), "playing track followed the swap");
-        assert_eq!(app.list_state.selected(), Some(1), "selection followed the move");
+        assert_eq!(
+            app.list_state.selected(),
+            Some(1),
+            "selection followed the move"
+        );
 
         // Edges saturate: can't move the first row further up.
         app.list_state.select(Some(0));
@@ -2787,7 +2791,11 @@ mod tests {
         }
         let next = app.compute_next(1, true);
         assert!(next.is_some(), "repeat all recycles the queue");
-        assert_ne!(next, Some(1), "never repeats the current track back-to-back");
+        assert_ne!(
+            next,
+            Some(1),
+            "never repeats the current track back-to-back"
+        );
     }
 
     #[test]
@@ -2816,8 +2824,7 @@ mod tests {
 
     #[test]
     fn session_expiry_maps_to_the_dedicated_message() {
-        let message =
-            client_error_message("Could not load library", ProviderError::SessionExpired);
+        let message = client_error_message("Could not load library", ProviderError::SessionExpired);
         assert!(matches!(message, Msg::SessionExpired));
     }
 
@@ -2827,9 +2834,7 @@ mod tests {
         app.home = home_sections();
         app.begin_task();
 
-        app.tx
-            .send(Msg::HomeFailed("boom".to_string()))
-            .unwrap();
+        app.tx.send(Msg::HomeFailed("boom".to_string())).unwrap();
         app.drain_messages();
 
         assert_eq!(
@@ -2902,8 +2907,14 @@ mod tests {
         let fast = deadline_for(AnimationSpeed::Fast);
         let normal = deadline_for(AnimationSpeed::Normal);
         let slow = deadline_for(AnimationSpeed::Slow);
-        assert!(fast < normal, "fast ({fast:?}) must be shorter than normal ({normal:?})");
-        assert!(normal < slow, "normal ({normal:?}) must be shorter than slow ({slow:?})");
+        assert!(
+            fast < normal,
+            "fast ({fast:?}) must be shorter than normal ({normal:?})"
+        );
+        assert!(
+            normal < slow,
+            "normal ({normal:?}) must be shorter than slow ({slow:?})"
+        );
     }
 
     #[test]

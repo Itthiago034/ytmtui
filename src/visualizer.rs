@@ -179,7 +179,11 @@ impl SpectrumAnalyzer {
         }
         self.fft.process(&mut self.scratch);
 
-        for (slot, c) in self.magnitudes.iter_mut().zip(&self.scratch[..FFT_SIZE / 2]) {
+        for (slot, c) in self
+            .magnitudes
+            .iter_mut()
+            .zip(&self.scratch[..FFT_SIZE / 2])
+        {
             *slot = (c.re * c.re + c.im * c.im).sqrt();
         }
         let raw = bucket_bins(&self.magnitudes, &self.bar_bins);
@@ -337,14 +341,22 @@ mod tests {
             analyzer.push_samples(&chunk);
             fed += CHUNK_SAMPLES;
         }
-        assert_eq!(*analyzer.bars(), [0.0; BAR_COUNT], "no FFT before compute_frame");
+        assert_eq!(
+            *analyzer.bars(),
+            [0.0; BAR_COUNT],
+            "no FFT before compute_frame"
+        );
         analyzer.compute_frame();
         assert!(
             analyzer.bars().iter().any(|&b| b > 0.1),
             "a pure tone must light up at least one bar"
         );
         assert!(
-            analyzer.peaks().iter().zip(analyzer.bars()).all(|(p, b)| p >= b),
+            analyzer
+                .peaks()
+                .iter()
+                .zip(analyzer.bars())
+                .all(|(p, b)| p >= b),
             "caps sit at or above their bars"
         );
     }

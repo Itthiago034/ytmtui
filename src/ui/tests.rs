@@ -294,7 +294,10 @@ fn visualizer_off_draws_no_bar_glyphs_in_the_player_panel() {
 #[test]
 fn visualizer_gradient_draws_bar_glyphs_when_a_tone_is_playing() {
     let mut app = playing_app();
-    debug_assert!(app.visualizer_style == VisualizerStyle::Gradient, "default style");
+    debug_assert!(
+        app.visualizer_style == VisualizerStyle::Gradient,
+        "default style"
+    );
     feed_a_tone(&mut app);
 
     let buffer = render(&mut app, 100, 20);
@@ -385,14 +388,20 @@ fn metadata_stage_pure_thresholds() {
 
 #[test]
 fn marquee_interval_orders_fast_below_normal_below_slow() {
-    use crate::config::AnimationSpeed;
     use super::marquee_interval;
+    use crate::config::AnimationSpeed;
 
     let fast = marquee_interval(AnimationSpeed::Fast);
     let normal = marquee_interval(AnimationSpeed::Normal);
     let slow = marquee_interval(AnimationSpeed::Slow);
-    assert!(fast < normal, "fast ({fast}) must be quicker than normal ({normal})");
-    assert!(normal < slow, "normal ({normal}) must be quicker than slow ({slow})");
+    assert!(
+        fast < normal,
+        "fast ({fast}) must be quicker than normal ({normal})"
+    );
+    assert!(
+        normal < slow,
+        "normal ({normal}) must be quicker than slow ({slow})"
+    );
 }
 
 #[test]

@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod config;
+pub mod doctor;
 pub mod event;
 pub mod home;
 pub mod lyrics;

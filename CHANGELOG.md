@@ -22,6 +22,10 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.
   das contas antes de substituir a sessão. `Esc` preserva a sessão atual, e o
   navegador/perfil e o índice de conta confirmados persistem entre execuções,
   inclusive índices diferentes de zero.
+- **Diagnóstico seguro fora da TUI**: `ytmtui doctor` verifica ferramentas,
+  navegadores, permissões/validade dos cookies, conectividade e a conta
+  configurada sem renovar nem substituir cookies; a saída é sanitizada e os
+  códigos `0`/`1` distinguem avisos opcionais de falhas obrigatórias.
 - **Busca unificada**: a seção Buscar agora mostra os resultados agrupados
   por tipo — Músicas, Artistas, **Álbuns** (novo filtro) e Playlists — em uma
   única lista; `Enter` toca a música, abre o artista ou carrega o

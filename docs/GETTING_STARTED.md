@@ -105,6 +105,13 @@ See the full [Keymap](KEYMAP.md).
 
 ## If Something Breaks
 
+Run `ytmtui doctor` outside the TUI first. It checks runtime tools, supported
+browsers, cookie-file permissions and validity, connectivity, and the
+configured YouTube account without refreshing or replacing cookies. Exit code
+`0` means no required check failed, even if optional warnings remain; `1`
+means at least one required check failed. Sensitive details are redacted, but
+review the output before sharing it.
+
 Start with [Troubleshooting](TROUBLESHOOTING.md). The most common issues are
 missing `yt-dlp`/`ffmpeg`, expired cookies, blocked datacenter IPs, and audio
 devices not being available.

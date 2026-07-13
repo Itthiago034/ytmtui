@@ -102,6 +102,15 @@ runtime dependencies are missing. For source builds and first-run guidance, see
 | Rust 1.75+ | Required only when building from source |
 | ALSA dev libs | Needed for Linux source builds with audio |
 
+## Quick Diagnosis
+
+Run `ytmtui doctor` outside the TUI to check runtime tools, supported browsers,
+cookie-file permissions and validity, connectivity, and the configured YouTube
+account. It never refreshes or replaces cookies. Exit code `0` means no
+required check failed, even if optional warnings remain; `1` means at least one
+required check failed. Sensitive details are redacted, but review the output
+before sharing it.
+
 ## Development
 
 ```bash
@@ -110,8 +119,9 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI runs formatting, clippy, and tests on pushes/PRs. Release tags (`v*`) publish
-Linux and macOS binaries through GitHub Actions.
+CI runs formatting, clippy, tests, and a non-TTY `doctor` smoke check on
+pushes/PRs. Release tags (`v*`) publish Linux and macOS binaries through GitHub
+Actions.
 
 Start with [Architecture](docs/ARCHITECTURE.md) if you want to contribute.
 

@@ -52,6 +52,7 @@ ytmtui is a Rust terminal client for YouTube Music. It uses:
 | `src/lib.rs` | Public module wiring for tests and examples. |
 | `src/app.rs` | Central application state, async task coordination, queue, sections, playback orchestration, recent history. |
 | `src/app/authentication.rs` | Browser-cookie discovery/import through `yt-dlp --cookies-from-browser`. |
+| `src/doctor.rs` | Read-only runtime, browser, cookie metadata, connectivity, and configured-account diagnostics. |
 | `src/config.rs` | Persistent JSON config: volume, shuffle, repeat, cookies, theme, username, sync interval. |
 | `src/theme.rs` | Accent themes and tinted UI palette helpers. |
 | `src/event.rs` | Keyboard events mapped to `App` methods. |
@@ -83,6 +84,20 @@ inside drawing:
 
 The `rodio::OutputStream` is not `Send`, so playback lives on a dedicated audio
 thread controlled by commands such as play, pause, stop, seek, and volume.
+
+## Doctor Flow
+
+`ytmtui doctor` is dispatched in `main.rs` before terminal raw mode, the
+alternate screen, audio, artwork, or MPRIS are initialized. `src/doctor.rs`
+checks runtime tools, supported browser candidates, cookie-file permissions and
+validity, connectivity, and the configured account, then renders the `Runtime`,
+`Authentication`, `Connectivity`, and `Summary:` sections as plain text.
+
+The command is read-only: it never imports, refreshes, replaces, or uploads
+cookies. Rendered diagnostics redact credential markers, home paths, and
+external process details, but users should still review output before sharing
+it. Exit code `0` means no required check failed, even when optional warnings
+remain; exit code `1` means at least one required check failed.
 
 ## Search Flow
 

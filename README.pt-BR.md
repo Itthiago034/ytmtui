@@ -102,6 +102,16 @@ veja [Primeiros Passos](docs/GETTING_STARTED.pt-BR.md).
 | Rust 1.75+ | Necessário só para compilar do código-fonte |
 | libs ALSA dev | Necessárias para builds Linux com áudio |
 
+## Diagnóstico Rápido
+
+Execute `ytmtui doctor` fora da TUI para verificar ferramentas de execução,
+navegadores suportados, permissões e validade do arquivo de cookies,
+conectividade e a conta do YouTube configurada. Ele nunca renova nem substitui
+cookies. O código de saída `0` significa que nenhuma verificação obrigatória
+falhou, mesmo que restem avisos opcionais; `1` significa que ao menos uma
+verificação obrigatória falhou. Detalhes sensíveis são ocultados, mas revise a
+saída antes de compartilhá-la.
+
 ## Desenvolvimento
 
 ```bash
@@ -110,8 +120,9 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-O CI roda formatação, clippy e testes em pushes/PRs. Tags de release (`v*`)
-publicam binários Linux e macOS pelo GitHub Actions.
+O CI roda formatação, clippy, testes e uma verificação rápida do `doctor` sem
+TTY em pushes/PRs. Tags de release (`v*`) publicam binários Linux e macOS pelo
+GitHub Actions.
 
 Comece pela [Arquitetura](docs/ARCHITECTURE.md) se quiser contribuir.
 

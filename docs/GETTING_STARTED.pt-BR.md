@@ -107,6 +107,14 @@ Veja o [Mapa de Teclas](KEYMAP.pt-BR.md) completo.
 
 ## Se Algo Quebrar
 
+Execute `ytmtui doctor` fora da TUI primeiro. Ele verifica ferramentas de
+execução, navegadores suportados, permissões e validade do arquivo de cookies,
+conectividade e a conta do YouTube configurada sem renovar nem substituir
+cookies. O código de saída `0` significa que nenhuma verificação obrigatória
+falhou, mesmo que restem avisos opcionais; `1` significa que ao menos uma
+verificação obrigatória falhou. Detalhes sensíveis são ocultados, mas revise a
+saída antes de compartilhá-la.
+
 Comece por [Solução de Problemas](TROUBLESHOOTING.pt-BR.md). Os problemas mais
 comuns são `yt-dlp`/`ffmpeg` ausentes, cookies expirados, IPs de datacenter
 bloqueados e dispositivos de áudio indisponíveis.

@@ -12,6 +12,15 @@ Useful companion docs:
 - [Authentication](AUTHENTICATION.md)
 - [Keymap](KEYMAP.md)
 
+## Start with Doctor
+
+Run `ytmtui doctor` outside the TUI. It checks runtime tools, supported
+browsers, cookie-file permissions and validity, connectivity, and the
+configured YouTube account. It never refreshes or replaces cookies. Exit code
+`0` means no required check failed, even if optional warnings remain; `1`
+means at least one required check failed. Sensitive details are redacted, but
+review the output before sharing it.
+
 ## Missing Dependencies at Startup
 
 ytmtui checks for `yt-dlp`, `ffmpeg`, and `deno` at launch. Playback needs

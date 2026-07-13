@@ -12,6 +12,16 @@ Docs úteis junto deste guia:
 - [Autenticação](AUTHENTICATION.pt-BR.md)
 - [Mapa de Teclas](KEYMAP.pt-BR.md)
 
+## Comece pelo Doctor
+
+Execute `ytmtui doctor` fora da TUI. Ele verifica ferramentas de execução,
+navegadores suportados, permissões e validade do arquivo de cookies,
+conectividade e a conta do YouTube configurada. Ele nunca renova nem substitui
+cookies. O código de saída `0` significa que nenhuma verificação obrigatória
+falhou, mesmo que restem avisos opcionais; `1` significa que ao menos uma
+verificação obrigatória falhou. Detalhes sensíveis são ocultados, mas revise a
+saída antes de compartilhá-la.
+
 ## Dependências Ausentes ao Iniciar
 
 O ytmtui checa `yt-dlp`, `ffmpeg` e `deno` ao abrir. A reprodução precisa de

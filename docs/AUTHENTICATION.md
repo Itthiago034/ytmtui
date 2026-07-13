@@ -46,6 +46,15 @@ moving that browser ahead of Firefox in discovery order.
 If the browser has no valid YouTube Music session, sign in there first and
 press `g` again.
 
+## Diagnose Without Changing Cookies
+
+Run `ytmtui doctor` outside the TUI to check runtime tools, supported browsers,
+cookie-file permissions and validity, connectivity, and the configured YouTube
+account. The command never refreshes or replaces cookies. Exit code `0` means
+no required check failed, even if optional warnings remain; `1` means at least
+one required check failed. Sensitive details are redacted, but review the
+output before sharing it.
+
 ## Script-Based Refresh
 
 You can refresh cookies outside the app:

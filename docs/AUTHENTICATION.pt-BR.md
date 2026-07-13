@@ -47,6 +47,16 @@ ordem de detecção.
 Se o navegador não tiver uma sessão válida do YouTube Music, faça login nele e
 pressione `g` de novo.
 
+## Diagnóstico Sem Alterar Cookies
+
+Execute `ytmtui doctor` fora da TUI para verificar ferramentas de execução,
+navegadores suportados, permissões e validade do arquivo de cookies,
+conectividade e a conta do YouTube configurada. O comando nunca renova nem
+substitui cookies. O código de saída `0` significa que nenhuma verificação
+obrigatória falhou, mesmo que restem avisos opcionais; `1` significa que ao
+menos uma verificação obrigatória falhou. Detalhes sensíveis são ocultados, mas
+revise a saída antes de compartilhá-la.
+
 ## Renovação por Script
 
 Você também pode renovar cookies fora do app:

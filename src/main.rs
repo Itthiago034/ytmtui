@@ -6,6 +6,7 @@
 use ytmtui::config::ArtworkMode;
 use ytmtui::{app, event, mpris, player, ui};
 
+use std::ffi::OsStr;
 use std::io::{self, Stdout};
 use std::time::Duration;
 
@@ -24,6 +25,14 @@ use app::App;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut args = std::env::args_os();
+    let _program = args.next();
+    if matches!(args.next().as_deref(), Some(value) if value == OsStr::new("doctor")) {
+        let report = ytmtui::doctor::run().await;
+        print!("{}", report.render());
+        std::process::exit(report.exit_code());
+    }
+
     // Garante restauração do terminal mesmo em caso de panic. Panics na thread
     // de áudio são capturados lá (catch_unwind), então aqui os ignoramos para
     // não sair da tela alternativa nem imprimir lixo por cima da TUI.

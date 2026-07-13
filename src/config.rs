@@ -226,6 +226,11 @@ fn config_path() -> Option<PathBuf> {
 }
 
 impl Config {
+    /// Returns the persisted configuration path when the platform provides one.
+    pub fn path() -> Option<PathBuf> {
+        config_path()
+    }
+
     /// Carrega a configuração do disco; retorna o padrão em caso de erro.
     pub fn load() -> Self {
         let Some(path) = config_path() else {

@@ -1,7 +1,405 @@
 //! Structured, plain-text diagnostic reports.
 
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+use crate::config::{AuthenticationConfig, Config};
+use crate::ytmusic::auth::Auth;
+use crate::ytmusic::signin::{detect_browser_candidates, BrowserCandidate};
+use crate::ytmusic::YtMusicClient;
+
+const RUNTIME: &str = "Runtime";
+const AUTHENTICATION: &str = "Authentication";
+const CONNECTIVITY: &str = "Connectivity";
+
+trait DoctorBackend: Send + Sync {
+    fn tool_version(&self, command: &str) -> Result<String, String>;
+    fn browser_candidates(&self) -> Vec<BrowserCandidate>;
+    fn cookie_metadata(&self, path: &Path) -> Result<CookieMetadata, String>;
+    fn configured_account(&self, path: &Path, auth_user: u8) -> Result<Option<String>, String>;
+    fn connectivity(&self) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone)]
+struct CookieMetadata {
+    exists: bool,
+    is_file: bool,
+    len: u64,
+    mode: Option<u32>,
+    valid: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SystemDoctorBackend {
+    home: Option<PathBuf>,
+    authentication: AuthenticationConfig,
+    account: Result<Option<String>, String>,
+    connectivity: Result<(), String>,
+}
+
+impl DoctorBackend for SystemDoctorBackend {
+    fn tool_version(&self, command: &str) -> Result<String, String> {
+        for flag in version_flags(command) {
+            let output = Command::new(command)
+                .arg(flag)
+                .output()
+                .map_err(|_| "not found".to_string())?;
+            if !output.status.success() {
+                continue;
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let line = stdout
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .ok_or_else(|| "version unavailable".to_string())?;
+            return Ok(sanitize_external(line, self.home.as_deref()));
+        }
+        Err("version check failed".into())
+    }
+
+    fn browser_candidates(&self) -> Vec<BrowserCandidate> {
+        self.home
+            .as_deref()
+            .map(|home| detect_browser_candidates(home, &self.authentication))
+            .unwrap_or_default()
+    }
+
+    fn cookie_metadata(&self, path: &Path) -> Result<CookieMetadata, String> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(CookieMetadata {
+                    exists: false,
+                    is_file: false,
+                    len: 0,
+                    mode: None,
+                    valid: false,
+                });
+            }
+            Err(_) => return Err("metadata unavailable".into()),
+        };
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            Some(metadata.permissions().mode() & 0o777)
+        };
+        #[cfg(not(unix))]
+        let mode = None;
+
+        Ok(CookieMetadata {
+            exists: true,
+            is_file: metadata.is_file(),
+            len: metadata.len(),
+            mode,
+            valid: metadata.is_file() && Auth::validate_cookie_file(path).is_ok(),
+        })
+    }
+
+    fn configured_account(&self, _path: &Path, _auth_user: u8) -> Result<Option<String>, String> {
+        self.account.clone()
+    }
+
+    fn connectivity(&self) -> Result<(), String> {
+        self.connectivity.clone()
+    }
+}
+
+fn version_flags(command: &str) -> &'static [&'static str] {
+    if command == "ffmpeg" {
+        &["--version", "-version"]
+    } else {
+        &["--version"]
+    }
+}
+
+/// Collects diagnostics without entering terminal mode or constructing app services.
+pub async fn run() -> Report {
+    let initial = tokio::task::spawn_blocking(|| {
+        let config = Config::load();
+        let cookie_path = diagnostic_cookie_path(&config);
+        let cookie_is_file = cookie_path.as_deref().is_some_and(is_regular_file);
+        (config, cookie_path, cookie_is_file, dirs::home_dir())
+    })
+    .await;
+    let Ok((config, cookie_path, cookie_is_file, home)) = initial else {
+        return Report::new(vec![Check::failure(
+            RUNTIME,
+            "diagnostic worker",
+            "local checks could not start",
+            "try running ytmtui doctor again",
+        )]);
+    };
+
+    let connectivity = probe_connectivity().await;
+    let account = if cookie_is_file {
+        probe_account(
+            cookie_path
+                .clone()
+                .expect("cookie_is_file requires a cookie path"),
+            config.authentication.auth_user,
+        )
+        .await
+    } else {
+        Ok(None)
+    };
+    let backend = SystemDoctorBackend {
+        home,
+        authentication: config.authentication.clone(),
+        account,
+        connectivity,
+    };
+
+    tokio::task::spawn_blocking(move || {
+        collect_with_backend(&backend, &config, cookie_path.as_deref())
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Report::new(vec![Check::failure(
+            RUNTIME,
+            "diagnostic worker",
+            "local checks did not finish",
+            "try running ytmtui doctor again",
+        )])
+    })
+}
+
+fn diagnostic_cookie_path(config: &Config) -> Option<PathBuf> {
+    std::env::var_os("YTM_COOKIES")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            config
+                .cookies
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            Config::path()
+                .and_then(|path| path.parent().map(|parent| parent.join("cookies.txt")))
+                .filter(|path| path.is_file())
+        })
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+async fn probe_connectivity() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "HTTP client unavailable".to_string())?;
+    let response = client
+        .get("https://music.youtube.com/")
+        .send()
+        .await
+        .map_err(|_| "YouTube Music is unreachable".to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err("YouTube Music returned an unsuccessful status".into())
+    }
+}
+
+async fn probe_account(path: PathBuf, auth_user: u8) -> Result<Option<String>, String> {
+    let client = tokio::task::spawn_blocking(move || {
+        let path = path
+            .to_str()
+            .ok_or_else(|| "configured session path is unsupported".to_string())?;
+        YtMusicClient::with_cookies_for_account(path, auth_user)
+            .map_err(|_| "configured session is invalid".to_string())
+    })
+    .await
+    .map_err(|_| "account check could not start".to_string())??;
+
+    client
+        .get_account_identity()
+        .await
+        .map(|identity| identity.map(|identity| identity.name))
+        .map_err(|_| "configured account request failed".to_string())
+}
+
+fn collect_with_backend<B: DoctorBackend + ?Sized>(
+    backend: &B,
+    config: &Config,
+    cookie_path: Option<&Path>,
+) -> Report {
+    let mut checks = Vec::new();
+    for (command, required) in [("yt-dlp", true), ("ffmpeg", true), ("deno", false)] {
+        match backend.tool_version(command) {
+            Ok(version) => checks.push(Check::ok(
+                RUNTIME,
+                command,
+                sanitize_external(&version, dirs::home_dir().as_deref()),
+            )),
+            Err(_) if required => checks.push(Check::failure(
+                RUNTIME,
+                command,
+                "not available",
+                format!("install {command}"),
+            )),
+            Err(_) => checks.push(Check::warning(
+                RUNTIME,
+                command,
+                "optional runtime not available",
+            )),
+        }
+    }
+
+    let candidates = backend.browser_candidates();
+    if candidates.is_empty() {
+        checks.push(Check::warning(
+            AUTHENTICATION,
+            "browser sessions",
+            "no supported browser cookie store detected",
+        ));
+    } else {
+        for candidate in candidates {
+            checks.push(Check::ok(
+                AUTHENTICATION,
+                "browser session",
+                browser_label(&candidate),
+            ));
+        }
+    }
+
+    match cookie_path {
+        None => checks.push(Check::warning(
+            AUTHENTICATION,
+            "configured session",
+            "no configured session",
+        )),
+        Some(path) => match backend.cookie_metadata(path) {
+            Err(_) => checks.push(invalid_cookie_check("cookie metadata is unavailable")),
+            Ok(metadata) if !metadata.exists => {
+                checks.push(invalid_cookie_check("configured cookie file is missing"));
+            }
+            Ok(metadata) if !metadata.is_file => {
+                checks.push(invalid_cookie_check("configured cookie path is not a file"));
+            }
+            Ok(metadata) if metadata.len == 0 => {
+                checks.push(invalid_cookie_check("configured cookie file is empty"));
+            }
+            Ok(metadata) if !metadata.valid => {
+                checks.push(invalid_cookie_check(
+                    "configured authentication cookies are invalid",
+                ));
+            }
+            Ok(metadata) => {
+                match metadata.mode {
+                    Some(0o600) => checks.push(Check::ok(
+                        AUTHENTICATION,
+                        "cookie file",
+                        "valid and private (mode 0600)",
+                    )),
+                    Some(_) => checks.push(Check::new(
+                        AUTHENTICATION,
+                        Severity::Warning,
+                        "cookie file",
+                        "valid but permissions are broader than 0600",
+                        Some("run chmod 600 on the configured cookie file".into()),
+                    )),
+                    None => checks.push(Check::ok(
+                        AUTHENTICATION,
+                        "cookie file",
+                        "valid cookie file",
+                    )),
+                }
+
+                match backend.configured_account(path, config.authentication.auth_user) {
+                    Ok(Some(name)) => checks.push(Check::ok(
+                        AUTHENTICATION,
+                        "configured account",
+                        format!(
+                            "{} (account index {})",
+                            sanitize_external(&name, dirs::home_dir().as_deref()),
+                            config.authentication.auth_user
+                        ),
+                    )),
+                    Ok(None) => checks.push(Check::failure(
+                        AUTHENTICATION,
+                        "configured account",
+                        "no account identity was returned",
+                        "press g to sign in again",
+                    )),
+                    Err(_) => checks.push(Check::failure(
+                        AUTHENTICATION,
+                        "configured account",
+                        "account check failed",
+                        "press g to sign in again",
+                    )),
+                }
+            }
+        },
+    }
+
+    match backend.connectivity() {
+        Ok(()) => checks.push(Check::ok(
+            CONNECTIVITY,
+            "YouTube Music",
+            "reachable over HTTPS",
+        )),
+        Err(_) => checks.push(Check::failure(
+            CONNECTIVITY,
+            "YouTube Music",
+            "connectivity check failed",
+            "check your network connection and try again",
+        )),
+    }
+
+    Report::new(checks)
+}
+
+fn invalid_cookie_check(detail: &'static str) -> Check {
+    Check::failure(
+        AUTHENTICATION,
+        "cookie file",
+        detail,
+        "press g to sign in again",
+    )
+}
+
+fn browser_label(candidate: &BrowserCandidate) -> String {
+    let method = match candidate.method.as_str() {
+        "firefox" => "Firefox".to_string(),
+        "brave" => "Brave".to_string(),
+        "chrome" => "Chrome".to_string(),
+        "chromium" => "Chromium".to_string(),
+        "edge" => "Edge".to_string(),
+        "vivaldi" => "Vivaldi".to_string(),
+        "opera" => "Opera".to_string(),
+        other => sanitize_external(other, dirs::home_dir().as_deref()),
+    };
+    let profile = candidate
+        .profile_label
+        .as_deref()
+        .map(|label| sanitize_external(label, dirs::home_dir().as_deref()))
+        .unwrap_or_else(|| {
+            if candidate.method == "firefox" {
+                "default".into()
+            } else {
+                "Default".into()
+            }
+        });
+    format!("{method} / {profile}")
+}
+
+fn sanitize_external(detail: &str, home: Option<&Path>) -> String {
+    let sanitized = sanitize_detail(detail, home);
+    let lowercase = sanitized.to_ascii_lowercase();
+    if ["sapisid=", "sapisidhash", "authorization:", "cookie:"]
+        .iter()
+        .any(|marker| lowercase.contains(marker))
+    {
+        "diagnostic detail omitted".into()
+    } else {
+        sanitized
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -234,7 +632,226 @@ fn find_ascii_case_insensitive(input: &str, needle: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::ytmusic::signin::BrowserCandidate;
     use std::path::Path;
+
+    fn system_backend_for_test() -> SystemDoctorBackend {
+        SystemDoctorBackend {
+            home: None,
+            authentication: AuthenticationConfig::default(),
+            account: Ok(None),
+            connectivity: Ok(()),
+        }
+    }
+
+    #[test]
+    fn ffmpeg_falls_back_to_its_supported_version_flag() {
+        assert_eq!(version_flags("ffmpeg"), &["--version", "-version"]);
+        assert_eq!(version_flags("yt-dlp"), &["--version"]);
+        assert_eq!(version_flags("deno"), &["--version"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cookie_metadata_rejects_a_symlink_as_not_a_regular_file() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("cookies.txt");
+        let link = directory.path().join("cookies-link.txt");
+        std::fs::write(
+            &target,
+            ".youtube.com\tTRUE\t/\tTRUE\t9999999999\tSAPISID\tsynthetic\n",
+        )
+        .unwrap();
+        symlink(&target, &link).unwrap();
+
+        let metadata = system_backend_for_test().cookie_metadata(&link).unwrap();
+
+        assert!(!metadata.is_file);
+        assert!(!metadata.valid);
+        assert!(!is_regular_file(&link));
+    }
+
+    struct FakeDoctorBackend {
+        failed: bool,
+        mode: Option<u32>,
+    }
+
+    impl FakeDoctorBackend {
+        fn healthy() -> Self {
+            Self {
+                failed: false,
+                mode: Some(0o600),
+            }
+        }
+
+        fn failed() -> Self {
+            Self {
+                failed: true,
+                mode: Some(0o600),
+            }
+        }
+
+        fn broad_permissions() -> Self {
+            Self {
+                failed: false,
+                mode: Some(0o644),
+            }
+        }
+    }
+
+    impl DoctorBackend for FakeDoctorBackend {
+        fn tool_version(&self, command: &str) -> Result<String, String> {
+            if self.failed && command == "ffmpeg" {
+                Err("not found".into())
+            } else {
+                Ok("test-version".into())
+            }
+        }
+
+        fn browser_candidates(&self) -> Vec<BrowserCandidate> {
+            vec![
+                BrowserCandidate {
+                    method: "firefox".into(),
+                    profile_path: None,
+                    profile_label: Some("default-release".into()),
+                },
+                BrowserCandidate::chromium("brave"),
+            ]
+        }
+
+        fn cookie_metadata(&self, _path: &Path) -> Result<CookieMetadata, String> {
+            if self.failed {
+                Err("missing SAPISID".into())
+            } else {
+                Ok(CookieMetadata {
+                    exists: true,
+                    is_file: true,
+                    len: 100,
+                    mode: self.mode,
+                    valid: true,
+                })
+            }
+        }
+
+        fn configured_account(
+            &self,
+            _path: &Path,
+            _auth_user: u8,
+        ) -> Result<Option<String>, String> {
+            Ok(Some("Thiago Santos".into()))
+        }
+
+        fn connectivity(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn healthy_report_names_firefox_before_brave_and_account() {
+        let report = collect_with_backend(
+            &FakeDoctorBackend::healthy(),
+            &Config::default(),
+            Some(Path::new("/tmp/cookies")),
+        );
+        let text = report.render();
+        assert!(
+            text.find("Firefox / default-release").unwrap() < text.find("Brave / Default").unwrap()
+        );
+        assert!(text.contains("Thiago Santos"));
+        assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn missing_required_tool_and_invalid_cookie_fail() {
+        let report = collect_with_backend(
+            &FakeDoctorBackend::failed(),
+            &Config::default(),
+            Some(Path::new("/tmp/cookies")),
+        );
+        assert_eq!(report.exit_code(), 1);
+        assert!(report.render().contains("install ffmpeg"));
+        assert!(report.render().contains("press g to sign in again"));
+    }
+
+    #[test]
+    fn anonymous_authentication_is_a_warning() {
+        let report = collect_with_backend(&FakeDoctorBackend::healthy(), &Config::default(), None);
+        assert_eq!(report.exit_code(), 0);
+        assert!(report.render().contains("no configured session"));
+    }
+
+    #[test]
+    fn broad_cookie_permissions_warn_with_a_private_mode_hint() {
+        let report = collect_with_backend(
+            &FakeDoctorBackend::broad_permissions(),
+            &Config::default(),
+            Some(Path::new("/tmp/cookies")),
+        );
+
+        assert_eq!(report.exit_code(), 0);
+        assert!(report.render().contains("chmod 600"));
+    }
+
+    struct CredentialDetailBackend;
+
+    impl DoctorBackend for CredentialDetailBackend {
+        fn tool_version(&self, _command: &str) -> Result<String, String> {
+            Ok("SAPISID=synthetic-tool-secret; /home/alice/tool".into())
+        }
+
+        fn browser_candidates(&self) -> Vec<BrowserCandidate> {
+            vec![BrowserCandidate {
+                method: "firefox".into(),
+                profile_path: None,
+                profile_label: Some("Cookie: synthetic-browser-secret".into()),
+            }]
+        }
+
+        fn cookie_metadata(&self, _path: &Path) -> Result<CookieMetadata, String> {
+            Ok(CookieMetadata {
+                exists: true,
+                is_file: true,
+                len: 100,
+                mode: Some(0o600),
+                valid: true,
+            })
+        }
+
+        fn configured_account(
+            &self,
+            _path: &Path,
+            _auth_user: u8,
+        ) -> Result<Option<String>, String> {
+            Ok(Some(
+                "Authorization: SAPISIDHASH synthetic-account-secret".into(),
+            ))
+        }
+
+        fn connectivity(&self) -> Result<(), String> {
+            Err("Cookie: synthetic-network-secret".into())
+        }
+    }
+
+    #[test]
+    fn collector_never_renders_external_credential_details() {
+        let report = collect_with_backend(
+            &CredentialDetailBackend,
+            &Config::default(),
+            Some(Path::new("/tmp/cookies")),
+        );
+        let text = report.render();
+        let lowercase = text.to_ascii_lowercase();
+
+        assert!(!lowercase.contains("sapisid="));
+        assert!(!lowercase.contains("sapisidhash"));
+        assert!(!lowercase.contains("authorization:"));
+        assert!(!lowercase.contains("cookie:"));
+        assert!(!lowercase.contains("synthetic"));
+        assert!(!text.contains("/home/alice"));
+    }
 
     #[test]
     fn warnings_do_not_fail_but_required_failures_do() {

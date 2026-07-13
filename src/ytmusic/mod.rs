@@ -8,7 +8,7 @@
 pub mod auth;
 mod parse;
 mod provider;
-mod signin;
+pub(crate) mod signin;
 mod stream;
 
 use std::fmt;

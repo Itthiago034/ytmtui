@@ -724,6 +724,9 @@ mod tests {
 
     #[test]
     fn failed_persistence_restores_old_cookie_file() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
         let temp = tempfile::tempdir().unwrap();
         let active = temp.path().join("cookies.txt");
         let prepared = temp.path().join("prepared-cookies.txt");
@@ -741,6 +744,32 @@ mod tests {
             "old active cookies"
         );
         assert!(!prepared.exists());
+        assert!(!active.with_extension("activation-backup").exists());
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&active).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_install_keeps_active_credentials_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let active = temp.path().join("cookies.txt");
+        let prepared = temp.path().join("prepared-cookies.txt");
+        std::fs::write(&active, "old active credentials").unwrap();
+        std::fs::write(&prepared, "new prepared credentials").unwrap();
+        std::fs::set_permissions(&prepared, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        install_prepared_credentials(&prepared, &active, || Ok(())).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&active).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert!(!active.with_extension("activation-backup").exists());
     }
 

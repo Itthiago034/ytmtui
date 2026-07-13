@@ -133,6 +133,31 @@ async fn activation_uses_selected_account() {
 }
 
 #[tokio::test]
+async fn invalid_preview_and_account_do_not_consume_pending_sign_in() {
+    let provider = Arc::new(MockProvider::default());
+    let preview = provider.prepare_sign_in(&|_| {}).unwrap();
+
+    assert!(provider.activate_sign_in(preview.id + 1, 0).is_err());
+    assert!(provider.activate_sign_in(preview.id, 9).is_err());
+    assert!(!provider.is_authenticated());
+
+    let summary = provider.activate_sign_in(preview.id, 0).unwrap();
+    assert_eq!(summary.account_index, 0);
+    assert!(provider.is_authenticated());
+}
+
+#[tokio::test]
+async fn nonmatching_cancel_keeps_the_pending_sign_in() {
+    let provider = Arc::new(MockProvider::default());
+    let preview = provider.prepare_sign_in(&|_| {}).unwrap();
+
+    provider.cancel_sign_in(preview.id + 1);
+
+    let summary = provider.activate_sign_in(preview.id, 1).unwrap();
+    assert_eq!(summary.account_name, "Mock Account 2");
+}
+
+#[tokio::test]
 async fn provider_errors_surface_in_the_status_bar_and_clear_the_spinner() {
     let mut mock = MockProvider::default();
     mock.fail_with = Some("sem rede".to_string());

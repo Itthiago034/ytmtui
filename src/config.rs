@@ -274,11 +274,13 @@ mod tests {
 
     #[test]
     fn authentication_preference_roundtrips() {
-        let mut config = Config::default();
-        config.authentication = AuthenticationConfig {
-            browser: Some("firefox".into()),
-            profile: Some("default-release".into()),
-            auth_user: 2,
+        let config = Config {
+            authentication: AuthenticationConfig {
+                browser: Some("firefox".into()),
+                profile: Some("default-release".into()),
+                auth_user: 2,
+            },
+            ..Config::default()
         };
         let decoded: Config =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();

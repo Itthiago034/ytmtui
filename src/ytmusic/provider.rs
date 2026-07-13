@@ -47,6 +47,13 @@ struct PendingSignIn {
     prepared: signin::PreparedCredentials,
 }
 
+struct ActivationConfig {
+    method: String,
+    profile: Option<String>,
+    account_index: u8,
+    credentials_path: String,
+}
+
 pub struct YtMusic {
     /// `RwLock`, e não campos fixos: o `sign_in` troca o cliente e o caminho
     /// de cookies com o app rodando, e as tasks concorrentes (que clonam o
@@ -105,6 +112,115 @@ impl YtMusic {
 
     fn cookies(&self) -> Option<String> {
         self.state.read().unwrap().cookies.clone()
+    }
+
+    fn prepare_sign_in_with<B>(
+        &self,
+        candidates: Vec<signin::BrowserCandidate>,
+        config_dir: &std::path::Path,
+        backend: &B,
+        progress: &(dyn Fn(String) + Send + Sync),
+    ) -> std::result::Result<SignInPreview, String>
+    where
+        B: signin::SignInBackend + ?Sized,
+    {
+        if let Some(previous) = self
+            .pending_sign_in
+            .lock()
+            .map_err(|_| "sign-in state unavailable".to_string())?
+            .take()
+        {
+            let _ = std::fs::remove_file(previous.prepared.path);
+        }
+
+        let prepared = signin::prepare_with_backend(candidates, config_dir, backend, progress)
+            .map_err(|error| error.to_string())?;
+        if !prepared.failures.is_empty() {
+            progress("browser fallback prepared successfully".to_string());
+        }
+        let id = self.next_preview_id.fetch_add(1, Ordering::Relaxed);
+        let preview = SignInPreview {
+            id,
+            method: prepared.candidate.method.clone(),
+            profile_label: prepared.candidate.profile_label.clone(),
+            accounts: prepared.accounts.clone(),
+            current_account_name: None,
+        };
+
+        let displaced = match self.pending_sign_in.lock() {
+            Ok(mut pending) => pending.replace(PendingSignIn { id, prepared }),
+            Err(_) => {
+                let _ = std::fs::remove_file(prepared.path);
+                return Err("sign-in state unavailable".to_string());
+            }
+        };
+        if let Some(displaced) = displaced {
+            let _ = std::fs::remove_file(displaced.prepared.path);
+        }
+        Ok(preview)
+    }
+
+    fn activate_sign_in_with<P, B>(
+        &self,
+        preview_id: u64,
+        account_index: u8,
+        active: &std::path::Path,
+        persist: P,
+        build_client: B,
+    ) -> std::result::Result<SignInSummary, String>
+    where
+        P: FnOnce(&ActivationConfig) -> std::io::Result<()>,
+        B: FnOnce(&str, u8) -> std::result::Result<YtMusicClient, String>,
+    {
+        let mut pending_guard = self
+            .pending_sign_in
+            .lock()
+            .map_err(|_| "sign-in state unavailable".to_string())?;
+        let pending = pending_guard
+            .as_ref()
+            .filter(|pending| pending.id == preview_id)
+            .ok_or_else(|| "sign-in preview is no longer pending".to_string())?;
+        let account = pending
+            .prepared
+            .accounts
+            .iter()
+            .find(|account| account.index == account_index)
+            .cloned()
+            .ok_or_else(|| "selected account is not in this sign-in preview".to_string())?;
+
+        let prepared_path = pending.prepared.path.clone();
+        let prepared_path_string = prepared_path.to_string_lossy().into_owned();
+        let client = build_client(&prepared_path_string, account_index)?;
+        let active_string = active.to_string_lossy().into_owned();
+        let activation = ActivationConfig {
+            method: pending.prepared.candidate.method.clone(),
+            profile: pending.prepared.candidate.profile_label.clone(),
+            account_index,
+            credentials_path: active_string.clone(),
+        };
+
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "provider state unavailable".to_string())?;
+        if let Err(error) =
+            signin::install_prepared_credentials(&prepared_path, active, || persist(&activation))
+        {
+            if !prepared_path.is_file() {
+                *pending_guard = None;
+            }
+            return Err(format!("could not activate prepared credentials: {error}"));
+        }
+
+        state.client = client;
+        state.cookies = Some(active_string.clone());
+        *pending_guard = None;
+        Ok(SignInSummary {
+            method: activation.method,
+            credentials_path: Some(active_string),
+            account_name: account.name,
+            account_index,
+        })
     }
 }
 
@@ -202,15 +318,6 @@ impl MusicProvider for YtMusic {
         &self,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> std::result::Result<SignInPreview, String> {
-        if let Some(previous) = self
-            .pending_sign_in
-            .lock()
-            .map_err(|_| "sign-in state unavailable".to_string())?
-            .take()
-        {
-            let _ = std::fs::remove_file(previous.prepared.path);
-        }
-
         let home = dirs::home_dir()
             .ok_or_else(|| "não foi possível localizar o diretório home".to_string())?;
         let config_dir = dirs::config_dir()
@@ -219,30 +326,12 @@ impl MusicProvider for YtMusic {
 
         let authentication = Config::load().authentication;
         let candidates = signin::detect_browser_candidates(&home, &authentication);
-        let prepared = signin::prepare_with_backend(
+        self.prepare_sign_in_with(
             candidates,
             &config_dir,
             &signin::SystemSignInBackend,
             progress,
         )
-        .map_err(|error| error.to_string())?;
-        if !prepared.failures.is_empty() {
-            progress("browser fallback prepared successfully".to_string());
-        }
-        let id = self.next_preview_id.fetch_add(1, Ordering::Relaxed);
-        let preview = SignInPreview {
-            id,
-            method: prepared.candidate.method.clone(),
-            profile_label: prepared.candidate.profile_label.clone(),
-            accounts: prepared.accounts.clone(),
-            current_account_name: None,
-        };
-        *self
-            .pending_sign_in
-            .lock()
-            .map_err(|_| "sign-in state unavailable".to_string())? =
-            Some(PendingSignIn { id, prepared });
-        Ok(preview)
     }
 
     fn activate_sign_in(
@@ -250,60 +339,30 @@ impl MusicProvider for YtMusic {
         preview_id: u64,
         account_index: u8,
     ) -> std::result::Result<SignInSummary, String> {
-        let mut pending_guard = self
-            .pending_sign_in
-            .lock()
-            .map_err(|_| "sign-in state unavailable".to_string())?;
-        let pending = pending_guard
-            .as_ref()
-            .filter(|pending| pending.id == preview_id)
-            .ok_or_else(|| "sign-in preview is no longer pending".to_string())?;
-        let account = pending
-            .prepared
-            .accounts
-            .iter()
-            .find(|account| account.index == account_index)
-            .cloned()
-            .ok_or_else(|| "selected account is not in this sign-in preview".to_string())?;
-
-        let prepared_path = pending.prepared.path.clone();
-        let method = pending.prepared.candidate.method.clone();
-        let profile = pending.prepared.candidate.profile_label.clone();
-        let prepared_path_string = prepared_path.to_string_lossy().into_owned();
-        let client = YtMusicClient::with_cookies_for_account(&prepared_path_string, account_index)
-            .map_err(|_| "prepared credentials are invalid".to_string())?;
         let active = dirs::config_dir()
             .ok_or_else(|| "não foi possível localizar o diretório de config".to_string())?
             .join("ytmtui/cookies.txt");
-        let active_string = active.to_string_lossy().into_owned();
-
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| "provider state unavailable".to_string())?;
-        signin::install_prepared_credentials(&prepared_path, &active, || {
-            let mut config = Config::load();
-            config.cookies = Some(active_string.clone());
-            config.authentication = AuthenticationConfig {
-                browser: Some(method.clone()),
-                profile: profile.clone(),
-                auth_user: account_index,
-            };
-            config
-                .try_save()
-                .map_err(|error| std::io::Error::other(error.to_string()))
-        })
-        .map_err(|error| format!("could not activate prepared credentials: {error}"))?;
-
-        state.client = client;
-        state.cookies = Some(active_string.clone());
-        *pending_guard = None;
-        Ok(SignInSummary {
-            method,
-            credentials_path: Some(active_string),
-            account_name: account.name,
+        self.activate_sign_in_with(
+            preview_id,
             account_index,
-        })
+            &active,
+            |activation| {
+                let mut config = Config::load();
+                config.cookies = Some(activation.credentials_path.clone());
+                config.authentication = AuthenticationConfig {
+                    browser: Some(activation.method.clone()),
+                    profile: activation.profile.clone(),
+                    auth_user: activation.account_index,
+                };
+                config
+                    .try_save()
+                    .map_err(|error| std::io::Error::other(error.to_string()))
+            },
+            |path, account_index| {
+                YtMusicClient::with_cookies_for_account(path, account_index)
+                    .map_err(|_| "prepared credentials are invalid".to_string())
+            },
+        )
     }
 
     fn cancel_sign_in(&self, preview_id: u64) {
@@ -322,5 +381,146 @@ impl MusicProvider for YtMusic {
 
     fn resolve_playable(&self, track: &Track) -> anyhow::Result<PathBuf> {
         stream::download_audio(&track.video_id, self.cookies().as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+    use crate::provider::SignInAccount;
+    use crate::ytmusic::signin::{BrowserCandidate, SignInBackend, SignInError};
+
+    struct ConcurrentBackend {
+        exports_ready: Arc<Barrier>,
+    }
+
+    impl SignInBackend for ConcurrentBackend {
+        fn export(
+            &self,
+            candidate: &BrowserCandidate,
+            destination: &Path,
+        ) -> std::result::Result<(), SignInError> {
+            std::fs::write(destination, &candidate.method)
+                .map_err(|error| SignInError::Io(error.to_string()))?;
+            self.exports_ready.wait();
+            Ok(())
+        }
+
+        fn accounts(&self, _path: &Path) -> std::result::Result<Vec<SignInAccount>, SignInError> {
+            Ok(vec![SignInAccount {
+                index: 0,
+                name: "Prepared Account".to_string(),
+                handle: None,
+            }])
+        }
+    }
+
+    fn provider_for_test() -> YtMusic {
+        YtMusic {
+            state: RwLock::new(State {
+                client: YtMusicClient::new(),
+                cookies: Some("old-active-path".to_string()),
+            }),
+            next_preview_id: AtomicU64::new(1),
+            pending_sign_in: Mutex::new(None),
+        }
+    }
+
+    fn prepared_credentials(path: PathBuf) -> signin::PreparedCredentials {
+        signin::PreparedCredentials {
+            path,
+            candidate: BrowserCandidate::firefox(None),
+            accounts: vec![SignInAccount {
+                index: 0,
+                name: "Prepared Account".to_string(),
+                handle: None,
+            }],
+            failures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn concurrent_preparations_leave_one_pending_private_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = provider_for_test();
+        let barrier = Arc::new(Barrier::new(3));
+        let backend = ConcurrentBackend {
+            exports_ready: Arc::clone(&barrier),
+        };
+        let previews = Mutex::new(Vec::new());
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    let preview = provider
+                        .prepare_sign_in_with(
+                            vec![BrowserCandidate::firefox(None)],
+                            temp.path(),
+                            &backend,
+                            &|_| {},
+                        )
+                        .unwrap();
+                    previews.lock().unwrap().push(preview);
+                });
+            }
+            barrier.wait();
+        });
+
+        let pending = provider.pending_sign_in.lock().unwrap();
+        let pending = pending.as_ref().expect("one preparation remains pending");
+        assert!(pending.prepared.path.is_file());
+        assert!(previews
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|preview| preview.id == pending.id));
+        let prepared_file_count = std::fs::read_dir(temp.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ytmtui-signin-")
+            })
+            .count();
+        assert_eq!(prepared_file_count, 1);
+    }
+
+    #[test]
+    fn terminal_activation_failure_clears_consumed_pending_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let active = temp.path().join("cookies.txt");
+        let prepared = temp.path().join("prepared.txt");
+        std::fs::write(&active, "old active credentials").unwrap();
+        std::fs::write(&prepared, "new prepared credentials").unwrap();
+        let provider = provider_for_test();
+        *provider.pending_sign_in.lock().unwrap() = Some(PendingSignIn {
+            id: 7,
+            prepared: prepared_credentials(prepared.clone()),
+        });
+
+        let error = provider
+            .activate_sign_in_with(
+                7,
+                0,
+                &active,
+                |_| Err(std::io::Error::other("synthetic persistence failure")),
+                |_, account_index| Ok(YtMusicClient::new_with_auth_user_for_test(account_index)),
+            )
+            .unwrap_err();
+
+        assert!(error.contains("could not activate prepared credentials"));
+        assert_eq!(
+            std::fs::read_to_string(&active).unwrap(),
+            "old active credentials"
+        );
+        assert!(!prepared.exists());
+        assert!(provider.pending_sign_in.lock().unwrap().is_none());
+        assert!(!provider.is_authenticated());
+        assert_eq!(provider.cookies().as_deref(), Some("old-active-path"));
     }
 }

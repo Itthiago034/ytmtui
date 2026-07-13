@@ -301,19 +301,6 @@ impl MusicProvider for YtMusic {
         self.client().fetch_bytes(url).await.map_err(Into::into)
     }
 
-    fn sign_in(
-        &self,
-        progress: &(dyn Fn(String) + Send + Sync),
-    ) -> std::result::Result<SignInSummary, String> {
-        let preview = self.prepare_sign_in(progress)?;
-        let account_index = preview
-            .accounts
-            .first()
-            .ok_or_else(|| "no identifiable account".to_string())?
-            .index;
-        self.activate_sign_in(preview.id, account_index)
-    }
-
     fn prepare_sign_in(
         &self,
         progress: &(dyn Fn(String) + Send + Sync),

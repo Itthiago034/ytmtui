@@ -4,7 +4,10 @@
 //! [`MusicProvider`]; o provedor concreto (YouTube Music) só aparece na
 //! raiz de composição ([`App::new`]).
 
+mod authentication;
+
 pub use crate::provider::AuthState;
+pub use authentication::AuthenticationFlow;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +21,7 @@ use crate::config::{AnimationSpeed, ArtworkMode, Config, HomeDensity, Visualizer
 use crate::home::{HomeCardPayload, HomeDirection, HomeView};
 use crate::models::{Artist, Playlist, SearchResults, Track};
 use crate::player::AudioPlayer;
-use crate::provider::{MusicProvider, ProviderError};
+use crate::provider::{MusicProvider, ProviderError, SignInPreview};
 use crate::visualizer::SpectrumAnalyzer;
 
 /// Seções da barra lateral (também define o conteúdo do painel principal).
@@ -175,13 +178,20 @@ pub enum Msg {
     Error(String),
     /// Cookies are present, but the API session is no longer valid.
     SessionExpired,
-    /// In-app sign-in finished successfully; o provedor já está
-    /// reautenticado por dentro. `method` descreve a origem da sessão (ex.:
-    /// o navegador dos cookies) e `credentials_path`, quando presente, é
-    /// persistido na configuração.
+    /// Safe account choices prepared without changing the active session.
+    SignInPrepared(SignInPreview),
+    /// Confirmed activation finished successfully; only handling this
+    /// message may publish account state and reload account-only data.
     SignedIn {
         method: String,
         credentials_path: Option<String>,
+        account_name: String,
+    },
+    /// A preparation or activation failed. When activation had a preview,
+    /// its id is retained so the provider can discard pending credentials.
+    SignInFailed {
+        message: String,
+        preview_id: Option<u64>,
     },
     /// Radio built around `seed` (a track played from the search results):
     /// similar tracks to append to the queue *behind* what's playing —
@@ -294,6 +304,8 @@ pub struct App {
     pending_radio_seed: Option<String>,
     /// Estado de autenticação atual (espelho do provedor para a UI).
     pub authentication: AuthState,
+    /// Two-phase browser/account authentication workflow.
+    pub authentication_flow: AuthenticationFlow,
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
     pub account_name: Option<String>,
     /// Índice do tema de cores ativo (ver `crate::theme`).
@@ -353,9 +365,6 @@ pub struct App {
     /// dispara Home e Biblioteca juntas, e a primeira resposta não pode
     /// apagar o spinner enquanto a outra ainda carrega.
     busy_tasks: usize,
-    /// Um sign-in (importação de cookies) está em andamento. Separado de
-    /// `busy_tasks` para que um sync de fundo não bloqueie a tecla `g`.
-    signing_in: bool,
     /// Quadro atual do spinner de carregamento (avança a cada tick).
     pub spinner_frame: usize,
     /// How often background sync (Home + Library) re-fetches.
@@ -477,6 +486,7 @@ impl App {
             autoplay: true,
             pending_radio_seed: None,
             authentication,
+            authentication_flow: AuthenticationFlow::Idle,
             account_name,
             theme_index,
             list_state,
@@ -500,7 +510,6 @@ impl App {
             cookies,
             loading_audio: false,
             busy_tasks: 0,
-            signing_in: false,
             spinner_frame: 0,
             // Defends against a hand-edited config value of 0 creating a
             // hot loop of re-fetches.
@@ -970,45 +979,6 @@ impl App {
         self.next_index = None;
         self.shuffle_played.clear();
         self.status = "Fila limpa.".to_string();
-    }
-
-    /// Login com uma tecla: delega ao fluxo de sign-in do provedor (no
-    /// YouTube Music, importa cookies do primeiro navegador com sessão) e
-    /// reconecta sem reiniciar o app. Também renova uma sessão expirada.
-    pub fn sign_in(&mut self) {
-        if !self.provider.capabilities().sign_in {
-            self.status = format!(
-                "{} não tem fluxo de conexão interativo.",
-                self.provider.display_name()
-            );
-            return;
-        }
-        if self.signing_in {
-            self.status = "Aguarde: a conexão anterior ainda está em andamento.".to_string();
-            return;
-        }
-        self.begin_task();
-        self.signing_in = true;
-        self.status = format!("Conectando ao {}…", self.provider.display_name());
-        let provider = Arc::clone(&self.provider);
-        let tx = self.tx.clone();
-        tokio::task::spawn_blocking(move || {
-            let progress_tx = tx.clone();
-            let progress = move |message: String| {
-                let _ = progress_tx.send(Msg::Status(message));
-            };
-            match provider.sign_in(&progress) {
-                Ok(summary) => {
-                    let _ = tx.send(Msg::SignedIn {
-                        method: summary.method,
-                        credentials_path: summary.credentials_path,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("Falha ao conectar — {e}")));
-                }
-            }
-        });
     }
 
     /// Curte ou descurte a faixa atual (alterna com base no estado da sessão).
@@ -1901,24 +1871,16 @@ impl App {
                         self.player.play_file(path);
                     }
                 }
+                Msg::SignInPrepared(preview) => self.handle_sign_in_prepared(preview),
                 Msg::SignedIn {
                     method,
                     credentials_path,
-                } => {
-                    self.finish_task();
-                    self.signing_in = false;
-                    // O provedor já se reautenticou por dentro (`sign_in`);
-                    // aqui só espelhamos o estado e recarregamos o conteúdo.
-                    self.authentication = AuthState::Authenticated;
-                    if credentials_path.is_some() {
-                        self.cookies = credentials_path;
-                    }
-                    self.account_name = None;
-                    self.status = format!("✔ Conectado via {method}. Carregando suas músicas…");
-                    self.load_account();
-                    self.load_home();
-                    self.load_library();
-                }
+                    account_name,
+                } => self.handle_signed_in(method, credentials_path, account_name),
+                Msg::SignInFailed {
+                    message,
+                    preview_id,
+                } => self.handle_sign_in_failed(message, preview_id),
                 Msg::RelatedTracks { seed, tracks } => {
                     let added = self.append_related(&seed, tracks);
                     if added > 0 {
@@ -1933,8 +1895,6 @@ impl App {
                 Msg::Error(e) => {
                     self.loading_audio = false;
                     self.finish_task();
-                    // Um sign-in que falhou termina aqui; libera o `g`.
-                    self.signing_in = false;
                     self.status = format!("⚠ {e}");
                 }
             }
@@ -2078,6 +2038,7 @@ impl App {
             autoplay: true,
             pending_radio_seed: None,
             authentication,
+            authentication_flow: AuthenticationFlow::Idle,
             account_name: None,
             theme_index: 0,
             list_state,
@@ -2101,7 +2062,6 @@ impl App {
             cookies: None,
             loading_audio: false,
             busy_tasks: 0,
-            signing_in: false,
             spinner_frame: 0,
             sync_interval: std::time::Duration::from_secs(300),
             last_synced: std::time::Instant::now(),
@@ -2132,6 +2092,26 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_preview_helper_installs_the_first_account_selection() {
+        let mut app = App::new_for_tests();
+        app.set_sign_in_preview_for_test(SignInPreview {
+            id: 7,
+            method: "mock".to_string(),
+            profile_label: None,
+            accounts: vec![crate::provider::SignInAccount {
+                index: 3,
+                name: "Preview Account".to_string(),
+                handle: None,
+            }],
+            current_account_name: None,
+        });
+
+        let (preview, selected) = app.sign_in_preview().expect("preview installed");
+        assert_eq!(preview.id, 7);
+        assert_eq!(selected, 0);
+    }
 
     #[test]
     fn background_home_refresh_preserves_selection_by_browse_id() {

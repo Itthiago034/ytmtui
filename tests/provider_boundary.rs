@@ -90,23 +90,83 @@ async fn home_and_library_load_from_a_generic_provider() {
 }
 
 #[tokio::test]
-async fn sign_in_goes_through_the_provider_contract() {
-    let mut app = App::with_provider(Arc::new(MockProvider::default()));
+async fn app_prepares_then_confirms_selected_account() {
+    let mut mock = MockProvider::default();
+    mock.home_sections = vec![HomeSection {
+        title: "Signed-in picks".to_string(),
+        items: vec![playlist("H1", "Account mix")],
+    }];
+    mock.library = vec![playlist("L1", "Account library")];
+    let mut app = App::with_provider(Arc::new(mock));
     assert_eq!(app.authentication, AuthState::Anonymous);
 
-    app.sign_in();
+    app.prepare_sign_in();
+    drain_until_idle(&mut app).await;
+    assert!(app.sign_in_preview().is_some());
+    assert_eq!(app.authentication, AuthState::Anonymous);
+    assert!(app.home.is_empty());
+    assert!(app.library.is_empty());
+
+    app.select_next_sign_in_account();
+    app.confirm_sign_in();
     drain_until_idle(&mut app).await;
 
-    assert!(
-        app.authentication.is_authenticated(),
-        "sign-in do provedor reflete no estado da UI: {}",
-        app.status
+    assert_eq!(app.account_name.as_deref(), Some("Mock Account 2"));
+    assert_eq!(app.authentication, AuthState::Authenticated);
+    assert_eq!(app.home[0].title, "Signed-in picks");
+    assert_eq!(app.library[0].title, "Account library");
+}
+
+#[tokio::test]
+async fn cancelling_a_preview_preserves_current_account_and_authentication() {
+    let provider = Arc::new(MockProvider::authenticated());
+    let mut app = App::with_provider(provider.clone());
+    app.account_name = Some("Existing Account".to_string());
+    app.cookies = Some("existing-cookies.txt".to_string());
+    app.home = vec![HomeSection {
+        title: "Existing home".to_string(),
+        items: vec![],
+    }];
+    app.library = vec![playlist("OLD", "Existing library")];
+
+    app.prepare_sign_in();
+    drain_until_idle(&mut app).await;
+
+    let (preview, selected) = app.sign_in_preview().expect("preview prepared");
+    assert_eq!(selected, 0);
+    assert_eq!(
+        preview.current_account_name.as_deref(),
+        Some("Existing Account")
     );
-    assert!(
-        app.status.contains("mock"),
-        "feedback usa o método reportado pelo provedor: {}",
-        app.status
-    );
+    assert_eq!(app.authentication, AuthState::Authenticated);
+    assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
+    assert_eq!(app.cookies.as_deref(), Some("existing-cookies.txt"));
+    assert_eq!(app.home[0].title, "Existing home");
+    assert_eq!(app.library[0].title, "Existing library");
+
+    app.cancel_sign_in();
+
+    assert!(app.sign_in_preview().is_none());
+    assert_eq!(app.authentication, AuthState::Authenticated);
+    assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
+    assert_eq!(app.cookies.as_deref(), Some("existing-cookies.txt"));
+    assert_eq!(app.home[0].title, "Existing home");
+    assert_eq!(app.library[0].title, "Existing library");
+    assert!(provider.is_authenticated());
+}
+
+#[tokio::test]
+async fn sign_in_account_selection_wraps_in_both_directions() {
+    let mut app = App::with_provider(Arc::new(MockProvider::default()));
+    app.prepare_sign_in();
+    drain_until_idle(&mut app).await;
+
+    app.select_previous_sign_in_account();
+    assert_eq!(app.sign_in_preview().unwrap().1, 1);
+    app.select_next_sign_in_account();
+    assert_eq!(app.sign_in_preview().unwrap().1, 0);
+
+    app.cancel_sign_in();
 }
 
 #[tokio::test]
@@ -229,7 +289,7 @@ async fn unsupported_capabilities_suppress_actions_instead_of_failing() {
     app.load_home();
     assert!(!app.is_loading(), "sem capability, nenhuma tarefa é criada");
 
-    app.sign_in();
+    app.prepare_sign_in();
     assert!(!app.is_loading());
     assert!(
         app.status.contains("não tem fluxo de conexão"),

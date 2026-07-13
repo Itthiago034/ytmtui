@@ -135,8 +135,8 @@ pub struct SignInPreview {
 ///
 /// Contratos de execução:
 /// - métodos `async` são baratos de cancelar e rodam em tasks tokio;
-/// - [`Self::sign_in`] e [`Self::resolve_playable`] são **bloqueantes**
-///   (processos externos) e devem rodar em `spawn_blocking`;
+/// - preparação, ativação e [`Self::resolve_playable`] são **bloqueantes**
+///   (processos externos ou disco) e devem rodar em `spawn_blocking`;
 /// - implementações são compartilhadas via `Arc` entre tasks concorrentes,
 ///   daí `Send + Sync` e interior mutability para reautenticação.
 #[async_trait]
@@ -146,7 +146,7 @@ pub trait MusicProvider: Send + Sync {
     /// Nome exibido ao usuário, ex.: `"YouTube Music"`.
     fn display_name(&self) -> &'static str;
     fn capabilities(&self) -> Capabilities;
-    /// Há uma sessão autenticada ativa agora (pode mudar após `sign_in`).
+    /// Há uma sessão autenticada ativa agora (pode mudar após ativação).
     fn is_authenticated(&self) -> bool;
 
     async fn search(&self, query: &str) -> Result<SearchResults>;
@@ -164,14 +164,6 @@ pub trait MusicProvider: Send + Sync {
     async fn account_name(&self) -> Result<Option<String>>;
     /// Bytes de uma imagem de capa (URL vinda dos modelos deste provedor).
     async fn fetch_artwork(&self, url: &str) -> Result<Vec<u8>>;
-
-    /// Fluxo interativo de (re)autenticação. Bloqueante; `progress` recebe
-    /// mensagens de andamento para a status bar. Ao retornar `Ok`, o
-    /// provedor já está autenticado (interior mutability).
-    fn sign_in(
-        &self,
-        progress: &(dyn Fn(String) + Send + Sync),
-    ) -> std::result::Result<SignInSummary, String>;
 
     /// Prepara credenciais e enumera contas sem alterar a sessão ativa.
     fn prepare_sign_in(

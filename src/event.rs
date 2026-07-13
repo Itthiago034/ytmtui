@@ -101,7 +101,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         // Alterna o tema de cores.
         KeyCode::Char('t') => app.cycle_theme(),
         // Conecta a conta importando cookies do navegador (ou renova a sessão).
-        KeyCode::Char('g') => app.sign_in(),
+        KeyCode::Char('g') => app.prepare_sign_in(),
 
         // Alterna o foco entre a barra lateral e o painel principal.
         KeyCode::Tab => {

@@ -133,19 +133,6 @@ impl MusicProvider for MockProvider {
         self.outcome(Vec::new())
     }
 
-    fn sign_in(
-        &self,
-        _progress: &(dyn Fn(String) + Send + Sync),
-    ) -> std::result::Result<SignInSummary, String> {
-        self.authenticated.store(true, Ordering::Relaxed);
-        Ok(SignInSummary {
-            method: "mock".to_string(),
-            credentials_path: None,
-            account_name: "Mock Account 1".to_string(),
-            account_index: 0,
-        })
-    }
-
     fn prepare_sign_in(
         &self,
         _progress: &(dyn Fn(String) + Send + Sync),

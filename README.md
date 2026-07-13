@@ -86,7 +86,7 @@ runtime dependencies are missing. For source builds and first-run guidance, see
 |---|---|
 | Search | Songs, artists, albums, and playlists are fetched in parallel and grouped by type. |
 | Playback | `yt-dlp` resolves audio, `ffmpeg` remuxes AAC/M4A without re-encoding, and `rodio` plays it. |
-| Account | Press `g` to import browser cookies; no password prompt, no password storage. |
+| Account | Press `g` for Firefox-first discovery and an account preview; cookies change only after confirmation. |
 | Lyrics | Synced karaoke-style lyrics when timestamps exist, plain text fallback otherwise. |
 | Home | YouTube Music shelves plus local recently played history in `recent.json`. |
 | Visuals | Real FFT visualizer, terminal album art, themed panels, progress, and status UI. |

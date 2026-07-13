@@ -24,14 +24,24 @@ data, personalized recommendations, and like/unlike actions.
    browser.
 2. Open ytmtui.
 3. Press `g`.
-4. Choose or let ytmtui detect a browser session.
-5. ytmtui imports cookies through `yt-dlp --cookies-from-browser`, saves them
-   to `~/.config/ytmtui/cookies.txt`, and reconnects without requiring a full
-   app restart.
+4. ytmtui tries Firefox first. It tries Brave, Chrome, Chromium, Edge, Vivaldi,
+   or Opera in that order only if exporting or validating the earlier
+   candidate fails.
+5. Review the detected browser/profile and YouTube account list. Move with
+   `Up`/`Down` or `k`/`j`, then press `Enter` to confirm the selected account.
+6. ytmtui installs the prepared cookies at
+   `~/.config/ytmtui/cookies.txt` and reconnects without requiring a full app
+   restart.
 
-Automatic detection tries Firefox first, then supported Chromium-family
-browsers as fallbacks. This avoids silently choosing a different YouTube
-account from Brave or Chrome when Firefox is available.
+Preparation and confirmation are separate. The account preview appears before
+the live cookie file or active client is replaced. Pressing `Esc` in the
+preview cancels the prepared sign-in and preserves the current cookies,
+account, library, and session.
+
+After confirmation, ytmtui saves the successful browser/profile and selected
+YouTube account index in `~/.config/ytmtui/config.json`. On restart, a non-zero
+account index is reused. The saved browser/profile preference persists without
+moving that browser ahead of Firefox in discovery order.
 
 If the browser has no valid YouTube Music session, sign in there first and
 press `g` again.
@@ -80,6 +90,6 @@ On a personal residential connection, this is usually not needed.
 
 - ytmtui never asks for or stores your password.
 - Cookie files are local to your machine.
-- The default cookie file is written with restrictive permissions.
+- Prepared and installed cookie files use mode `0600` on Unix.
 - Treat cookies like account credentials: do not commit them, paste them into
   issues, or share them.

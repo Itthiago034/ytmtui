@@ -46,6 +46,12 @@ Make sure the browser is signed in to
 [music.youtube.com](https://music.youtube.com). Public search, public browsing,
 and lyrics keep working while account-only data is cleared.
 
+The in-app flow always checks Firefox first. Another supported browser is tried
+only after export or account validation fails. When the account preview opens,
+confirm the intended account with `Enter`; `Esc` cancels without replacing the
+current cookies or session. A confirmed browser/profile and account index are
+saved, including non-zero account indexes used after restart.
+
 ## YouTube Says "Sign in to confirm you're not a bot"
 
 This usually affects datacenter/server IPs. Use a cookie file for audio

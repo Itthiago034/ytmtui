@@ -72,6 +72,12 @@ likes, and personalized library data need cookies.
 Press `g` inside the app to import cookies from a supported browser. Sign in to
 [music.youtube.com](https://music.youtube.com) in that browser first.
 
+Discovery tries Firefox first and moves to another supported browser only when
+export or account validation fails. Review the browser account preview, choose
+an account, and press `Enter` to activate it. Press `Esc` to cancel without
+changing the current session. The confirmed browser/profile and account index
+are saved for the next launch.
+
 If you prefer a script:
 
 ```bash

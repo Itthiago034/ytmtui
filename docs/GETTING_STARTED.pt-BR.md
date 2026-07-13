@@ -74,6 +74,12 @@ Pressione `g` dentro do app para importar cookies de um navegador suportado.
 Antes disso, faça login em [music.youtube.com](https://music.youtube.com) nesse
 navegador.
 
+A detecção tenta primeiro o Firefox e avança para outro navegador suportado
+somente quando a exportação ou validação da conta falha. Revise a prévia da
+conta do navegador, escolha uma conta e pressione `Enter` para ativá-la.
+Pressione `Esc` para cancelar sem mudar a sessão atual. O navegador/perfil e o
+índice de conta confirmados são salvos para a próxima execução.
+
 Se preferir usar o script:
 
 ```bash

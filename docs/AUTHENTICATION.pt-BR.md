@@ -24,13 +24,25 @@ da biblioteca, recomendações personalizadas e curtir/descurtir.
    suportado.
 2. Abra o ytmtui.
 3. Pressione `g`.
-4. Escolha ou deixe o ytmtui detectar uma sessão de navegador.
-5. O ytmtui importa cookies via `yt-dlp --cookies-from-browser`, salva em
+4. O ytmtui tenta primeiro o Firefox. Ele tenta Brave, Chrome, Chromium, Edge,
+   Vivaldi ou Opera, nessa ordem, somente quando a exportação ou validação do
+   candidato anterior falha.
+5. Revise o navegador/perfil detectado e a lista de contas do YouTube. Navegue
+   com `Cima`/`Baixo` ou `k`/`j` e pressione `Enter` para confirmar a conta
+   selecionada.
+6. O ytmtui instala os cookies preparados em
    `~/.config/ytmtui/cookies.txt` e reconecta sem exigir reiniciar o app.
 
-A detecção automática tenta primeiro o Firefox e depois usa navegadores da
-família Chromium como fallback. Isso evita escolher silenciosamente outra
-conta do YouTube no Brave ou Chrome quando o Firefox está disponível.
+A preparação e a confirmação são separadas. A prévia da conta aparece antes
+que o arquivo de cookies ativo ou o cliente atual seja substituído. Pressionar
+`Esc` na prévia cancela o login preparado e preserva os cookies, a conta, a
+biblioteca e a sessão atuais.
+
+Após a confirmação, o ytmtui salva o navegador/perfil bem-sucedido e o índice
+da conta do YouTube selecionada em `~/.config/ytmtui/config.json`. Ao reiniciar,
+um índice de conta diferente de zero é reutilizado. A preferência de
+navegador/perfil persiste sem colocar esse navegador à frente do Firefox na
+ordem de detecção.
 
 Se o navegador não tiver uma sessão válida do YouTube Music, faça login nele e
 pressione `g` de novo.
@@ -79,6 +91,6 @@ Em uma conexão residencial pessoal, isso geralmente não é necessário.
 
 - O ytmtui nunca pede nem armazena sua senha.
 - Arquivos de cookies ficam locais na sua máquina.
-- O arquivo padrão é escrito com permissões restritivas.
+- Arquivos de cookies preparados e instalados usam modo `0600` no Unix.
 - Trate cookies como credenciais da conta: não commite, cole em issues ou
   compartilhe.

@@ -124,8 +124,27 @@ Cookie sources are resolved in this order:
 3. `~/.config/ytmtui/cookies.txt`.
 
 Pressing `g` triggers in-app sign-in through `src/app/authentication.rs`, which
-uses `yt-dlp --cookies-from-browser` to import browser cookies and write the
-default cookie file. The client reconnects without requiring a full restart.
+coordinates a two-phase provider workflow:
+
+1. Browser candidates are detected in a fixed Firefox, Brave, Chrome,
+   Chromium, Edge, Vivaldi, Opera order. A later candidate is attempted only
+   when export or account validation for the earlier one fails.
+2. `src/ytmusic/signin.rs` exports each candidate through
+   `yt-dlp --cookies-from-browser` into a private prepared file and enumerates
+   its YouTube accounts. The active cookie file, client, and account data stay
+   unchanged.
+3. The UI previews the browser/profile and account list. `Enter` activates the
+   selected account; `Esc` discards the prepared file and preserves the active
+   session.
+4. Activation atomically installs `~/.config/ytmtui/cookies.txt`, rebuilds the
+   client with the selected account index, and persists the cookie path,
+   browser, profile, and account index. If persistence fails, the previous
+   cookie file is restored.
+
+On startup, the persisted non-zero account index selects the matching
+`X-Goog-AuthUser`. Persisted browser/profile fields do not reorder the global
+Firefox-first candidate list. The client reconnects after successful activation
+without requiring a full restart.
 
 Authenticated requests add `Cookie`, `Authorization: SAPISIDHASH ...`,
 `X-Goog-AuthUser`, and `X-Origin` headers. Authenticated `401`/`403` responses
@@ -176,14 +195,21 @@ Config file shape:
   "shuffle": false,
   "repeat": "off",
   "cookies": null,
+  "authentication": {
+    "browser": null,
+    "profile": null,
+    "auth_user": 0
+  },
   "theme": "Roxo",
   "username": null,
   "sync_interval_secs": 300
 }
 ```
 
-The config writer preserves meaningful existing `cookies` and `username`
-values instead of overwriting them with empty values.
+Legacy configs default to account index `0` with no browser/profile preference.
+Confirmed authentication writes all three preference fields atomically with
+the cookie path. The config writer also preserves meaningful existing
+`cookies` and `username` values instead of overwriting them with empty values.
 
 ## Development Checks
 

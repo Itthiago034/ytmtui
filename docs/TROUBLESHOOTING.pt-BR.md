@@ -46,6 +46,13 @@ Confirme que o navegador está logado em
 [music.youtube.com](https://music.youtube.com). Busca pública, navegação pública
 e letras continuam funcionando enquanto dados de conta ficam limpos.
 
+O fluxo dentro do app sempre verifica primeiro o Firefox. Outro navegador
+suportado só é tentado depois que a exportação ou validação da conta falha.
+Quando a prévia da conta abrir, confirme a conta desejada com `Enter`; `Esc`
+cancela sem substituir os cookies ou a sessão atuais. O navegador/perfil e o
+índice de conta confirmados são salvos, inclusive índices diferentes de zero
+usados após reiniciar.
+
 ## YouTube Mostra "Sign in to confirm you're not a bot"
 
 Isso costuma afetar IPs de datacenter/servidor. Use um arquivo de cookies para

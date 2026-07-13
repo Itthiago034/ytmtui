@@ -86,7 +86,7 @@ veja [Primeiros Passos](docs/GETTING_STARTED.pt-BR.md).
 |---|---|
 | Busca | Músicas, artistas, álbuns e playlists são buscados em paralelo e agrupados por tipo. |
 | Reprodução | `yt-dlp` resolve o áudio, `ffmpeg` remuxa AAC/M4A sem re-encode e `rodio` toca. |
-| Conta | Pressione `g` para importar cookies do navegador; sem pedir nem armazenar senha. |
+| Conta | Pressione `g` para detectar primeiro o Firefox e pré-visualizar a conta; os cookies só mudam após a confirmação. |
 | Letras | Letras sincronizadas estilo karaokê quando há timestamps, texto simples como fallback. |
 | Início | Prateleiras do YouTube Music mais histórico local recente em `recent.json`. |
 | Visual | Visualizador FFT real, capa no terminal, painéis temáticos, progresso e status. |

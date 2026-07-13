@@ -11,6 +11,7 @@
 //! - short terminals: the playback and status rows are dropped first so the
 //!   content always keeps the remaining space and nothing panics.
 
+mod authentication;
 mod main_panel;
 mod nav;
 mod now_playing;
@@ -45,6 +46,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         draw_wide(f, app, area);
     }
+    // Modal layers are always drawn last so the underlying screen cannot
+    // overwrite account choices or controls.
+    authentication::draw(f, app, area);
 }
 
 /// Wide layout: navigation + content columns above playback and status rows.

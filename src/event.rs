@@ -7,6 +7,20 @@ use crate::home::HomeDirection;
 
 /// Processa uma tecla pressionada, atualizando o estado da aplicação.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    // The account picker is modal: while it is visible, every key is
+    // consumed here so playback, navigation, search, and quit shortcuts
+    // cannot leak through to the underlying interface.
+    if app.sign_in_preview().is_some() {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => app.select_previous_sign_in_account(),
+            KeyCode::Down | KeyCode::Char('j') => app.select_next_sign_in_account(),
+            KeyCode::Enter => app.confirm_sign_in(),
+            KeyCode::Esc => app.cancel_sign_in(),
+            _ => {}
+        }
+        return;
+    }
+
     // ------- Modo de digitação da busca -------
     if app.input_mode {
         match key.code {
@@ -242,9 +256,82 @@ fn activate(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{SignInAccount, SignInPreview};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn prepared_sign_in_app() -> App {
+        let mut app = App::new_for_tests();
+        app.set_sign_in_preview_for_test(SignInPreview {
+            id: 1,
+            method: "firefox".into(),
+            profile_label: Some("default-release".into()),
+            accounts: vec![
+                SignInAccount {
+                    index: 0,
+                    name: "Mock Account 1".into(),
+                    handle: None,
+                },
+                SignInAccount {
+                    index: 1,
+                    name: "Mock Account 2".into(),
+                    handle: Some("@mock2".into()),
+                },
+            ],
+            current_account_name: None,
+        });
+        app
+    }
+
+    #[test]
+    fn sign_in_modal_consumes_navigation_and_escape() {
+        let mut app = prepared_sign_in_app();
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.sign_in_preview().unwrap().1, 1);
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(app.sign_in_preview().is_none());
+    }
+
+    #[test]
+    fn sign_in_modal_supports_vim_navigation() {
+        let mut app = prepared_sign_in_app();
+
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.sign_in_preview().unwrap().1, 1);
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.sign_in_preview().unwrap().1, 0);
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.sign_in_preview().unwrap().1, 1);
+    }
+
+    #[test]
+    fn sign_in_modal_intercepts_unhandled_shortcuts() {
+        let mut app = prepared_sign_in_app();
+        let initial_section = app.section;
+
+        handle_key(&mut app, key(KeyCode::Char('q')));
+        handle_key(&mut app, key(KeyCode::Char('/')));
+
+        assert!(app.running, "q must not quit through the modal");
+        assert!(!app.input_mode, "/ must not open search through the modal");
+        assert_eq!(app.section, initial_section);
+        assert!(app.sign_in_preview().is_some());
+    }
+
+    #[tokio::test]
+    async fn sign_in_modal_enter_confirms_the_selected_account() {
+        let mut app = prepared_sign_in_app();
+        handle_key(&mut app, key(KeyCode::Down));
+
+        handle_key(&mut app, key(KeyCode::Enter));
+
+        assert!(
+            app.sign_in_preview().is_none(),
+            "confirmation must close the picker while activation starts"
+        );
+        assert!(app.is_loading(), "confirmation must start activation");
     }
 
     #[test]

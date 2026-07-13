@@ -11,6 +11,7 @@ use ratatui::Terminal;
 use crate::app::{App, Focus, Section};
 use crate::config::{HomeDensity, VisualizerStyle};
 use crate::models::Track;
+use crate::provider::{SignInAccount, SignInPreview};
 
 /// Renders one frame at the given size and returns the resulting buffer.
 fn render(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -93,6 +94,71 @@ fn playing_app() -> App {
     app
 }
 
+fn prepared_sign_in_app() -> App {
+    let mut app = App::new_for_tests();
+    app.set_sign_in_preview_for_test(SignInPreview {
+        id: 1,
+        method: "firefox".into(),
+        profile_label: Some("default-release".into()),
+        accounts: vec![
+            SignInAccount {
+                index: 0,
+                name: "Mock Account 1".into(),
+                handle: None,
+            },
+            SignInAccount {
+                index: 1,
+                name: "Mock Account 2".into(),
+                handle: Some("@mock2".into()),
+            },
+        ],
+        current_account_name: None,
+    });
+    app
+}
+
+#[test]
+fn sign_in_modal_renders_browser_accounts_and_controls() {
+    let mut app = prepared_sign_in_app();
+    let content = text(&render(&mut app, 100, 30));
+    for expected in [
+        "Connect an account",
+        "Firefox",
+        "Mock Account 1",
+        "Enter confirm",
+        "Esc cancel",
+    ] {
+        assert!(
+            content.contains(expected),
+            "missing {expected:?}:\n{content}"
+        );
+    }
+}
+
+#[test]
+fn sign_in_modal_renders_profile_handle_and_current_account_marker() {
+    let mut app = App::new_for_tests();
+    app.set_sign_in_preview_for_test(SignInPreview {
+        id: 2,
+        method: "firefox".into(),
+        profile_label: Some("default-release".into()),
+        accounts: vec![SignInAccount {
+            index: 1,
+            name: "Mock Account 2".into(),
+            handle: Some("@mock2".into()),
+        }],
+        current_account_name: Some("Mock Account 2".into()),
+    });
+
+    let content = text(&render(&mut app, 100, 30));
+    for expected in ["default-release", "@mock2", "current"] {
+        assert!(
+            content.contains(expected),
+            "missing {expected:?}:\n{content}"
+        );
+    }
+}
+
 #[test]
 fn wide_layout_shows_navigation_content_playback_and_shortcuts() {
     let mut app = App::new_for_tests();
@@ -145,6 +211,9 @@ fn very_small_terminals_never_panic() {
             playing.input_mode = true;
             playing.query = "x".repeat(200);
             render(&mut playing, width, height);
+
+            let mut signing_in = prepared_sign_in_app();
+            render(&mut signing_in, width, height);
         }
     }
 }

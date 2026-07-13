@@ -10,9 +10,6 @@ use std::time::Duration;
 use crate::config::AuthenticationConfig;
 use crate::provider::SignInAccount;
 
-// Task 3 transition: these narrowly scoped non-test allowances are removed
-// when Task 4 wires the preparation seam into the production provider.
-#[cfg_attr(not(test), allow(dead_code))]
 const PREPARED_FILE_PREFIX: &str = ".ytmtui-signin-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,14 +49,12 @@ impl BrowserCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct CandidateFailure {
     pub method: String,
     pub profile_label: Option<String>,
     pub reason: String,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl CandidateFailure {
     fn sanitized(candidate: &BrowserCandidate, reason: String) -> Self {
         Self {
@@ -71,7 +66,6 @@ impl CandidateFailure {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct PreparedCredentials {
     pub path: PathBuf,
     pub candidate: BrowserCandidate,
@@ -80,7 +74,6 @@ pub struct PreparedCredentials {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub enum SignInError {
     BrowserNotFound,
     ExportFailed(String),
@@ -97,7 +90,6 @@ impl fmt::Debug for SignInError {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl SignInError {
     fn sanitized_reason(&self) -> &'static str {
         match self {
@@ -120,13 +112,11 @@ impl fmt::Display for SignInError {
 
 impl std::error::Error for SignInError {}
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub trait SignInBackend: Send + Sync {
     fn export(&self, candidate: &BrowserCandidate, destination: &Path) -> Result<(), SignInError>;
     fn accounts(&self, path: &Path) -> Result<Vec<SignInAccount>, SignInError>;
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn prepare_with_backend<B>(
     candidates: Vec<BrowserCandidate>,
     config_dir: &Path,
@@ -191,7 +181,6 @@ where
     Err(SignInError::AllCandidatesFailed(failures))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn restrict_permissions(path: &Path) -> Result<(), SignInError> {
     #[cfg(unix)]
     {
@@ -202,7 +191,6 @@ fn restrict_permissions(path: &Path) -> Result<(), SignInError> {
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn cleanup_stale_prepared_files(config_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(config_dir) else {
         return;
@@ -233,7 +221,6 @@ fn cleanup_stale_prepared_files(config_dir: &Path) {
 }
 
 #[cfg(unix)]
-#[cfg_attr(not(test), allow(dead_code))]
 fn owned_by_current_user(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
 
@@ -246,7 +233,6 @@ fn owned_by_current_user(metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(not(unix))]
-#[cfg_attr(not(test), allow(dead_code))]
 fn owned_by_current_user(_metadata: &std::fs::Metadata) -> bool {
     false
 }
@@ -409,6 +395,7 @@ pub fn detect_browser_candidates(
 /// `--cookies-from-browser` argument values (possibly carrying an explicit
 /// `firefox:<profile-path>` for XDG Firefox setups). Firefox is attempted
 /// first; Chromium-family sessions remain ordered fallbacks.
+#[cfg(test)]
 pub fn detect_browsers(home: &Path) -> Vec<String> {
     detect_browser_candidates(home, &AuthenticationConfig::default())
         .into_iter()
@@ -416,59 +403,52 @@ pub fn detect_browsers(home: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Exports YouTube Music cookies from `browser` into `dest` (Netscape
-/// format) using `yt-dlp --cookies-from-browser` — the same recipe as
-/// `scripts/refresh-cookies.sh`, but callable from inside the app. Writes to
-/// a temp file first and only replaces `dest` after confirming the export
-/// contains a `SAPISID` cookie (what the API authentication derives from).
-pub fn export_browser_cookies(browser: &str, dest: &Path) -> Result<(), String> {
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
-    }
-    let tmp = dest.with_extension(format!("import-{}.tmp", std::process::id()));
-    let result = (|| {
-        let output = std::process::Command::new("yt-dlp")
-            .arg("--cookies-from-browser")
-            .arg(browser)
-            .arg("--cookies")
-            .arg(&tmp)
-            .args(["--skip-download", "--no-warnings", "-O", "%(title)s"])
-            // Any watchable URL works; visiting one is what makes yt-dlp
-            // load the browser jar and save it to --cookies on exit.
-            .arg("https://www.youtube.com/watch?v=jNQXAC9IVRw")
-            .output()
-            .map_err(|e| format!("could not run yt-dlp: {e}"))?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err(err.lines().last().unwrap_or("yt-dlp failed").to_string());
-        }
-        let cookies = std::fs::read_to_string(&tmp)
-            .map_err(|e| format!("yt-dlp produced no cookie file: {e}"))?;
-        if !cookies.contains("SAPISID") {
-            return Err(format!(
-                "no YouTube session in {browser} — sign in to music.youtube.com there first"
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, dest).map_err(|e| format!("could not save cookies: {e}"))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
 /// Production backend for typed sign-in preparation. Process stderr and API
 /// details are intentionally discarded at this boundary; callers receive only
 /// typed errors whose display text is sanitized.
 #[derive(Debug, Default, Clone, Copy)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct SystemSignInBackend;
+
+fn copy_with_mode_600(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::copy(source, destination)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Instala credenciais preparadas e só as mantém se a persistência da
+/// configuração também for concluída. Em qualquer falha após a troca, o
+/// arquivo ativo anterior é restaurado (ou o novo é removido).
+pub fn install_prepared_credentials<F>(
+    prepared: &Path,
+    active: &Path,
+    persist: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    let backup = active.with_extension("activation-backup");
+    let had_active = active.is_file();
+    if had_active {
+        copy_with_mode_600(active, &backup)?;
+    }
+    std::fs::rename(prepared, active)?;
+    if let Err(error) = persist() {
+        if had_active {
+            std::fs::rename(&backup, active)?;
+        } else {
+            std::fs::remove_file(active)?;
+        }
+        return Err(error);
+    }
+    if had_active {
+        let _ = std::fs::remove_file(backup);
+    }
+    Ok(())
+}
 
 fn block_on_current_runtime<F>(future: F) -> F::Output
 where
@@ -740,6 +720,28 @@ mod tests {
             0o600
         );
         std::fs::remove_file(prepared.path).unwrap();
+    }
+
+    #[test]
+    fn failed_persistence_restores_old_cookie_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let active = temp.path().join("cookies.txt");
+        let prepared = temp.path().join("prepared-cookies.txt");
+        std::fs::write(&active, "old active cookies").unwrap();
+        std::fs::write(&prepared, "new prepared cookies").unwrap();
+
+        let error = install_prepared_credentials(&prepared, &active, || {
+            Err(std::io::Error::other("synthetic persistence failure"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            std::fs::read_to_string(&active).unwrap(),
+            "old active cookies"
+        );
+        assert!(!prepared.exists());
+        assert!(!active.with_extension("activation-backup").exists());
     }
 
     #[test]

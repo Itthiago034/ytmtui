@@ -102,6 +102,10 @@ pub struct SignInSummary {
     pub method: String,
     /// Caminho de credenciais a persistir na configuração, quando houver.
     pub credentials_path: Option<String>,
+    /// Nome de exibição da conta ativada.
+    pub account_name: String,
+    /// Índice enviado em `X-Goog-AuthUser` para selecionar a conta.
+    pub account_index: u8,
 }
 
 /// Conta Google disponível dentro de uma sessão de cookies autenticada.
@@ -113,6 +117,18 @@ pub struct SignInAccount {
     pub name: String,
     /// Handle público do canal, quando disponível.
     pub handle: Option<String>,
+}
+
+/// Resultado seguro da preparação de um sign-in, antes de qualquer mudança
+/// na sessão ativa. Caminhos e conteúdo de credenciais permanecem privados no
+/// provedor até a confirmação.
+#[derive(Debug, Clone)]
+pub struct SignInPreview {
+    pub id: u64,
+    pub method: String,
+    pub profile_label: Option<String>,
+    pub accounts: Vec<SignInAccount>,
+    pub current_account_name: Option<String>,
 }
 
 /// Um serviço de música por trás da interface.
@@ -156,6 +172,22 @@ pub trait MusicProvider: Send + Sync {
         &self,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> std::result::Result<SignInSummary, String>;
+
+    /// Prepara credenciais e enumera contas sem alterar a sessão ativa.
+    fn prepare_sign_in(
+        &self,
+        progress: &(dyn Fn(String) + Send + Sync),
+    ) -> std::result::Result<SignInPreview, String>;
+
+    /// Confirma uma preparação pendente e publica a conta selecionada.
+    fn activate_sign_in(
+        &self,
+        preview_id: u64,
+        account_index: u8,
+    ) -> std::result::Result<SignInSummary, String>;
+
+    /// Descarta somente a preparação pendente identificada por `preview_id`.
+    fn cancel_sign_in(&self, preview_id: u64);
 
     /// Resolve a faixa em um arquivo de áudio local pronto para tocar.
     /// Bloqueante (download/remux); o cache fica a cargo do provedor.

@@ -10,7 +10,7 @@ use std::time::Duration;
 use ytmtui::app::{App, AuthState, Section};
 use ytmtui::models::{HomeSection, Playlist, SearchResults, Track};
 use ytmtui::provider::mock::MockProvider;
-use ytmtui::provider::Capabilities;
+use ytmtui::provider::{Capabilities, MusicProvider};
 
 fn track(id: &str, title: &str) -> Track {
     Track {
@@ -106,6 +106,29 @@ async fn sign_in_goes_through_the_provider_contract() {
         app.status.contains("mock"),
         "feedback usa o método reportado pelo provedor: {}",
         app.status
+    );
+}
+
+#[tokio::test]
+async fn prepare_cancel_preserves_old_session() {
+    let provider = Arc::new(MockProvider::authenticated());
+
+    let preview = provider.prepare_sign_in(&|_| {}).unwrap();
+    provider.cancel_sign_in(preview.id);
+
+    assert!(provider.is_authenticated());
+}
+
+#[tokio::test]
+async fn activation_uses_selected_account() {
+    let provider = Arc::new(MockProvider::default());
+
+    let preview = provider.prepare_sign_in(&|_| {}).unwrap();
+    let summary = provider.activate_sign_in(preview.id, 1).unwrap();
+
+    assert_eq!(
+        (summary.account_name.as_str(), summary.account_index),
+        ("Mock Account 2", 1)
     );
 }
 

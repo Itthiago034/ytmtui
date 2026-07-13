@@ -6,15 +6,16 @@
 //! yt-dlp. É a única porta pela qual o resto do app fala com o YouTube.
 
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 use async_trait::async_trait;
 
 use super::{signin, stream, YtMusicClient, YtMusicError};
-use crate::config::AuthenticationConfig;
+use crate::config::{AuthenticationConfig, Config};
 use crate::models::{HomeSection, Lyrics, Playlist, SearchResults, Track};
 use crate::provider::{
-    AuthState, Capabilities, MusicProvider, ProviderError, Result, SignInSummary,
+    AuthState, Capabilities, MusicProvider, ProviderError, Result, SignInPreview, SignInSummary,
 };
 
 impl From<YtMusicError> for ProviderError {
@@ -41,12 +42,19 @@ struct State {
     cookies: Option<String>,
 }
 
+struct PendingSignIn {
+    id: u64,
+    prepared: signin::PreparedCredentials,
+}
+
 pub struct YtMusic {
     /// `RwLock`, e não campos fixos: o `sign_in` troca o cliente e o caminho
     /// de cookies com o app rodando, e as tasks concorrentes (que clonam o
     /// cliente barato na entrada de cada chamada) passam a usar a sessão
     /// nova automaticamente.
     state: RwLock<State>,
+    next_preview_id: AtomicU64,
+    pending_sign_in: Mutex<Option<PendingSignIn>>,
 }
 
 impl YtMusic {
@@ -77,6 +85,8 @@ impl YtMusic {
                 client,
                 cookies: resolution.path.clone(),
             }),
+            next_preview_id: AtomicU64::new(1),
+            pending_sign_in: Mutex::new(None),
         };
         let bootstrap = Bootstrap {
             auth,
@@ -146,7 +156,10 @@ impl MusicProvider for YtMusic {
     }
 
     async fn artist_tracks(&self, browse_id: &str) -> Result<Vec<Track>> {
-        self.client().get_artist(browse_id).await.map_err(Into::into)
+        self.client()
+            .get_artist(browse_id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn radio(&self, track_id: &str) -> Result<Vec<Track>> {
@@ -176,37 +189,135 @@ impl MusicProvider for YtMusic {
         &self,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> std::result::Result<SignInSummary, String> {
+        let preview = self.prepare_sign_in(progress)?;
+        let account_index = preview
+            .accounts
+            .first()
+            .ok_or_else(|| "no identifiable account".to_string())?
+            .index;
+        self.activate_sign_in(preview.id, account_index)
+    }
+
+    fn prepare_sign_in(
+        &self,
+        progress: &(dyn Fn(String) + Send + Sync),
+    ) -> std::result::Result<SignInPreview, String> {
+        if let Some(previous) = self
+            .pending_sign_in
+            .lock()
+            .map_err(|_| "sign-in state unavailable".to_string())?
+            .take()
+        {
+            let _ = std::fs::remove_file(previous.prepared.path);
+        }
+
         let home = dirs::home_dir()
             .ok_or_else(|| "não foi possível localizar o diretório home".to_string())?;
-        let browsers = signin::detect_browsers(&home);
-        if browsers.is_empty() {
-            return Err("nenhum navegador suportado encontrado (Brave/Chrome/Firefox…)".into());
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| "não foi possível localizar o diretório de config".to_string())?
+            .join("ytmtui");
+
+        let authentication = Config::load().authentication;
+        let candidates = signin::detect_browser_candidates(&home, &authentication);
+        let prepared = signin::prepare_with_backend(
+            candidates,
+            &config_dir,
+            &signin::SystemSignInBackend,
+            progress,
+        )
+        .map_err(|error| error.to_string())?;
+        if !prepared.failures.is_empty() {
+            progress("browser fallback prepared successfully".to_string());
         }
-        let dest = dirs::config_dir()
+        let id = self.next_preview_id.fetch_add(1, Ordering::Relaxed);
+        let preview = SignInPreview {
+            id,
+            method: prepared.candidate.method.clone(),
+            profile_label: prepared.candidate.profile_label.clone(),
+            accounts: prepared.accounts.clone(),
+            current_account_name: None,
+        };
+        *self
+            .pending_sign_in
+            .lock()
+            .map_err(|_| "sign-in state unavailable".to_string())? =
+            Some(PendingSignIn { id, prepared });
+        Ok(preview)
+    }
+
+    fn activate_sign_in(
+        &self,
+        preview_id: u64,
+        account_index: u8,
+    ) -> std::result::Result<SignInSummary, String> {
+        let mut pending_guard = self
+            .pending_sign_in
+            .lock()
+            .map_err(|_| "sign-in state unavailable".to_string())?;
+        let pending = pending_guard
+            .as_ref()
+            .filter(|pending| pending.id == preview_id)
+            .ok_or_else(|| "sign-in preview is no longer pending".to_string())?;
+        let account = pending
+            .prepared
+            .accounts
+            .iter()
+            .find(|account| account.index == account_index)
+            .cloned()
+            .ok_or_else(|| "selected account is not in this sign-in preview".to_string())?;
+
+        let prepared_path = pending.prepared.path.clone();
+        let method = pending.prepared.candidate.method.clone();
+        let profile = pending.prepared.candidate.profile_label.clone();
+        let prepared_path_string = prepared_path.to_string_lossy().into_owned();
+        let client = YtMusicClient::with_cookies_for_account(&prepared_path_string, account_index)
+            .map_err(|_| "prepared credentials are invalid".to_string())?;
+        let active = dirs::config_dir()
             .ok_or_else(|| "não foi possível localizar o diretório de config".to_string())?
             .join("ytmtui/cookies.txt");
+        let active_string = active.to_string_lossy().into_owned();
 
-        let mut last_error = String::new();
-        for browser in browsers {
-            progress(format!("Importando cookies de {browser}…"));
-            match signin::export_browser_cookies(&browser, &dest) {
-                Ok(()) => {
-                    let path = dest.to_string_lossy().into_owned();
-                    let client = YtMusicClient::with_cookies(&path)
-                        .map_err(|e| format!("cookies importados são inválidos: {e}"))?;
-                    let mut state = self.state.write().unwrap();
-                    state.client = client;
-                    state.cookies = Some(path.clone());
-                    let method = browser.split(':').next().unwrap_or(&browser).to_string();
-                    return Ok(SignInSummary {
-                        method,
-                        credentials_path: Some(path),
-                    });
-                }
-                Err(e) => last_error = format!("{browser}: {e}"),
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "provider state unavailable".to_string())?;
+        signin::install_prepared_credentials(&prepared_path, &active, || {
+            let mut config = Config::load();
+            config.cookies = Some(active_string.clone());
+            config.authentication = AuthenticationConfig {
+                browser: Some(method.clone()),
+                profile: profile.clone(),
+                auth_user: account_index,
+            };
+            config
+                .try_save()
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        })
+        .map_err(|error| format!("could not activate prepared credentials: {error}"))?;
+
+        state.client = client;
+        state.cookies = Some(active_string.clone());
+        *pending_guard = None;
+        Ok(SignInSummary {
+            method,
+            credentials_path: Some(active_string),
+            account_name: account.name,
+            account_index,
+        })
+    }
+
+    fn cancel_sign_in(&self, preview_id: u64) {
+        let Ok(mut pending) = self.pending_sign_in.lock() else {
+            return;
+        };
+        if pending
+            .as_ref()
+            .is_some_and(|pending| pending.id == preview_id)
+        {
+            if let Some(pending) = pending.take() {
+                let _ = std::fs::remove_file(pending.prepared.path);
             }
         }
-        Err(last_error)
     }
 
     fn resolve_playable(&self, track: &Track) -> anyhow::Result<PathBuf> {

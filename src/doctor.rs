@@ -582,6 +582,9 @@ fn sanitize_line(line: &str, home: Option<&str>) -> String {
     if is_netscape_cookie_row(line) {
         return "Netscape cookie [redacted]".to_string();
     }
+    if contains_cookie_assignment(line) {
+        return "cookie assignment [redacted]".to_string();
+    }
 
     let mut output = String::with_capacity(line.len());
     let mut remaining = line;
@@ -644,6 +647,23 @@ fn is_netscape_cookie_row(line: &str) -> bool {
         && path.starts_with('/')
         && matches!(secure, "TRUE" | "FALSE")
         && !name.is_empty()
+}
+
+fn contains_cookie_assignment(line: &str) -> bool {
+    line.match_indices('=').any(|(equals, _)| {
+        let name = line[..equals]
+            .rsplit(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+            })
+            .next()
+            .unwrap_or_default();
+        name.starts_with("__Secure-")
+            || name.starts_with("__Host-")
+            || matches!(
+                name,
+                "SID" | "HSID" | "SSID" | "APISID" | "SIDCC" | "PREF" | "YSC"
+            )
+    })
 }
 
 fn actual_home_path_token<'a>(value: &'a str, home: &str) -> Option<&'a str> {
@@ -1136,6 +1156,18 @@ mod tests {
         assert!(!sanitized.contains("__Secure-3PAPISID"));
         assert!(!sanitized.contains("synthetic-cookie-value"));
         assert_eq!(sanitized, "Netscape cookie [redacted]");
+    }
+
+    #[test]
+    fn standalone_cookie_assignments_redact_secure_and_legacy_names() {
+        let source = "__Secure-3PSID=synthetic-secure-value; HSID=synthetic-legacy-value";
+
+        let sanitized = sanitize_detail(source, None);
+
+        assert!(!sanitized.contains("__Secure-3PSID"));
+        assert!(!sanitized.contains("synthetic-secure-value"));
+        assert!(!sanitized.contains("HSID="));
+        assert!(!sanitized.contains("synthetic-legacy-value"));
     }
 
     #[test]

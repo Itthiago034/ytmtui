@@ -21,6 +21,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // During browser preparation/activation, a preference save could race
+    // the provider's atomic credential/config commit. Only quit is handled
+    // here (and it deliberately waits for the operation); every other
+    // shortcut is held until the operation publishes its result.
+    if matches!(
+        app.authentication_flow,
+        crate::app::AuthenticationFlow::Preparing { .. }
+            | crate::app::AuthenticationFlow::Activating { .. }
+    ) {
+        match key.code {
+            KeyCode::Char('q') => app.request_quit(),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.request_quit();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // ------- Modo de digitação da busca -------
     if app.input_mode {
         match key.code {
@@ -343,6 +362,27 @@ mod tests {
         app.authentication_flow = crate::app::AuthenticationFlow::Idle;
         handle_key(&mut app, key(KeyCode::Char('q')));
         assert!(!app.running);
+    }
+
+    #[tokio::test]
+    async fn activation_blocks_shortcuts_that_can_persist_or_start_other_work() {
+        let mut app = App::new_for_tests();
+        app.authentication_flow = crate::app::AuthenticationFlow::Activating {
+            operation_id: 3,
+            preview_id: 9,
+        };
+        let theme = app.theme_index;
+
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        handle_key(&mut app, key(KeyCode::Char('R')));
+        handle_key(&mut app, key(KeyCode::Char('g')));
+
+        assert_eq!(app.theme_index, theme);
+        assert!(!app.is_loading());
+        assert!(matches!(
+            app.authentication_flow,
+            crate::app::AuthenticationFlow::Activating { .. }
+        ));
     }
 
     #[tokio::test]

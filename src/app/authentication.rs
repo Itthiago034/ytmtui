@@ -239,6 +239,7 @@ impl App {
         }
         self.finish_task();
         self.authentication_flow = AuthenticationFlow::Idle;
+        self.session_generation = self.session_generation.wrapping_add(1);
         self.authentication = AuthState::Authenticated;
         if credentials_path.is_some() {
             self.cookies = credentials_path;

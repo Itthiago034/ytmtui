@@ -142,14 +142,30 @@ impl RepeatMode {
 pub enum Msg {
     SearchResults(SearchResults),
     LibraryPlaylists(Vec<Playlist>),
+    LibraryPlaylistsForSession {
+        session_generation: u64,
+        playlists: Vec<Playlist>,
+    },
     HomeSections(Vec<crate::models::HomeSection>),
+    HomeSectionsForSession {
+        session_generation: u64,
+        sections: Vec<crate::models::HomeSection>,
+    },
     /// `load_home` failed with something other than `SessionExpired`. Kept
     /// distinct from the generic `Error` so its handler can leave `self.home`
     /// untouched — cached shelves stay on screen instead of the whole Home
     /// screen flipping to an error message.
     HomeFailed(String),
+    HomeFailedForSession {
+        session_generation: u64,
+        message: String,
+    },
     RadioTracks(Vec<Track>),
     AccountName(Option<String>),
+    AccountNameForSession {
+        session_generation: u64,
+        name: Option<String>,
+    },
     PlaylistTracks {
         title: String,
         tracks: Vec<Track>,
@@ -178,6 +194,9 @@ pub enum Msg {
     Error(String),
     /// Cookies are present, but the API session is no longer valid.
     SessionExpired,
+    SessionExpiredForSession {
+        session_generation: u64,
+    },
     /// Safe account choices prepared without changing the active session.
     SignInPrepared {
         operation_id: u64,
@@ -315,6 +334,10 @@ pub struct App {
     /// Monotonic token binding asynchronous authentication messages to the
     /// operation that started them.
     next_authentication_operation: u64,
+    /// Increments only after a sign-in activation commits. Account-scoped
+    /// network replies carry this token so an old account cannot overwrite
+    /// the new one after the client is swapped.
+    session_generation: u64,
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
     pub account_name: Option<String>,
     /// Índice do tema de cores ativo (ver `crate::theme`).
@@ -497,6 +520,7 @@ impl App {
             authentication,
             authentication_flow: AuthenticationFlow::Idle,
             next_authentication_operation: 1,
+            session_generation: 0,
             account_name,
             theme_index,
             list_state,
@@ -655,13 +679,20 @@ impl App {
         self.begin_task();
         let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
+        let session_generation = self.session_generation;
         tokio::spawn(async move {
             match provider.library_playlists().await {
                 Ok(pls) => {
-                    let _ = tx.send(Msg::LibraryPlaylists(pls));
+                    let _ = tx.send(Msg::LibraryPlaylistsForSession {
+                        session_generation,
+                        playlists: pls,
+                    });
+                }
+                Err(ProviderError::SessionExpired) => {
+                    let _ = tx.send(Msg::SessionExpiredForSession { session_generation });
                 }
                 Err(error) => {
-                    let _ = tx.send(client_error_message("Could not load library", error));
+                    let _ = tx.send(Msg::Error(format!("Could not load library: {error}")));
                 }
             }
         });
@@ -678,18 +709,23 @@ impl App {
         self.begin_task();
         let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
+        let session_generation = self.session_generation;
         tokio::spawn(async move {
             match provider.home().await {
                 Ok(sections) => {
-                    let _ = tx.send(Msg::HomeSections(sections));
+                    let _ = tx.send(Msg::HomeSectionsForSession {
+                        session_generation,
+                        sections,
+                    });
                 }
                 Err(ProviderError::SessionExpired) => {
-                    let _ = tx.send(Msg::SessionExpired);
+                    let _ = tx.send(Msg::SessionExpiredForSession { session_generation });
                 }
                 Err(error) => {
-                    let _ = tx.send(Msg::HomeFailed(format!(
-                        "Could not load recommendations: {error}"
-                    )));
+                    let _ = tx.send(Msg::HomeFailedForSession {
+                        session_generation,
+                        message: format!("Could not load recommendations: {error}"),
+                    });
                 }
             }
         });
@@ -1035,15 +1071,22 @@ impl App {
         self.begin_task();
         let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
+        let session_generation = self.session_generation;
         tokio::spawn(async move {
             match provider.account_name().await {
                 // `None` também é enviado: toda tarefa contada precisa
                 // terminar em exatamente uma mensagem (ver `begin_task`).
                 Ok(name) => {
-                    let _ = tx.send(Msg::AccountName(name));
+                    let _ = tx.send(Msg::AccountNameForSession {
+                        session_generation,
+                        name,
+                    });
+                }
+                Err(ProviderError::SessionExpired) => {
+                    let _ = tx.send(Msg::SessionExpiredForSession { session_generation });
                 }
                 Err(error) => {
-                    let _ = tx.send(client_error_message("Could not load account", error));
+                    let _ = tx.send(Msg::Error(format!("Could not load account: {error}")));
                 }
             }
         });
@@ -1725,6 +1768,16 @@ impl App {
                     // desyncs Enter-key handling from what's on screen.
                     self.list_state.select(Some(0));
                 }
+                Msg::LibraryPlaylistsForSession {
+                    session_generation,
+                    playlists,
+                } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::LibraryPlaylists(playlists));
+                    } else {
+                        self.finish_task();
+                    }
+                }
                 Msg::LibraryPlaylists(pls) => {
                     self.finish_task();
                     // A background sync (Feature 3) re-runs this same load
@@ -1762,6 +1815,16 @@ impl App {
                         );
                     }
                 }
+                Msg::HomeSectionsForSession {
+                    session_generation,
+                    sections,
+                } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::HomeSections(sections));
+                    } else {
+                        self.finish_task();
+                    }
+                }
                 Msg::HomeSections(sections) => {
                     self.finish_task();
                     self.home_error = None;
@@ -1784,6 +1847,16 @@ impl App {
                             .map(|i| i.min(count.saturating_sub(1)));
                         self.list_state
                             .select((count > 0).then_some(new_index).flatten());
+                    }
+                }
+                Msg::HomeFailedForSession {
+                    session_generation,
+                    message,
+                } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::HomeFailed(message));
+                    } else {
+                        self.finish_task();
                     }
                 }
                 Msg::HomeFailed(message) => {
@@ -1809,12 +1882,29 @@ impl App {
                         self.start_current();
                     }
                 }
+                Msg::AccountNameForSession {
+                    session_generation,
+                    name,
+                } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::AccountName(name));
+                    } else {
+                        self.finish_task();
+                    }
+                }
                 Msg::AccountName(name) => {
                     self.finish_task();
                     if let Some(n) = name {
                         if self.account_name.is_none() {
                             self.account_name = Some(n);
                         }
+                    }
+                }
+                Msg::SessionExpiredForSession { session_generation } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::SessionExpired);
+                    } else {
+                        self.finish_task();
                     }
                 }
                 Msg::SessionExpired => {
@@ -2060,6 +2150,7 @@ impl App {
             authentication,
             authentication_flow: AuthenticationFlow::Idle,
             next_authentication_operation: 1,
+            session_generation: 0,
             account_name: None,
             theme_index: 0,
             list_state,
@@ -2172,6 +2263,52 @@ mod tests {
         assert_eq!(app.authentication, AuthState::Authenticated);
         assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
         assert_ne!(app.cookies.as_deref(), Some("wrong-cookies.txt"));
+    }
+
+    #[test]
+    fn stale_session_payloads_cannot_overwrite_a_newly_activated_account() {
+        let mut app = App::new_for_tests();
+        app.session_generation = 2;
+        app.authentication = AuthState::Authenticated;
+        app.account_name = Some("New Account".to_string());
+        app.home = vec![crate::models::HomeSection {
+            title: "New home".to_string(),
+            items: vec![],
+        }];
+        app.library = vec![Playlist {
+            title: "New library".to_string(),
+            ..Default::default()
+        }];
+
+        app.tx
+            .send(Msg::HomeSectionsForSession {
+                session_generation: 1,
+                sections: vec![],
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::LibraryPlaylistsForSession {
+                session_generation: 1,
+                playlists: vec![],
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::AccountNameForSession {
+                session_generation: 1,
+                name: Some("Old Account".to_string()),
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SessionExpiredForSession {
+                session_generation: 1,
+            })
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("New Account"));
+        assert_eq!(app.home[0].title, "New home");
+        assert_eq!(app.library[0].title, "New library");
     }
 
     #[test]

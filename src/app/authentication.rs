@@ -14,15 +14,34 @@ use super::{App, AuthState, Msg};
 #[derive(Debug, Clone)]
 pub enum AuthenticationFlow {
     Idle,
-    Preparing,
+    Preparing {
+        operation_id: u64,
+    },
     AwaitingConfirmation {
+        operation_id: u64,
         preview: SignInPreview,
         selected: usize,
     },
-    Activating,
+    Activating {
+        operation_id: u64,
+        preview_id: u64,
+    },
 }
 
 impl App {
+    /// Leaves only when no credential-changing task can still race with
+    /// configuration persistence during shutdown.
+    pub fn request_quit(&mut self) {
+        if matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Preparing { .. } | AuthenticationFlow::Activating { .. }
+        ) {
+            self.status = "Aguarde a conexão em andamento terminar antes de sair.".to_string();
+            return;
+        }
+        self.running = false;
+    }
+
     /// Prepares browser credentials and account choices without changing the
     /// currently active account, cookies, or authenticated App data.
     pub fn prepare_sign_in(&mut self) {
@@ -38,8 +57,10 @@ impl App {
             return;
         }
 
+        let operation_id = self.next_authentication_operation;
+        self.next_authentication_operation = self.next_authentication_operation.wrapping_add(1);
         self.begin_task();
-        self.authentication_flow = AuthenticationFlow::Preparing;
+        self.authentication_flow = AuthenticationFlow::Preparing { operation_id };
         self.status = format!("Preparando conexão com {}…", self.provider.display_name());
 
         let provider = Arc::clone(&self.provider);
@@ -51,10 +72,14 @@ impl App {
             };
             match provider.prepare_sign_in(&progress) {
                 Ok(preview) => {
-                    let _ = tx.send(Msg::SignInPrepared(preview));
+                    let _ = tx.send(Msg::SignInPrepared {
+                        operation_id,
+                        preview,
+                    });
                 }
                 Err(message) => {
                     let _ = tx.send(Msg::SignInFailed {
+                        operation_id,
                         message: format!("Falha ao preparar conexão — {message}"),
                         preview_id: None,
                     });
@@ -67,17 +92,18 @@ impl App {
     /// is pending. Provider-owned credential paths never enter this state.
     pub fn sign_in_preview(&self) -> Option<(&SignInPreview, usize)> {
         match &self.authentication_flow {
-            AuthenticationFlow::AwaitingConfirmation { preview, selected } => {
-                Some((preview, *selected))
-            }
+            AuthenticationFlow::AwaitingConfirmation {
+                preview, selected, ..
+            } => Some((preview, *selected)),
             _ => None,
         }
     }
 
     /// Moves the preview selection down, wrapping at the end of the list.
     pub fn select_next_sign_in_account(&mut self) {
-        let AuthenticationFlow::AwaitingConfirmation { preview, selected } =
-            &mut self.authentication_flow
+        let AuthenticationFlow::AwaitingConfirmation {
+            preview, selected, ..
+        } = &mut self.authentication_flow
         else {
             return;
         };
@@ -88,8 +114,9 @@ impl App {
 
     /// Moves the preview selection up, wrapping at the start of the list.
     pub fn select_previous_sign_in_account(&mut self) {
-        let AuthenticationFlow::AwaitingConfirmation { preview, selected } =
-            &mut self.authentication_flow
+        let AuthenticationFlow::AwaitingConfirmation {
+            preview, selected, ..
+        } = &mut self.authentication_flow
         else {
             return;
         };
@@ -104,19 +131,26 @@ impl App {
     /// that may commit provider credentials and later update App account data.
     pub fn confirm_sign_in(&mut self) {
         let selection = match &self.authentication_flow {
-            AuthenticationFlow::AwaitingConfirmation { preview, selected } => preview
+            AuthenticationFlow::AwaitingConfirmation {
+                operation_id,
+                preview,
+                selected,
+            } => preview
                 .accounts
                 .get(*selected)
-                .map(|account| (preview.id, account.index)),
+                .map(|account| (*operation_id, preview.id, account.index)),
             _ => return,
         };
-        let Some((preview_id, account_index)) = selection else {
+        let Some((operation_id, preview_id, account_index)) = selection else {
             self.status = "Nenhuma conta disponível para conectar.".to_string();
             return;
         };
 
         self.begin_task();
-        self.authentication_flow = AuthenticationFlow::Activating;
+        self.authentication_flow = AuthenticationFlow::Activating {
+            operation_id,
+            preview_id,
+        };
         self.status = format!("Conectando ao {}…", self.provider.display_name());
 
         let provider = Arc::clone(&self.provider);
@@ -125,6 +159,8 @@ impl App {
             match provider.activate_sign_in(preview_id, account_index) {
                 Ok(summary) => {
                     let _ = tx.send(Msg::SignedIn {
+                        operation_id,
+                        preview_id,
                         method: summary.method,
                         credentials_path: summary.credentials_path,
                         account_name: summary.account_name,
@@ -132,6 +168,7 @@ impl App {
                 }
                 Err(message) => {
                     let _ = tx.send(Msg::SignInFailed {
+                        operation_id,
                         message: format!("Falha ao conectar — {message}"),
                         preview_id: Some(preview_id),
                     });
@@ -154,21 +191,30 @@ impl App {
     #[cfg(test)]
     pub(crate) fn set_sign_in_preview_for_test(&mut self, preview: SignInPreview) {
         self.authentication_flow = AuthenticationFlow::AwaitingConfirmation {
+            operation_id: 0,
             preview,
             selected: 0,
         };
     }
 
-    pub(super) fn handle_sign_in_prepared(&mut self, mut preview: SignInPreview) {
-        self.finish_task();
-        if !matches!(self.authentication_flow, AuthenticationFlow::Preparing) {
+    pub(super) fn handle_sign_in_prepared(
+        &mut self,
+        operation_id: u64,
+        mut preview: SignInPreview,
+    ) {
+        if !matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Preparing { operation_id: expected } if expected == operation_id
+        ) {
             self.provider.cancel_sign_in(preview.id);
             return;
         }
+        self.finish_task();
 
         preview.current_account_name.clone_from(&self.account_name);
         self.status = "Escolha uma conta para concluir a conexão.".to_string();
         self.authentication_flow = AuthenticationFlow::AwaitingConfirmation {
+            operation_id,
             preview,
             selected: 0,
         };
@@ -176,10 +222,21 @@ impl App {
 
     pub(super) fn handle_signed_in(
         &mut self,
+        operation_id: u64,
+        preview_id: u64,
         method: String,
         credentials_path: Option<String>,
         account_name: String,
     ) {
+        if !matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Activating {
+                operation_id: expected_operation,
+                preview_id: expected_preview,
+            } if expected_operation == operation_id && expected_preview == preview_id
+        ) {
+            return;
+        }
         self.finish_task();
         self.authentication_flow = AuthenticationFlow::Idle;
         self.authentication = AuthState::Authenticated;
@@ -195,7 +252,27 @@ impl App {
         self.load_library();
     }
 
-    pub(super) fn handle_sign_in_failed(&mut self, message: String, preview_id: Option<u64>) {
+    pub(super) fn handle_sign_in_failed(
+        &mut self,
+        operation_id: u64,
+        message: String,
+        preview_id: Option<u64>,
+    ) {
+        let matches_preparing = matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Preparing { operation_id: expected } if expected == operation_id
+        ) && preview_id.is_none();
+        let matches_activating = matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Activating {
+                operation_id: expected_operation,
+                preview_id: expected_preview,
+            } if expected_operation == operation_id && preview_id == Some(expected_preview)
+        );
+        if !matches_preparing && !matches_activating {
+            return;
+        }
+
         self.finish_task();
         if let Some(preview_id) = preview_id {
             self.provider.cancel_sign_in(preview_id);

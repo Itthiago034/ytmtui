@@ -179,10 +179,15 @@ pub enum Msg {
     /// Cookies are present, but the API session is no longer valid.
     SessionExpired,
     /// Safe account choices prepared without changing the active session.
-    SignInPrepared(SignInPreview),
+    SignInPrepared {
+        operation_id: u64,
+        preview: SignInPreview,
+    },
     /// Confirmed activation finished successfully; only handling this
     /// message may publish account state and reload account-only data.
     SignedIn {
+        operation_id: u64,
+        preview_id: u64,
         method: String,
         credentials_path: Option<String>,
         account_name: String,
@@ -190,6 +195,7 @@ pub enum Msg {
     /// A preparation or activation failed. When activation had a preview,
     /// its id is retained so the provider can discard pending credentials.
     SignInFailed {
+        operation_id: u64,
         message: String,
         preview_id: Option<u64>,
     },
@@ -306,6 +312,9 @@ pub struct App {
     pub authentication: AuthState,
     /// Two-phase browser/account authentication workflow.
     pub authentication_flow: AuthenticationFlow,
+    /// Monotonic token binding asynchronous authentication messages to the
+    /// operation that started them.
+    next_authentication_operation: u64,
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
     pub account_name: Option<String>,
     /// Índice do tema de cores ativo (ver `crate::theme`).
@@ -487,6 +496,7 @@ impl App {
             pending_radio_seed: None,
             authentication,
             authentication_flow: AuthenticationFlow::Idle,
+            next_authentication_operation: 1,
             account_name,
             theme_index,
             list_state,
@@ -1869,16 +1879,28 @@ impl App {
                         self.player.play_file(path);
                     }
                 }
-                Msg::SignInPrepared(preview) => self.handle_sign_in_prepared(preview),
+                Msg::SignInPrepared {
+                    operation_id,
+                    preview,
+                } => self.handle_sign_in_prepared(operation_id, preview),
                 Msg::SignedIn {
+                    operation_id,
+                    preview_id,
                     method,
                     credentials_path,
                     account_name,
-                } => self.handle_signed_in(method, credentials_path, account_name),
+                } => self.handle_signed_in(
+                    operation_id,
+                    preview_id,
+                    method,
+                    credentials_path,
+                    account_name,
+                ),
                 Msg::SignInFailed {
+                    operation_id,
                     message,
                     preview_id,
-                } => self.handle_sign_in_failed(message, preview_id),
+                } => self.handle_sign_in_failed(operation_id, message, preview_id),
                 Msg::RelatedTracks { seed, tracks } => {
                     let added = self.append_related(&seed, tracks);
                     if added > 0 {
@@ -1937,7 +1959,7 @@ impl App {
             E::SetVolume(volume) => {
                 self.player.set_volume(volume.clamp(0.0, 1.0) as f32);
             }
-            E::Quit => self.running = false,
+            E::Quit => self.request_quit(),
             // Uma TUI não tem janela própria para trazer à frente, e abrir
             // URIs externas não faz sentido aqui.
             E::Raise | E::OpenUri(_) => {}
@@ -2037,6 +2059,7 @@ impl App {
             pending_radio_seed: None,
             authentication,
             authentication_flow: AuthenticationFlow::Idle,
+            next_authentication_operation: 1,
             account_name: None,
             theme_index: 0,
             list_state,
@@ -2109,6 +2132,46 @@ mod tests {
         let (preview, selected) = app.sign_in_preview().expect("preview installed");
         assert_eq!(preview.id, 7);
         assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn stale_sign_in_messages_cannot_publish_or_cancel_another_operation() {
+        let mut app = App::new_for_tests();
+        app.authentication = AuthState::Authenticated;
+        app.account_name = Some("Existing Account".to_string());
+        app.authentication_flow = AuthenticationFlow::Activating {
+            operation_id: 4,
+            preview_id: 7,
+        };
+
+        app.tx
+            .send(Msg::SignedIn {
+                operation_id: 99,
+                preview_id: 7,
+                method: "firefox".to_string(),
+                credentials_path: Some("wrong-cookies.txt".to_string()),
+                account_name: "Wrong Account".to_string(),
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SignInFailed {
+                operation_id: 99,
+                message: "stale failure".to_string(),
+                preview_id: Some(7),
+            })
+            .unwrap();
+        app.drain_messages();
+
+        assert!(matches!(
+            app.authentication_flow,
+            AuthenticationFlow::Activating {
+                operation_id: 4,
+                preview_id: 7
+            }
+        ));
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
+        assert_ne!(app.cookies.as_deref(), Some("wrong-cookies.txt"));
     }
 
     #[test]

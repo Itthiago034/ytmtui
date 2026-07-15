@@ -46,9 +46,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
     // ------- Atalhos globais -------
     match key.code {
-        KeyCode::Char('q') => app.running = false,
+        KeyCode::Char('q') => app.request_quit(),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.running = false;
+            app.request_quit();
         }
         KeyCode::Char('/') => {
             // Entra no modo de busca.
@@ -318,6 +318,31 @@ mod tests {
         assert!(!app.input_mode, "/ must not open search through the modal");
         assert_eq!(app.section, initial_section);
         assert!(app.sign_in_preview().is_some());
+    }
+
+    #[test]
+    fn quit_waits_for_preparation_or_activation_to_finish() {
+        let mut app = App::new_for_tests();
+        app.authentication_flow = crate::app::AuthenticationFlow::Preparing { operation_id: 3 };
+
+        handle_key(&mut app, key(KeyCode::Char('q')));
+        assert!(app.running);
+        assert!(app.status.contains("Aguarde"));
+
+        app.authentication_flow = crate::app::AuthenticationFlow::Activating {
+            operation_id: 3,
+            preview_id: 9,
+        };
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(app.running);
+        assert!(app.status.contains("Aguarde"));
+
+        app.authentication_flow = crate::app::AuthenticationFlow::Idle;
+        handle_key(&mut app, key(KeyCode::Char('q')));
+        assert!(!app.running);
     }
 
     #[tokio::test]

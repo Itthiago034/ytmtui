@@ -579,6 +579,10 @@ impl CredentialMarker {
 }
 
 fn sanitize_line(line: &str, home: Option<&str>) -> String {
+    if is_netscape_cookie_row(line) {
+        return "Netscape cookie [redacted]".to_string();
+    }
+
     let mut output = String::with_capacity(line.len());
     let mut remaining = line;
 
@@ -609,6 +613,37 @@ fn sanitize_line(line: &str, home: Option<&str>) -> String {
 
     output.push_str(remaining);
     output
+}
+
+fn is_netscape_cookie_row(line: &str) -> bool {
+    let mut columns = line.split('\t');
+    let Some(domain) = columns.next() else {
+        return false;
+    };
+    let Some(include_subdomains) = columns.next() else {
+        return false;
+    };
+    let Some(path) = columns.next() else {
+        return false;
+    };
+    let Some(secure) = columns.next() else {
+        return false;
+    };
+    let Some(_expires) = columns.next() else {
+        return false;
+    };
+    let Some(name) = columns.next() else {
+        return false;
+    };
+    let Some(_value) = columns.next() else {
+        return false;
+    };
+
+    !domain.is_empty()
+        && matches!(include_subdomains, "TRUE" | "FALSE")
+        && path.starts_with('/')
+        && matches!(secure, "TRUE" | "FALSE")
+        && !name.is_empty()
 }
 
 fn actual_home_path_token<'a>(value: &'a str, home: &str) -> Option<&'a str> {
@@ -1090,6 +1125,17 @@ mod tests {
         assert!(!sanitized.contains("synthetic-first"));
         assert!(!sanitized.contains("synthetic-second"));
         assert!(sanitized.ends_with("; safe detail"));
+    }
+
+    #[test]
+    fn netscape_cookie_rows_redact_secure_cookie_names_and_values() {
+        let source = ".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PAPISID\tsynthetic-cookie-value";
+
+        let sanitized = sanitize_detail(source, None);
+
+        assert!(!sanitized.contains("__Secure-3PAPISID"));
+        assert!(!sanitized.contains("synthetic-cookie-value"));
+        assert_eq!(sanitized, "Netscape cookie [redacted]");
     }
 
     #[test]

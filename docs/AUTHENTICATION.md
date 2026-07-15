@@ -27,7 +27,9 @@ data, personalized recommendations, and like/unlike actions.
 4. ytmtui tries Firefox first. It tries Brave, Chrome, Chromium, Edge, Vivaldi,
    or Opera in that order only if exporting or validating the earlier
    candidate fails.
-5. Review the detected browser/profile and YouTube account list. Move with
+5. Review the detected browser/profile and YouTube account list. The selected
+   profile is passed directly to `yt-dlp`, so Firefox or Brave can use the
+   same profile where you signed in. Move with
    `Up`/`Down` or `k`/`j`, then press `Enter` to confirm the selected account.
 6. ytmtui installs the prepared cookies at
    `~/.config/ytmtui/cookies.txt` and reconnects without requiring a full app
@@ -37,6 +39,10 @@ Preparation and confirmation are separate. The account preview appears before
 the live cookie file or active client is replaced. Pressing `Esc` in the
 preview cancels the prepared sign-in and preserves the current cookies,
 account, library, and session.
+
+Before replacing the active cookies, ytmtui rechecks the selected account. If
+the browser session expired or switched accounts in the meantime, the active
+session remains unchanged.
 
 After confirmation, ytmtui saves the successful browser/profile and selected
 YouTube account index in `~/.config/ytmtui/config.json`. On restart, a non-zero

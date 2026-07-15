@@ -48,6 +48,12 @@ struct PendingSignIn {
     prepared: signin::PreparedCredentials,
 }
 
+impl Drop for PendingSignIn {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.prepared.path);
+    }
+}
+
 struct ActivationConfig {
     method: String,
     profile: Option<String>,
@@ -131,7 +137,7 @@ impl YtMusic {
             .map_err(|_| "sign-in state unavailable".to_string())?
             .take()
         {
-            let _ = std::fs::remove_file(previous.prepared.path);
+            let _ = std::fs::remove_file(&previous.prepared.path);
         }
 
         let prepared = signin::prepare_with_backend(candidates, config_dir, backend, progress)
@@ -156,7 +162,7 @@ impl YtMusic {
             }
         };
         if let Some(displaced) = displaced {
-            let _ = std::fs::remove_file(displaced.prepared.path);
+            let _ = std::fs::remove_file(&displaced.prepared.path);
         }
         Ok(preview)
     }
@@ -378,7 +384,7 @@ impl MusicProvider for YtMusic {
             .is_some_and(|pending| pending.id == preview_id)
         {
             if let Some(pending) = pending.take() {
-                let _ = std::fs::remove_file(pending.prepared.path);
+                let _ = std::fs::remove_file(&pending.prepared.path);
             }
         }
     }
@@ -610,5 +616,22 @@ mod tests {
         assert!(prepared.exists());
         assert!(provider.pending_sign_in.lock().unwrap().is_some());
         assert_eq!(provider.cookies().as_deref(), Some("old-active-path"));
+    }
+
+    #[test]
+    fn dropping_the_provider_removes_a_pending_prepared_cookie_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let prepared = temp.path().join("prepared.txt");
+        std::fs::write(&prepared, "new prepared credentials").unwrap();
+
+        {
+            let provider = provider_for_test();
+            *provider.pending_sign_in.lock().unwrap() = Some(PendingSignIn {
+                id: 7,
+                prepared: prepared_credentials(prepared.clone()),
+            });
+        }
+
+        assert!(!prepared.exists());
     }
 }

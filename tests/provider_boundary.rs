@@ -156,6 +156,50 @@ async fn cancelling_a_preview_preserves_current_account_and_authentication() {
 }
 
 #[tokio::test]
+async fn failed_preparation_preserves_the_existing_account_home_and_library() {
+    let mut mock = MockProvider::authenticated();
+    mock.prepare_sign_in_failure = Some("browser unavailable".to_string());
+    let mut app = App::with_provider(Arc::new(mock));
+    app.account_name = Some("Existing Account".to_string());
+    app.home = vec![HomeSection {
+        title: "Existing home".to_string(),
+        items: vec![],
+    }];
+    app.library = vec![playlist("OLD", "Existing library")];
+
+    app.prepare_sign_in();
+    drain_until_idle(&mut app).await;
+
+    assert_eq!(app.authentication, AuthState::Authenticated);
+    assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
+    assert_eq!(app.home[0].title, "Existing home");
+    assert_eq!(app.library[0].title, "Existing library");
+}
+
+#[tokio::test]
+async fn failed_activation_preserves_the_existing_account_home_and_library() {
+    let mut mock = MockProvider::authenticated();
+    mock.activate_sign_in_failure = Some("session changed".to_string());
+    let mut app = App::with_provider(Arc::new(mock));
+    app.account_name = Some("Existing Account".to_string());
+    app.home = vec![HomeSection {
+        title: "Existing home".to_string(),
+        items: vec![],
+    }];
+    app.library = vec![playlist("OLD", "Existing library")];
+
+    app.prepare_sign_in();
+    drain_until_idle(&mut app).await;
+    app.confirm_sign_in();
+    drain_until_idle(&mut app).await;
+
+    assert_eq!(app.authentication, AuthState::Authenticated);
+    assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
+    assert_eq!(app.home[0].title, "Existing home");
+    assert_eq!(app.library[0].title, "Existing library");
+}
+
+#[tokio::test]
 async fn sign_in_account_selection_wraps_in_both_directions() {
     let mut app = App::with_provider(Arc::new(MockProvider::default()));
     app.prepare_sign_in();

@@ -31,6 +31,10 @@ pub struct MockProvider {
     pub fail_with: Option<String>,
     /// Quando `true`, todo método async falha com `SessionExpired`.
     pub expire_session: bool,
+    /// Falha configurável exclusivamente para a fase de preparação de login.
+    pub prepare_sign_in_failure: Option<String>,
+    /// Falha configurável exclusivamente para a fase de ativação de login.
+    pub activate_sign_in_failure: Option<String>,
     authenticated: AtomicBool,
     next_preview_id: AtomicU64,
     pending_preview_id: Mutex<Option<u64>>,
@@ -50,6 +54,8 @@ impl Default for MockProvider {
             capabilities: Capabilities::all(),
             fail_with: None,
             expire_session: false,
+            prepare_sign_in_failure: None,
+            activate_sign_in_failure: None,
             authenticated: AtomicBool::new(false),
             next_preview_id: AtomicU64::new(1),
             pending_preview_id: Mutex::new(None),
@@ -137,6 +143,9 @@ impl MusicProvider for MockProvider {
         &self,
         _progress: &(dyn Fn(String) + Send + Sync),
     ) -> std::result::Result<SignInPreview, String> {
+        if let Some(message) = &self.prepare_sign_in_failure {
+            return Err(message.clone());
+        }
         let id = self.next_preview_id.fetch_add(1, Ordering::Relaxed);
         *self.pending_preview_id.lock().unwrap() = Some(id);
         Ok(SignInPreview {
@@ -164,6 +173,9 @@ impl MusicProvider for MockProvider {
         preview_id: u64,
         account_index: u8,
     ) -> std::result::Result<SignInSummary, String> {
+        if let Some(message) = &self.activate_sign_in_failure {
+            return Err(message.clone());
+        }
         let account_name = match account_index {
             0 => "Mock Account 1",
             1 => "Mock Account 2",

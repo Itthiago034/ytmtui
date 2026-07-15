@@ -27,7 +27,9 @@ da biblioteca, recomendações personalizadas e curtir/descurtir.
 4. O ytmtui tenta primeiro o Firefox. Ele tenta Brave, Chrome, Chromium, Edge,
    Vivaldi ou Opera, nessa ordem, somente quando a exportação ou validação do
    candidato anterior falha.
-5. Revise o navegador/perfil detectado e a lista de contas do YouTube. Navegue
+5. Revise o navegador/perfil detectado e a lista de contas do YouTube. O
+   perfil escolhido é passado diretamente ao `yt-dlp`, então Firefox ou Brave
+   usam o mesmo perfil em que você fez login. Navegue
    com `Cima`/`Baixo` ou `k`/`j` e pressione `Enter` para confirmar a conta
    selecionada.
 6. O ytmtui instala os cookies preparados em
@@ -37,6 +39,10 @@ A preparação e a confirmação são separadas. A prévia da conta aparece ante
 que o arquivo de cookies ativo ou o cliente atual seja substituído. Pressionar
 `Esc` na prévia cancela o login preparado e preserva os cookies, a conta, a
 biblioteca e a sessão atuais.
+
+Antes de substituir os cookies ativos, o ytmtui confere novamente a conta
+selecionada. Se a sessão do navegador expirou ou mudou de conta nesse
+intervalo, a sessão ativa continua intacta.
 
 Após a confirmação, o ytmtui salva o navegador/perfil bem-sucedido e o índice
 da conta do YouTube selecionada em `~/.config/ytmtui/config.json`. Ao reiniciar,

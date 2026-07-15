@@ -51,4 +51,4 @@ jobs:
           grep -q '^Authentication' <<<"$output"
           grep -q '^Connectivity' <<<"$output"
           grep -q '^Summary:' <<<"$output"
-          ! grep -Eq 'SAPISID=|SAPISIDHASH|Cookie:' <<<"$output"
+          ! grep -Eq 'SAPISID=|SAPISIDHASH|Cookie:|__Secure-[A-Za-z0-9_-]+' <<<"$output"

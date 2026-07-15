@@ -53,6 +53,13 @@ impl BrowserCandidate {
             .unwrap_or_else(|| self.method.clone())
     }
 
+    pub(crate) fn persisted_profile(&self) -> Option<String> {
+        self.profile_path
+            .as_deref()
+            .map(|profile| profile.to_string_lossy().into_owned())
+            .or_else(|| self.profile_label.clone())
+    }
+
     fn progress_label(&self) -> String {
         let browser = match self.method.as_str() {
             "firefox" => "Firefox",
@@ -388,11 +395,21 @@ pub fn detect_browser_candidates(
     };
 
     let mut candidates = Vec::new();
+    let saved_firefox_path = preferred_for("firefox")
+        .map(PathBuf::from)
+        .filter(|profile| profile.is_absolute() && profile.join("cookies.sqlite").is_file());
+    if let Some(profile) = saved_firefox_path.as_ref() {
+        candidates.push(BrowserCandidate::firefox(Some(profile.clone())));
+    }
     for firefox_base in [
         home.join(".mozilla/firefox"),
         home.join(".config/mozilla/firefox"),
     ] {
-        if let Some(profile) = firefox_profile(&firefox_base, preferred_for("firefox")) {
+        let preferred = saved_firefox_path
+            .is_none()
+            .then(|| preferred_for("firefox"))
+            .flatten();
+        if let Some(profile) = firefox_profile(&firefox_base, preferred) {
             candidates.push(BrowserCandidate::firefox(Some(profile)));
         }
     }
@@ -943,6 +960,40 @@ mod tests {
         assert_eq!(detected[0].profile_label.as_deref(), Some("zzz.work"));
         assert!(detected[0].yt_dlp_argument().starts_with("firefox:"));
         assert_eq!(detected[1].method, "brave");
+    }
+
+    #[test]
+    fn firefox_candidate_persists_its_full_profile_path() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let profile = home.path().join(".config/mozilla/firefox/default-release");
+        let candidate = BrowserCandidate::firefox(Some(profile.clone()));
+
+        assert_eq!(
+            candidate.persisted_profile().as_deref(),
+            profile.to_str(),
+            "the saved value must distinguish XDG from a same-named legacy profile"
+        );
+    }
+
+    #[test]
+    fn saved_xdg_firefox_path_wins_over_a_same_named_legacy_profile() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let legacy = home.path().join(".mozilla/firefox/default-release");
+        let xdg = home.path().join(".config/mozilla/firefox/default-release");
+        for profile in [&legacy, &xdg] {
+            std::fs::create_dir_all(profile).unwrap();
+            std::fs::write(profile.join("cookies.sqlite"), "").unwrap();
+        }
+        let saved = crate::config::AuthenticationConfig {
+            browser: Some("firefox".into()),
+            profile: Some(xdg.to_string_lossy().into_owned()),
+            auth_user: 0,
+        };
+
+        let detected = detect_browser_candidates(home.path(), &saved);
+
+        assert_eq!(detected[0].profile_path.as_deref(), Some(xdg.as_path()));
+        assert_eq!(detected[1].profile_path.as_deref(), Some(legacy.as_path()));
     }
 
     #[test]

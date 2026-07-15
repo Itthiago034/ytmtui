@@ -147,6 +147,11 @@ impl App {
         };
 
         self.begin_task();
+        // Retire every in-flight account-scoped response from the active
+        // generation before the provider may swap cookies. This closes the
+        // interval between the provider commit and `Msg::SignedIn` reaching
+        // the UI loop.
+        self.session_generation = self.session_generation.wrapping_add(1);
         self.authentication_flow = AuthenticationFlow::Activating {
             operation_id,
             preview_id,
@@ -239,7 +244,6 @@ impl App {
         }
         self.finish_task();
         self.authentication_flow = AuthenticationFlow::Idle;
-        self.session_generation = self.session_generation.wrapping_add(1);
         self.authentication = AuthState::Authenticated;
         if credentials_path.is_some() {
             self.cookies = credentials_path;

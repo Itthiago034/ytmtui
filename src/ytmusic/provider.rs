@@ -206,7 +206,7 @@ impl YtMusic {
         let active_string = active.to_string_lossy().into_owned();
         let activation = ActivationConfig {
             method: pending.prepared.candidate.method.clone(),
-            profile: pending.prepared.candidate.profile_label.clone(),
+            profile: pending.prepared.candidate.persisted_profile(),
             account_index,
             credentials_path: active_string.clone(),
         };

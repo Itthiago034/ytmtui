@@ -2311,6 +2311,56 @@ mod tests {
         assert_eq!(app.library[0].title, "New library");
     }
 
+    #[tokio::test]
+    async fn a_session_expiry_queued_before_sign_in_cannot_expire_the_new_account() {
+        let mut app = App::new_for_tests();
+        // `confirm_sign_in` advances this before the provider can commit.
+        app.session_generation = 1;
+        app.authentication_flow = AuthenticationFlow::Activating {
+            operation_id: 4,
+            preview_id: 7,
+        };
+        app.tx
+            .send(Msg::SessionExpiredForSession {
+                session_generation: 0,
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SignedIn {
+                operation_id: 4,
+                preview_id: 7,
+                method: "firefox".to_string(),
+                credentials_path: None,
+                account_name: "New Account".to_string(),
+            })
+            .unwrap();
+
+        app.drain_messages();
+
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("New Account"));
+    }
+
+    #[tokio::test]
+    async fn confirming_sign_in_retires_the_previous_session_before_activation_runs() {
+        let mut app = App::new_for_tests();
+        app.set_sign_in_preview_for_test(SignInPreview {
+            id: 7,
+            method: "firefox".to_string(),
+            profile_label: None,
+            accounts: vec![crate::provider::SignInAccount {
+                index: 0,
+                name: "New Account".to_string(),
+                handle: None,
+            }],
+            current_account_name: None,
+        });
+
+        app.confirm_sign_in();
+
+        assert_eq!(app.session_generation, 1);
+    }
+
     #[test]
     fn background_home_refresh_preserves_selection_by_browse_id() {
         let mut app = App::new_for_tests();

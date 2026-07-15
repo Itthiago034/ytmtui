@@ -49,6 +49,9 @@ terminal movement keys and single-letter commands.
 | Key | Action |
 |---|---|
 | `g` | Sign in or refresh cookies from browser |
+| `↑` / `↓` or `k` / `j` | Select an account in the confirmation dialog |
+| `Enter` | Confirm the selected browser account |
+| `Esc` | Cancel account confirmation and preserve the current account |
 | `f` | Like/unlike current track when signed in |
 
 ## Appearance

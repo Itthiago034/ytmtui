@@ -6,6 +6,12 @@
 
 use serde_json::Value;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountIdentity {
+    pub name: String,
+    pub handle: Option<String>,
+}
+
 /// Procura recursivamente pela primeira ocorrência de uma chave em um `Value`.
 pub fn find_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     match value {
@@ -66,25 +72,25 @@ pub fn join_runs(text_obj: &Value) -> String {
     }
 }
 
+/// Extrai a identidade da conta a partir de um único cabeçalho ativo do menu.
+pub fn parse_account_identity(data: &Value) -> Option<AccountIdentity> {
+    let header = find_key(data, "activeAccountHeaderRenderer")?;
+    let account_name = header.get("accountName").map(join_runs).unwrap_or_default();
+    let handle = header
+        .get("channelHandle")
+        .map(join_runs)
+        .filter(|text| !text.is_empty());
+    let name = if account_name.is_empty() {
+        handle.clone()?
+    } else {
+        account_name
+    };
+    Some(AccountIdentity { name, handle })
+}
+
 /// Extrai o nome (ou handle) da conta a partir de `account/account_menu`.
 pub fn parse_account_name(data: &Value) -> Option<String> {
-    if let Some(header) = find_key(data, "activeAccountHeaderRenderer") {
-        for key in ["accountName", "channelHandle"] {
-            if let Some(field) = header.get(key) {
-                let text = join_runs(field);
-                if !text.is_empty() {
-                    return Some(text);
-                }
-            }
-        }
-    }
-    if let Some(name) = find_key(data, "accountName") {
-        let text = join_runs(name);
-        if !text.is_empty() {
-            return Some(text);
-        }
-    }
-    None
+    parse_account_identity(data).map(|identity| identity.name)
 }
 
 /// Extrai a URL da thumbnail em melhor resolução de um item.
@@ -101,7 +107,7 @@ pub fn extract_thumbnail(item: &Value) -> Option<String> {
 /// picks", "Mixed for you", ...) instead of flattening everything into one
 /// list. Shelves with no title, or that end up with zero navigable items,
 /// are dropped.
-pub fn parse_home_sections(data: &Value) -> Vec<crate::ytmusic::HomeSection> {
+pub fn parse_home_sections(data: &Value) -> Vec<crate::models::HomeSection> {
     let mut shelves = Vec::new();
     collect_key(data, "musicCarouselShelfRenderer", &mut shelves);
 
@@ -142,15 +148,20 @@ pub fn parse_home_sections(data: &Value) -> Vec<crate::ytmusic::HomeSection> {
             }
             let item_title = r.get("title").map(join_runs).unwrap_or_default();
             let subtitle = r.get("subtitle").map(join_runs).unwrap_or_default();
-            items.push(crate::ytmusic::Playlist {
+            items.push(crate::models::Playlist {
                 browse_id: browse_id.to_string(),
                 title: item_title,
                 subtitle,
                 thumbnail: extract_thumbnail(r),
+                kind: if browse_id.starts_with("MPRE") {
+                    crate::models::CollectionKind::Album
+                } else {
+                    crate::models::CollectionKind::Playlist
+                },
             });
         }
         if !items.is_empty() {
-            out.push(crate::ytmusic::HomeSection { title, items });
+            out.push(crate::models::HomeSection { title, items });
         }
     }
     out
@@ -224,7 +235,7 @@ pub fn extract_continuation(value: &Value) -> Option<String> {
 }
 
 /// Converte um `playlistPanelVideoRenderer` (item de fila/rádio) em `Track`.
-pub fn parse_panel_video(r: &Value) -> Option<crate::ytmusic::Track> {
+pub fn parse_panel_video(r: &Value) -> Option<crate::models::Track> {
     let video_id = r
         .get("videoId")
         .and_then(|v| v.as_str())
@@ -252,7 +263,7 @@ pub fn parse_panel_video(r: &Value) -> Option<crate::ytmusic::Track> {
         .map(|s| s.to_string())
         .unwrap_or_default();
     let duration = r.get("lengthText").map(join_runs).unwrap_or_default();
-    Some(crate::ytmusic::Track {
+    Some(crate::models::Track {
         video_id,
         title,
         artist,
@@ -285,7 +296,7 @@ pub fn fixed_duration(renderer: &Value) -> Option<String> {
 /// empty `Vec` — rather than an `Option` — when the shape isn't present
 /// (e.g. a WEB_REMIX response, or a track without synced lyrics), so the
 /// caller can treat "empty" and "field absent" the same way.
-pub fn parse_timed_lyrics(data: &Value) -> Vec<crate::ytmusic::LyricLine> {
+pub fn parse_timed_lyrics(data: &Value) -> Vec<crate::models::LyricLine> {
     let Some(arr) = find_key(data, "timedLyricsData").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
@@ -299,7 +310,7 @@ pub fn parse_timed_lyrics(data: &Value) -> Vec<crate::ytmusic::LyricLine> {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0)
             };
-            Some(crate::ytmusic::LyricLine {
+            Some(crate::models::LyricLine {
                 text,
                 start_ms: ms("startTimeMilliseconds"),
                 end_ms: ms("endTimeMilliseconds"),
@@ -312,6 +323,17 @@ pub fn parse_timed_lyrics(data: &Value) -> Vec<crate::ytmusic::LyricLine> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn account_identity_keeps_name_and_handle() {
+        let data = serde_json::json!({"activeAccountHeaderRenderer": {
+            "accountName": {"runs": [{"text": "Thiago Santos"}]},
+            "channelHandle": {"runs": [{"text": "@thiagosantos"}]}
+        }});
+        let identity = parse_account_identity(&data).unwrap();
+        assert_eq!(identity.name, "Thiago Santos");
+        assert_eq!(identity.handle.as_deref(), Some("@thiagosantos"));
+    }
 
     #[test]
     fn parse_duration_handles_formats() {
@@ -482,6 +504,7 @@ mod tests {
                         home_item("VL1", "Song A"),
                         home_item("VL1", "Song A (dup within shelf)"),
                         home_item("VL2", "Song B"),
+                        home_item("MPRE1", "Album A"),
                         // Not navigable (no VL/MPRE prefix): filtered out.
                         home_item("SOMETHING_ELSE", "Not a playlist"),
                     ],
@@ -503,9 +526,18 @@ mod tests {
         let quick_picks = &sections[0];
         assert_eq!(quick_picks.title, "Quick picks");
         // VL1 appears once (per-shelf dedup), the invalid id is filtered.
-        assert_eq!(quick_picks.items.len(), 2);
+        assert_eq!(quick_picks.items.len(), 3);
         assert_eq!(quick_picks.items[0].browse_id, "VL1");
         assert_eq!(quick_picks.items[1].browse_id, "VL2");
+        assert_eq!(
+            quick_picks.items[0].kind,
+            crate::models::CollectionKind::Playlist
+        );
+        assert_eq!(quick_picks.items[2].browse_id, "MPRE1");
+        assert_eq!(
+            quick_picks.items[2].kind,
+            crate::models::CollectionKind::Album
+        );
 
         let mixed = &sections[1];
         assert_eq!(mixed.title, "Mixed for you");

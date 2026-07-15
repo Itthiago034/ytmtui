@@ -9,6 +9,8 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Pa
 use ratatui::Frame;
 
 use crate::app::{App, Focus, Section};
+use crate::config::{HomeDensity, VisualizerStyle};
+use crate::home::{HomeCard, HomeCardKind, HomeShelf};
 use crate::theme::Theme;
 
 /// Desenha o conteúdo do painel principal de acordo com a seção ativa.
@@ -78,7 +80,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Playlists => draw_playlists(f, app, area, block),
         Section::Artistas => draw_artists(f, app, area, block),
         Section::Letra => draw_lyrics(f, app, area, block),
-        Section::Ajuda => draw_help(f, area, block, app.theme()),
+        Section::Ajuda => draw_help(f, app, area, block),
     }
 }
 
@@ -124,7 +126,7 @@ fn draw_empty_state(
 /// Formata uma linha de faixa: "01  Título  —  Artista        3:45".
 fn track_line(
     index: usize,
-    t: &crate::ytmusic::Track,
+    t: &crate::models::Track,
     width: usize,
     playing: bool,
     theme: &'static Theme,
@@ -172,7 +174,7 @@ fn entry_line(icon: &str, title: &str, subtitle: &str, theme: &'static Theme) ->
     ])
 }
 
-fn draw_songs(f: &mut Frame, app: &App, area: Rect, block: Block, songs: &[crate::ytmusic::Track]) {
+fn draw_songs(f: &mut Frame, app: &App, area: Rect, block: Block, songs: &[crate::models::Track]) {
     let theme = app.theme();
     if songs.is_empty() {
         draw_empty_state(
@@ -337,7 +339,7 @@ const PLAYER_PANEL_HEIGHT: u16 = 7;
 /// there's enough height — splits the inside into a player panel (track
 /// title + spectrum bars) above the usual recommendations list. Short
 /// terminals degrade to just the list/message, exactly like before.
-fn draw_home(f: &mut Frame, app: &App, area: Rect, block: Block) {
+fn draw_home(f: &mut Frame, app: &mut App, area: Rect, block: Block) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -409,53 +411,130 @@ const LOGO: [&str; 3] = [
 ];
 const TAGLINE: &str = "YouTube Music in your terminal";
 
-/// The recommendations list (or its empty/loading message), without a
-/// border of its own — the border now belongs to the whole Home area.
-/// Sections are shown as non-selectable header rows interleaved with their
-/// items in one flat scrollable list (v1 scope: full section contents, no
-/// per-section cap/"show more" — overflow uses the existing scrollbar,
-/// exactly like the old flat list did).
-fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
+/// The recommendations area (or its empty/loading message), without a
+/// border of its own — the border now belongs to the whole Home area. Wide
+/// areas (`width >= GRID_MIN_WIDTH`) render a 2D grid of cards per shelf;
+/// narrower ones degrade to the original flat list.
+///
+/// Below this width, the Home grid degrades to the flat list exactly as it
+/// rendered before this feature. Evaluated against the width this function
+/// actually receives (inside the Home border, after the nav column and any
+/// player panel split), not the raw terminal width.
+const GRID_MIN_WIDTH: u16 = 70;
+/// Minimum width of one card column in grid mode; the real per-card width
+/// stretches to `list_area.width / columns` so there's no ragged empty
+/// margin on the right (see `draw_home_grid`).
+const CARD_WIDTH: u16 = 24;
+/// One blank terminal column between neighboring card frames. Without this
+/// gutter, adjacent borders visually merge back into a table.
+const CARD_GAP: u16 = 1;
+
+/// Height (rows) of one card for the given Home density: "comfortable" is
+/// title, subtitle, footer (3 rows); "compact" drops the subtitle row and
+/// stays at 2 (title, footer) — navigation and card count are unaffected,
+/// only the vertical footprint changes.
+fn card_height(density: HomeDensity) -> u16 {
+    match density {
+        // Content rows plus the rounded top/bottom frame.
+        HomeDensity::Comfortable => 5,
+        HomeDensity::Compact => 4,
+    }
+}
+
+/// Height of one shelf block in grid mode: a 1-row header plus one row of
+/// cards sized per `card_height`. Vertical scrolling moves by whole
+/// shelves, so this is also the scroll granularity.
+fn shelf_height(density: HomeDensity) -> u16 {
+    1 + card_height(density)
+}
+
+fn draw_home_sections(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     if app.home.is_empty() && app.recent.is_empty() {
-        let text = if app.busy {
-            format!("{} Loading recommendations…", app.spinner())
-        } else if app.is_authenticated() {
-            "No recommendations are available. Press / to search.".to_string()
-        } else {
-            "Sign in to see recommendations — press g.".to_string()
-        };
-
-        let mut lines: Vec<Line> = Vec::new();
-        // Identity moment: the wordmark and tagline, when there's room.
-        if area.width as usize >= LOGO[0].chars().count() + 2 && area.height >= 10 {
-            let pad = (area.height as usize).saturating_sub(LOGO.len() + 4) / 3;
-            for _ in 0..pad {
-                lines.push(Line::from(""));
-            }
-            for row in LOGO {
-                lines.push(Line::from(Span::styled(
-                    row,
-                    Style::default().fg(theme.accent),
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                TAGLINE,
-                Style::default().fg(theme.secondary),
-            )));
-            lines.push(Line::from(""));
-        }
-        lines.push(Line::from(Span::styled(
-            text,
-            Style::default().fg(theme.muted),
-        )));
-        let msg = Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false });
-        f.render_widget(msg, area);
+        // Nothing to page through either way; keep the list-mode default.
+        app.home_columns = 1;
+        draw_home_empty_state(f, app, area, theme);
         return;
     }
 
+    // Cached shelves exist: a failed background refresh never replaces them
+    // (see `Msg::HomeFailed`) — it only earns a small retryable banner above
+    // the still-visible content, instead of blanking the whole Home screen.
+    let list_area = if app.home_error.is_some() && area.height > 1 {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        let banner = Paragraph::new(Span::styled(
+            "⚠ Couldn't refresh recommendations — press R to retry",
+            Style::default().fg(theme.player),
+        ));
+        f.render_widget(banner, rows[0]);
+        rows[1]
+    } else {
+        area
+    };
+
+    if list_area.width < GRID_MIN_WIDTH {
+        app.home_columns = 1;
+        draw_home_list(f, app, list_area, theme);
+        return;
+    }
+
+    draw_home_grid(f, app, list_area, theme);
+}
+
+/// Loading/empty/error placeholder shown when there is nothing at all to
+/// list yet — same message and wordmark regardless of grid vs. list mode.
+fn draw_home_empty_state(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme) {
+    let text = if app.busy() {
+        format!("{} Loading recommendations…", app.spinner())
+    } else if let Some(err) = &app.home_error {
+        // No cache to fall back on: the empty state itself carries the
+        // error and the retry hint, in place of the generic messages
+        // below.
+        format!("{err} — Press R to retry.")
+    } else if app.is_authenticated() {
+        "No recommendations are available. Press / to search.".to_string()
+    } else {
+        "Sign in to see recommendations — press g.".to_string()
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    // Identity moment: the wordmark and tagline, when there's room.
+    if area.width as usize >= LOGO[0].chars().count() + 2 && area.height >= 10 {
+        let pad = (area.height as usize).saturating_sub(LOGO.len() + 4) / 3;
+        for _ in 0..pad {
+            lines.push(Line::from(""));
+        }
+        for row in LOGO {
+            lines.push(Line::from(Span::styled(
+                row,
+                Style::default().fg(theme.accent),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            TAGLINE,
+            Style::default().fg(theme.secondary),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        text,
+        Style::default().fg(theme.muted),
+    )));
+    let msg = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+    f.render_widget(msg, area);
+}
+
+/// Narrow-terminal (and pre-grid) rendering: sections as non-selectable
+/// header rows interleaved with one row per item in a single flat scrollable
+/// list (v1 scope: full section contents, no per-section cap/"show more" —
+/// overflow uses the existing scrollbar, exactly like the old flat list
+/// did).
+fn draw_home_list(f: &mut Frame, app: &App, list_area: Rect, theme: &'static Theme) {
     let selected = app.list_state.selected();
     let mut items: Vec<ListItem> = Vec::new();
     let mut shadow_selected: Option<usize> = None;
@@ -465,11 +544,11 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     // `App::open_selected_home`, which plays indices below `recent.len()`.
     if !app.recent.is_empty() {
         items.push(ListItem::new(section_header(
-            "Recently played",
-            area.width as usize,
+            "Continue listening",
+            list_area.width as usize,
             theme,
         )));
-        let track_width = area.width.saturating_sub(2) as usize;
+        let track_width = list_area.width.saturating_sub(2) as usize;
         let current_id = app.current.as_ref().map(|t| t.video_id.clone());
         for (i, t) in app.recent.iter().enumerate() {
             if selected == Some(flat_idx) {
@@ -484,7 +563,7 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     for section in &app.home {
         items.push(ListItem::new(section_header(
             &section.title,
-            area.width as usize,
+            list_area.width as usize,
             theme,
         )));
         for p in &section.items {
@@ -501,7 +580,347 @@ fn draw_home_sections(f: &mut Frame, app: &App, area: Rect) {
     // "shadow" ListState remaps it to the right row before rendering.
     let mut shadow_state = app.list_state.clone();
     shadow_state.select(shadow_selected);
-    render_list_borderless(f, app, area, items, &shadow_state);
+    render_list_borderless(f, app, list_area, items, &shadow_state);
+}
+
+/// Wide-terminal rendering: one shelf per vertical block, each a header row
+/// followed by a single row of cards. Uses `App::home_view` (the same 2D
+/// projection `move_home` navigates) so flattened selection indices always
+/// line up with what's drawn here.
+///
+/// Scrolling: vertical scrolling moves by whole shelves (never splitting one
+/// mid-row) to keep the selected shelf on screen; horizontal scrolling is
+/// per-shelf and keeps the selected card on screen, showing the first
+/// `columns` cards for every other shelf. Overflow in either direction is
+/// signaled with a `‹`/`›` marker appended to that shelf's header, rather
+/// than a scrollbar — there's no single flat viewport to attach one to.
+fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Theme) {
+    // The caller only takes this path once `area.width >= GRID_MIN_WIDTH`,
+    // but a zero height is still possible on very short terminals.
+    if area.width == 0 || area.height == 0 {
+        app.home_columns = 1;
+        return;
+    }
+    let columns = (area.width / CARD_WIDTH).max(1) as usize;
+    app.home_columns = columns;
+    let density = app.home_density;
+    let shelf_h = shelf_height(density);
+    // Only one card in the whole grid can be selected, so the reveal stage
+    // is computed once up front and threaded down to that card.
+    let reveal = current_reveal_stage(app);
+
+    let view = app.home_view();
+    if view.is_empty() {
+        return;
+    }
+    let selected = app.list_state.selected();
+
+    // Running flat-index base of each shelf, to map a shelf-local column
+    // back to the flattened index `list_state` uses.
+    let mut bases = Vec::with_capacity(view.shelves.len());
+    let mut base = 0usize;
+    for shelf in &view.shelves {
+        bases.push(base);
+        base += shelf.cards.len();
+    }
+    let selected_shelf = selected.and_then(|idx| {
+        view.shelves.iter().enumerate().find_map(|(i, shelf)| {
+            (idx >= bases[i] && idx < bases[i] + shelf.cards.len()).then_some(i)
+        })
+    });
+
+    // Vertical window: scroll by whole shelves so the selected one is
+    // visible, clamped so the view never scrolls past the last shelf.
+    let total_shelves = view.shelves.len();
+    let visible_shelf_count = (area.height / shelf_h).max(1) as usize;
+    let max_scroll = total_shelves.saturating_sub(visible_shelf_count);
+    let mut shelf_scroll = 0usize;
+    if let Some(sel) = selected_shelf {
+        if sel >= visible_shelf_count {
+            shelf_scroll = sel - visible_shelf_count + 1;
+        }
+    }
+    shelf_scroll = shelf_scroll.min(max_scroll);
+    let shelf_end = (shelf_scroll + visible_shelf_count).min(total_shelves);
+
+    let bottom = area.y.saturating_add(area.height);
+    let mut y = area.y;
+    let visible_shelves = view
+        .shelves
+        .iter()
+        .zip(bases.iter().copied())
+        .enumerate()
+        .skip(shelf_scroll)
+        .take(shelf_end - shelf_scroll);
+    for (shelf_idx, (shelf, shelf_base)) in visible_shelves {
+        if y >= bottom {
+            break;
+        }
+        let this_height = shelf_h.min(bottom - y);
+        let header_height = this_height.min(1);
+        let cards_height = this_height.saturating_sub(header_height);
+
+        // Per-shelf horizontal window: only the selected shelf scrolls past
+        // its first `columns` cards, and only far enough to keep the
+        // selection visible.
+        let local_selected = (selected_shelf == Some(shelf_idx))
+            .then(|| selected.map(|idx| idx - shelf_base))
+            .flatten();
+        let offset = horizontal_offset(local_selected, shelf.cards.len(), columns);
+        let can_scroll_left = offset > 0;
+        let can_scroll_right = offset + columns < shelf.cards.len();
+
+        if header_height > 0 {
+            let header_rect = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: header_height,
+            };
+            let marker = match (can_scroll_left, can_scroll_right) {
+                (true, true) => " ‹›",
+                (true, false) => " ‹",
+                (false, true) => " ›",
+                (false, false) => "",
+            };
+            let title = format!("{}{marker}", shelf.title);
+            f.render_widget(
+                Paragraph::new(section_header(&title, header_rect.width as usize, theme)),
+                header_rect,
+            );
+        }
+        y += header_height;
+
+        if cards_height > 0 {
+            let cards_rect = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: cards_height,
+            };
+            draw_shelf_cards(
+                f, cards_rect, shelf, shelf_base, offset, columns, selected, theme, density, reveal,
+            );
+        }
+        y += cards_height;
+    }
+}
+
+/// Smallest per-shelf horizontal offset (in cards) that keeps
+/// `local_selected` inside the visible `columns`-wide window. Shelves with
+/// no selected card default to offset 0 — their first `columns` cards.
+fn horizontal_offset(local_selected: Option<usize>, card_count: usize, columns: usize) -> usize {
+    let Some(local) = local_selected else {
+        return 0;
+    };
+    let max_offset = card_count.saturating_sub(columns);
+    if local < columns {
+        0
+    } else {
+        (local + 1 - columns).min(max_offset)
+    }
+}
+
+/// One row of cards for a single shelf: up to `columns` cards starting at
+/// `offset`, each stretched to `area.width / columns` so the row fills the
+/// available width without a ragged margin.
+#[allow(clippy::too_many_arguments)]
+fn draw_shelf_cards(
+    f: &mut Frame,
+    area: Rect,
+    shelf: &HomeShelf,
+    shelf_base: usize,
+    offset: usize,
+    columns: usize,
+    selected: Option<usize>,
+    theme: &'static Theme,
+    density: HomeDensity,
+    reveal: RevealStage,
+) {
+    if area.width == 0 || area.height == 0 || columns == 0 {
+        return;
+    }
+    let col_width = area.width / columns as u16;
+    if col_width == 0 {
+        return;
+    }
+    for slot in 0..columns {
+        let card_index = offset + slot;
+        let Some(card) = shelf.cards.get(card_index) else {
+            break;
+        };
+        let card_rect = Rect {
+            x: area.x + slot as u16 * col_width,
+            y: area.y,
+            width: col_width.saturating_sub(CARD_GAP),
+            height: area.height,
+        };
+        let is_selected = selected == Some(shelf_base + card_index);
+        draw_card(f, card_rect, card, is_selected, theme, density, reveal);
+    }
+}
+
+/// Stage of the selected card's staged reveal, driven by the elapsed time
+/// since `App::selection_changed_at` (see [`reveal_stage`]). Non-selected
+/// cards never consult this — they always render the plain, un-accented
+/// look regardless of stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RevealStage {
+    /// 0–80ms: only the `selected_card` background shows; title and footer
+    /// stay in their normal (non-selected) colors, no badge.
+    Background,
+    /// 80–160ms: the title has switched to accent+bold; the badge is still
+    /// absent.
+    Title,
+    /// Past 160ms, under `reduced_motion`, or with no transition in
+    /// progress at all (`selection_changed_at` is `None`): the complete
+    /// final look, including the provider badge. This is the only stage
+    /// buffer tests without an explicit `selection_changed_at` ever
+    /// observe, so it must stay identical to the pre-Etapa-6 unconditional
+    /// rendering.
+    Full,
+}
+
+/// Pure decision of which [`RevealStage`] applies `elapsed_ms` after the
+/// selection changed. Kept free of `Instant`/`App` so it's directly
+/// testable with explicit elapsed values — `Instant` itself can't be
+/// mocked. `reduced_motion` always short-circuits to `Full`: reduced motion
+/// skips the staged reveal entirely rather than slowing it down.
+pub(super) fn reveal_stage(elapsed_ms: u128, reduced_motion: bool) -> RevealStage {
+    if reduced_motion {
+        return RevealStage::Full;
+    }
+    if elapsed_ms < 80 {
+        RevealStage::Background
+    } else if elapsed_ms < 160 {
+        RevealStage::Title
+    } else {
+        RevealStage::Full
+    }
+}
+
+/// Resolves the current [`RevealStage`] from live `App` state: elapsed time
+/// since `selection_changed_at` (or "forever ago" when `None`, which always
+/// resolves to `Full`), scaled by [`crate::config::AnimationSpeed::factor`]
+/// the same way [`crate::app::App::kick_animation`] scales its window.
+fn current_reveal_stage(app: &App) -> RevealStage {
+    let Some(changed_at) = app.selection_changed_at else {
+        return RevealStage::Full;
+    };
+    let elapsed_ms = changed_at.elapsed().as_millis();
+    // Dividing (rather than multiplying) the elapsed time by the speed
+    // factor makes a `Slow` transition take longer to reach each stage —
+    // matching `kick_animation`, which multiplies the *window* by the same
+    // factor to make it last longer.
+    let scaled_ms = (elapsed_ms as f64 / app.animation_speed.factor()) as u128;
+    reveal_stage(scaled_ms, app.reduced_motion)
+}
+
+/// One rounded card: title (bold), an optional subtitle (dropped in
+/// "compact" density), and a footer with the item's type glyph and duration.
+/// Every card has a surface and frame so the grid reads as a collection of
+/// objects instead of a text table. The selected card gets the accent border
+/// and `theme.selected_card` background; its provider badge is integrated
+/// into the lower frame and phases in over `reveal` (see [`RevealStage`]).
+fn draw_card(
+    f: &mut Frame,
+    area: Rect,
+    card: &HomeCard,
+    selected: bool,
+    theme: &'static Theme,
+    density: HomeDensity,
+    reveal: RevealStage,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let card_bg = if selected {
+        theme.selected_card
+    } else {
+        theme.surface
+    };
+    let border_style = if selected {
+        Style::default()
+            .fg(theme.accent)
+            .bg(card_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border).bg(card_bg)
+    };
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .style(Style::default().bg(card_bg));
+    if selected && reveal == RevealStage::Full {
+        let badge_width = (area.width as usize).saturating_sub(4);
+        let badge = crate::ui::take_width(&format!(" ◆ {} ", card.provider), badge_width);
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                badge,
+                Style::default()
+                    .fg(theme.provider_badge)
+                    .bg(card_bg)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // One leading content column inside the frame, matching the rest of the
+    // file's rows without crowding the left border.
+    let inner_width = (inner.width as usize).saturating_sub(1);
+
+    let title = crate::ui::truncate_chars(&card.title, inner_width);
+    let subtitle = crate::ui::truncate_chars(&card.subtitle, inner_width);
+
+    let glyph = match card.kind {
+        HomeCardKind::Track => "♪",
+        HomeCardKind::Album => "▤",
+        HomeCardKind::Playlist => "♫",
+    };
+    let duration_part = if card.duration.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", card.duration)
+    };
+    let footer_main = crate::ui::truncate_chars(&format!("{glyph}{duration_part}"), inner_width);
+
+    // The title only picks up the accent color from the `Title` stage
+    // onward — during `Background` it still reads as a normal card, just
+    // with the selection background already showing.
+    let title_accented = selected && reveal != RevealStage::Background;
+    let title_fg = if title_accented {
+        theme.accent
+    } else {
+        theme.text
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" {title}"),
+        Style::default().fg(title_fg).add_modifier(Modifier::BOLD),
+    ))];
+    // "compact" density drops the subtitle row entirely (2-line card:
+    // título + rodapé) instead of just leaving it blank, so the shelf's
+    // vertical footprint actually shrinks (see `card_height`).
+    if density == HomeDensity::Comfortable {
+        lines.push(Line::from(Span::styled(
+            format!(" {subtitle}"),
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    let footer_spans = vec![Span::styled(
+        format!(" {footer_main}"),
+        Style::default().fg(theme.muted),
+    )];
+    lines.push(Line::from(footer_spans));
+
+    // The selected background still appears from the first reveal stage;
+    // non-selected cards keep the quieter theme surface.
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(card_bg));
+    f.render_widget(paragraph, inner);
 }
 
 /// Section header row: accent title followed by a dim rule to the edge,
@@ -536,7 +955,18 @@ fn draw_player_panel(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     draw_panel_title(f, app, rows[0], theme);
-    draw_bars(f, app.visualizer.bars(), rows[1], theme);
+    // "off" draws only the title row above — no bar glyphs at all — leaving
+    // the rest of the panel blank instead of splitting it further.
+    if app.visualizer_style != VisualizerStyle::Off {
+        draw_bars(
+            f,
+            app.visualizer.bars(),
+            app.visualizer.peaks(),
+            rows[1],
+            theme,
+            app.visualizer_style,
+        );
+    }
 }
 
 /// Compact "▶ Title — Artist" line above the bars.
@@ -552,15 +982,29 @@ fn draw_panel_title(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme)
 }
 
 /// Cava-style bars: one column per entry in `bars`, each a stack of Unicode
-/// eighth-block glyphs sized to that bar's smoothed height. Colored by the
-/// bar's own current height using the theme's existing palette (no new
-/// gradient helper) so quiet bars read as calmer and loud ones as louder.
+/// eighth-block glyphs sized to that bar's smoothed height, plus a slowly
+/// falling "peak cap" marking each bar's recent maximum (Winamp-style).
+/// In `Gradient` style, cells are colored by their own height in the panel —
+/// quiet bars stay in the player color, tall bars grade through secondary
+/// into accent — so every loud bar reads as a vertical gradient. `Mono`
+/// keeps every filled cell in `theme.player` instead, no matter the row;
+/// peak caps are unaffected either way. Never called with `Off` — the
+/// caller (`draw_player_panel`) skips this function entirely in that case.
 // Precomputed "glyph + trailing space" static slices: with the Home screen's
 // fast (~60ms) redraw tier, this function runs often, so each cell is a
 // `&'static str` lookup rather than a fresh `format!()` allocation.
 const BAR_GLYPHS: [&str; 9] = ["  ", "▁ ", "▂ ", "▃ ", "▄ ", "▅ ", "▆ ", "▇ ", "█ "];
+/// Glyph do peak cap (linha fina no alto da célula onde o pico está).
+const PEAK_GLYPH: &str = "▔ ";
 
-fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
+fn draw_bars(
+    f: &mut Frame,
+    bars: &[f32],
+    peaks: &[f32],
+    area: Rect,
+    theme: &'static Theme,
+    style: VisualizerStyle,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -571,8 +1015,20 @@ fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows as usize);
     for row in 0..rows {
         let row_from_bottom = (rows - 1 - row) as f32;
+        // Fração de altura desta linha no painel: gradiente por célula
+        // (ignorada em `Mono`, que sempre usa `theme.player`).
+        let fraction = (row_from_bottom + 1.0) / rows as f32;
+        let color = if style == VisualizerStyle::Mono {
+            theme.player
+        } else if fraction > 0.66 {
+            theme.accent
+        } else if fraction > 0.33 {
+            theme.secondary
+        } else {
+            theme.player
+        };
         let mut spans = Vec::with_capacity(visible);
-        for &height in &bars[..visible] {
+        for (&height, &peak) in bars[..visible].iter().zip(&peaks[..visible]) {
             let filled_rows = height * rows as f32;
             let glyph = if row_from_bottom + 1.0 <= filled_rows {
                 BAR_GLYPHS[8]
@@ -582,13 +1038,15 @@ fn draw_bars(f: &mut Frame, bars: &[f32], area: Rect, theme: &'static Theme) {
             } else {
                 BAR_GLYPHS[0]
             };
-            let color = if height > 0.66 {
-                theme.accent
-            } else if height > 0.33 {
-                theme.secondary
-            } else {
-                theme.player
-            };
+            // O cap só aparece em célula vazia acima da barra; quando o
+            // pico coincide com o topo da barra, a própria barra o mostra.
+            if glyph == BAR_GLYPHS[0] && peak > 0.04 {
+                let peak_row = ((peak * rows as f32).ceil() - 1.0).max(0.0);
+                if (peak_row - row_from_bottom).abs() < f32::EPSILON {
+                    spans.push(Span::styled(PEAK_GLYPH, Style::default().fg(theme.text)));
+                    continue;
+                }
+            }
             spans.push(Span::styled(glyph, Style::default().fg(color)));
         }
         lines.push(Line::from(spans));
@@ -614,7 +1072,7 @@ fn draw_library(f: &mut Frame, app: &App, area: Rect, block: Block) {
         return;
     }
     if app.library.is_empty() {
-        let text = if app.busy {
+        let text = if app.busy() {
             format!("{} Loading your library…", app.spinner())
         } else {
             "No playlists in your library.".to_string()
@@ -703,7 +1161,7 @@ fn draw_synced_lyrics(
     app: &App,
     area: Rect,
     block: Block,
-    lines: &[crate::ytmusic::LyricLine],
+    lines: &[crate::models::LyricLine],
     active: Option<usize>,
 ) {
     let theme = app.theme();
@@ -712,7 +1170,7 @@ fn draw_synced_lyrics(
         .iter()
         .enumerate()
         .map(|(i, l)| match active {
-            Some(a) if i == a => karaoke_line(l, position_ms, theme),
+            Some(a) if i == a => karaoke_line(l, position_ms, theme, app.reduced_motion),
             Some(a) => {
                 let color = match a.abs_diff(i) {
                     1 => theme.subtext,
@@ -750,11 +1208,25 @@ fn draw_synced_lyrics(
 /// the line's time window has already elapsed are sung (accent), the rest
 /// waits in bright text. Both halves stay bold so the active line pops from
 /// its dimmer neighbors even at the very start of the window.
+///
+/// Under `reduced_motion` the per-character wipe — a continuous animation —
+/// is skipped entirely: the whole line renders already in the "sung" style,
+/// the same economy trade-off `App::needs_fast_animation` makes for this
+/// same driver (falls back to the 200ms redraw tier instead of 60ms).
 pub(super) fn karaoke_line(
-    l: &crate::ytmusic::LyricLine,
+    l: &crate::models::LyricLine,
     position_ms: u64,
     theme: &'static Theme,
+    reduced_motion: bool,
 ) -> Line<'static> {
+    if reduced_motion {
+        return Line::from(Span::styled(
+            l.text.clone(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     let window = l.end_ms.saturating_sub(l.start_ms).max(1);
     let fraction = (position_ms.saturating_sub(l.start_ms) as f64 / window as f64).clamp(0.0, 1.0);
     let width = crate::ui::display_width(&l.text);
@@ -775,14 +1247,23 @@ pub(super) fn karaoke_line(
     ])
 }
 
-fn draw_help(f: &mut Frame, area: Rect, block: Block, theme: &'static Theme) {
+fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
+    let theme = app.theme();
     let rows = [
         ("Navigation", ""),
         ("  ↑/↓  or  k/j", "move selection"),
+        ("  PgUp/PgDn", "jump 10 items; Home/End first/last"),
+        ("  mouse wheel", "scroll the list"),
+        ("  1..8", "jump straight to a section"),
         ("  ←/→  or  h/l", "switch between menu and list"),
         ("  Tab", "toggle focus menu/list"),
         ("  Enter", "play / open playlist / open artist"),
         ("  a", "add track to the queue"),
+        ("", ""),
+        ("Queue", ""),
+        ("  d / Delete", "remove the selected track"),
+        ("  Shift+J/K", "move the selected track down / up"),
+        ("  c", "clear the queue (keeps what's playing)"),
         ("", ""),
         ("Search", ""),
         ("  /", "open the search input"),
@@ -808,6 +1289,7 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, theme: &'static Theme) {
         ("", ""),
         ("General", ""),
         ("  ?", "this help"),
+        ("  R", "refresh Home and Library"),
         ("  q  or  Ctrl+C", "quit"),
     ];
     let lines: Vec<Line> = rows
@@ -833,7 +1315,13 @@ fn draw_help(f: &mut Frame, area: Rect, block: Block, theme: &'static Theme) {
             }
         })
         .collect();
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    // A lista de atalhos é mais alta que terminais baixos; j/k/roda rolam.
+    // Clampa aqui, onde a altura real do painel é conhecida, para a rolagem
+    // parar na última linha em vez de sumir com o texto.
+    let visible = area.height.saturating_sub(2); // bordas do block
+    let max_scroll = (lines.len() as u16).saturating_sub(visible);
+    let scroll = app.help_scroll.min(max_scroll);
+    f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
 }
 
 fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<ListItem>) {

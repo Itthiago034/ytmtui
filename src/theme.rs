@@ -26,6 +26,20 @@ pub struct Theme {
     pub player: Color,
     /// Fundo do item selecionado nas listas.
     pub highlight_bg: Color,
+    /// Fundo dos painéis (blocks). Nenhum preset define hoje um fundo
+    /// próprio, então todos usam `Color::Reset` — o fundo do terminal do
+    /// usuário é preservado exatamente como antes deste campo existir.
+    pub surface: Color,
+    /// Fundo do card selecionado na grade da tela Início. Hoje é idêntico a
+    /// `highlight_bg` em todos os presets (ver teste
+    /// `every_preset_keeps_selected_card_in_sync_with_highlight_bg`); campo
+    /// separado para permitir divergir no futuro sem afetar as listas.
+    pub selected_card: Color,
+    /// Cor do badge de provedor mostrado no card selecionado da grade. Hoje
+    /// é idêntico a `secondary` em todos os presets (ver teste
+    /// `every_preset_keeps_provider_badge_in_sync_with_secondary`); campo
+    /// separado pelo mesmo motivo de `selected_card`.
+    pub provider_badge: Color,
     /// Texto principal (títulos de faixa, conteúdo em foco).
     pub text: Color,
     /// Texto de apoio (status, tempos, descrições).
@@ -45,6 +59,9 @@ pub const THEMES: &[Theme] = &[
         secondary: Color::Rgb(3, 218, 198),
         player: Color::Rgb(187, 134, 252),
         highlight_bg: Color::Rgb(45, 40, 65),
+        surface: Color::Reset,
+        selected_card: Color::Rgb(45, 40, 65),
+        provider_badge: Color::Rgb(3, 218, 198),
         text: Color::Rgb(236, 231, 250),
         subtext: Color::Rgb(176, 168, 200),
         muted: Color::Rgb(118, 110, 145),
@@ -57,6 +74,9 @@ pub const THEMES: &[Theme] = &[
         secondary: Color::Rgb(255, 150, 150),
         player: Color::Rgb(255, 45, 70),
         highlight_bg: Color::Rgb(60, 28, 32),
+        surface: Color::Reset,
+        selected_card: Color::Rgb(60, 28, 32),
+        provider_badge: Color::Rgb(255, 150, 150),
         text: Color::Rgb(250, 235, 236),
         subtext: Color::Rgb(198, 168, 172),
         muted: Color::Rgb(140, 106, 112),
@@ -69,6 +89,9 @@ pub const THEMES: &[Theme] = &[
         secondary: Color::Rgb(130, 230, 175),
         player: Color::Rgb(30, 215, 96),
         highlight_bg: Color::Rgb(24, 54, 40),
+        surface: Color::Reset,
+        selected_card: Color::Rgb(24, 54, 40),
+        provider_badge: Color::Rgb(130, 230, 175),
         text: Color::Rgb(232, 246, 238),
         subtext: Color::Rgb(163, 192, 175),
         muted: Color::Rgb(102, 132, 114),
@@ -81,6 +104,9 @@ pub const THEMES: &[Theme] = &[
         secondary: Color::Rgb(150, 205, 255),
         player: Color::Rgb(80, 170, 255),
         highlight_bg: Color::Rgb(24, 42, 66),
+        surface: Color::Reset,
+        selected_card: Color::Rgb(24, 42, 66),
+        provider_badge: Color::Rgb(150, 205, 255),
         text: Color::Rgb(230, 240, 250),
         subtext: Color::Rgb(160, 182, 205),
         muted: Color::Rgb(99, 124, 152),
@@ -93,6 +119,9 @@ pub const THEMES: &[Theme] = &[
         secondary: Color::Rgb(255, 212, 145),
         player: Color::Rgb(255, 176, 59),
         highlight_bg: Color::Rgb(58, 44, 20),
+        surface: Color::Reset,
+        selected_card: Color::Rgb(58, 44, 20),
+        provider_badge: Color::Rgb(255, 212, 145),
         text: Color::Rgb(250, 242, 230),
         subtext: Color::Rgb(201, 182, 155),
         muted: Color::Rgb(142, 123, 95),
@@ -105,6 +134,9 @@ pub const THEMES: &[Theme] = &[
         secondary: Color::Rgb(255, 185, 218),
         player: Color::Rgb(255, 110, 180),
         highlight_bg: Color::Rgb(58, 30, 48),
+        surface: Color::Reset,
+        selected_card: Color::Rgb(58, 30, 48),
+        provider_badge: Color::Rgb(255, 185, 218),
         text: Color::Rgb(250, 235, 243),
         subtext: Color::Rgb(200, 170, 186),
         muted: Color::Rgb(142, 108, 124),
@@ -123,4 +155,36 @@ pub fn index_by_name(name: &str) -> usize {
 /// Retorna o tema em `index` (com wrap seguro).
 pub fn get(index: usize) -> &'static Theme {
     &THEMES[index % THEMES.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Esta migração introduziu `selected_card`/`provider_badge` como campos
+    // separados de `highlight_bg`/`secondary`, mas todo preset existente
+    // deve preservar o visual pixel a pixel: os dois pares devem continuar
+    // idênticos em todo `THEMES[i]`. Se este teste quebrar, o preset mudou
+    // de aparência — reverta em vez de atualizar o teste.
+    #[test]
+    fn every_preset_keeps_selected_card_in_sync_with_highlight_bg() {
+        for theme in THEMES {
+            assert_eq!(
+                theme.selected_card, theme.highlight_bg,
+                "preset {:?} diverged selected_card from highlight_bg",
+                theme.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_preset_keeps_provider_badge_in_sync_with_secondary() {
+        for theme in THEMES {
+            assert_eq!(
+                theme.provider_badge, theme.secondary,
+                "preset {:?} diverged provider_badge from secondary",
+                theme.name
+            );
+        }
+    }
 }

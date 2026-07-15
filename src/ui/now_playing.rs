@@ -13,6 +13,31 @@ fn fmt(secs: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
+/// Stage of the now-playing title's metadata fade-in after a track change,
+/// driven by elapsed time since `App::track_changed_at`. Two stages only
+/// (unlike the Home card's three-stage [`super::main_panel::RevealStage`]):
+/// there's just the one style property (color) fading in here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MetadataStage {
+    /// The title is still fading in: rendered in the neutral `subtext`
+    /// color rather than its final style.
+    Fading,
+    /// The fade finished (or was skipped): final title style applies.
+    Final,
+}
+
+/// Pure decision of which [`MetadataStage`] applies `elapsed_ms` after the
+/// track changed. Free of `Instant`/`App`, like
+/// `main_panel::reveal_stage`, so it's directly testable with explicit
+/// elapsed values. `reduced_motion` always short-circuits to `Final`.
+pub(super) fn metadata_stage(elapsed_ms: u128, reduced_motion: bool) -> MetadataStage {
+    if reduced_motion || elapsed_ms >= 150 {
+        MetadataStage::Final
+    } else {
+        MetadataStage::Fading
+    }
+}
+
 /// Draws the playback summary.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -52,7 +77,17 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
         None => ("Nothing playing".to_string(), String::new()),
     };
     let title_style = if app.current.is_some() {
-        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+        // Just after a track change, the title fades in from a neutral
+        // color instead of snapping straight to its final style — the
+        // "metadata reveal" for the now-playing summary. `reduced_motion`
+        // skips this via `metadata_stage`.
+        let elapsed_ms = app.track_changed_at.elapsed().as_millis();
+        let scaled_ms = (elapsed_ms as f64 / app.animation_speed.factor()) as u128;
+        let fg = match metadata_stage(scaled_ms, app.reduced_motion) {
+            MetadataStage::Fading => theme.subtext,
+            MetadataStage::Final => theme.text,
+        };
+        Style::default().fg(fg).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.muted)
     };
@@ -83,22 +118,45 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
     let right = slider.chars().count() + modes.chars().count() + 2;
     let avail = width.saturating_sub(fixed + right);
 
-    let title_shown = crate::ui::truncate_chars(&title, avail);
-    let remaining = avail.saturating_sub(crate::ui::display_width(&title_shown));
-    let subtitle_shown = if remaining >= 4 {
-        crate::ui::truncate_chars(&subtitle, remaining)
+    let subtitle_style = Style::default().fg(theme.secondary);
+    let needed = crate::ui::display_width(&title) + crate::ui::display_width(&subtitle);
+    // Título que não cabe vira um marquee deslizando com o relógio da faixa
+    // (e congelando em pausa); com espaço de sobra, texto estático normal.
+    // `reduced_motion` desativa esse deslizamento (volta ao truncamento com
+    // '…' abaixo); `animation_speed` ajusta o passo via `marquee_interval`.
+    let mut middle = if needed > avail && avail >= 8 && app.current.is_some() && !app.reduced_motion
+    {
+        let interval = crate::ui::marquee_interval(app.animation_speed);
+        let step = (app.player.position().as_millis() / interval) as usize;
+        crate::ui::marquee_spans(
+            &[
+                (title.as_str(), title_style),
+                (subtitle.as_str(), subtitle_style),
+            ],
+            avail,
+            step,
+        )
     } else {
-        String::new()
+        let title_shown = crate::ui::truncate_chars(&title, avail);
+        let remaining = avail.saturating_sub(crate::ui::display_width(&title_shown));
+        let subtitle_shown = if remaining >= 4 {
+            crate::ui::truncate_chars(&subtitle, remaining)
+        } else {
+            String::new()
+        };
+        vec![
+            Span::styled(title_shown, title_style),
+            Span::styled(subtitle_shown, subtitle_style),
+        ]
     };
-    let used = crate::ui::display_width(&title_shown) + crate::ui::display_width(&subtitle_shown);
+    let used: usize = middle
+        .iter()
+        .map(|s| crate::ui::display_width(&s.content))
+        .sum();
     let pad = avail.saturating_sub(used) + 1;
 
-    let mut spans = vec![
-        Span::raw(" "),
-        Span::styled(glyph, glyph_style),
-        Span::styled(title_shown, title_style),
-        Span::styled(subtitle_shown, Style::default().fg(theme.secondary)),
-    ];
+    let mut spans = vec![Span::raw(" "), Span::styled(glyph, glyph_style)];
+    spans.append(&mut middle);
     if liked {
         spans.push(Span::styled(" ♥", Style::default().fg(theme.player)));
     }

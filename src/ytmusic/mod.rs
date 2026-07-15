@@ -6,8 +6,10 @@
 //! uma playlist e obtenção de letras.
 
 pub mod auth;
-pub mod models;
 mod parse;
+mod provider;
+mod signin;
+mod stream;
 
 use std::fmt;
 use std::sync::Arc;
@@ -15,7 +17,14 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 pub use auth::Auth;
-pub use models::{Artist, HomeSection, LyricLine, Lyrics, Playlist, SearchResults, Track};
+pub use parse::AccountIdentity;
+pub use provider::{Bootstrap, YtMusic};
+pub(crate) use signin::{
+    detect_browser_candidates, resolve_cookie_path, BrowserCandidate, CookiePathResolution,
+};
+
+use crate::models::{Artist, CollectionKind, HomeSection, Lyrics, Playlist, SearchResults, Track};
+use crate::provider::SignInAccount;
 use parse::*;
 
 const BASE: &str = "https://music.youtube.com/youtubei/v1";
@@ -49,6 +58,7 @@ pub enum YtMusicError {
     },
     Transport(reqwest::Error),
     InvalidResponse(reqwest::Error),
+    InvalidCredentials(auth::AuthError),
 }
 
 impl fmt::Display for YtMusicError {
@@ -63,6 +73,7 @@ impl fmt::Display for YtMusicError {
             }
             Self::Transport(error) => write!(f, "request failed: {error}"),
             Self::InvalidResponse(error) => write!(f, "invalid API response: {error}"),
+            Self::InvalidCredentials(error) => write!(f, "invalid credentials: {error}"),
         }
     }
 }
@@ -73,6 +84,33 @@ impl From<reqwest::Error> for YtMusicError {
     fn from(error: reqwest::Error) -> Self {
         Self::Transport(error)
     }
+}
+
+impl From<auth::AuthError> for YtMusicError {
+    fn from(error: auth::AuthError) -> Self {
+        Self::InvalidCredentials(error)
+    }
+}
+
+fn account_indices_from_slots<T>(slots: &[Option<T>]) -> Vec<u8> {
+    let mut found = Vec::new();
+    let mut empty_after_match = 0;
+    for (index, slot) in slots.iter().take(10).enumerate() {
+        match slot {
+            Some(_) => {
+                found.push(index as u8);
+                empty_after_match = 0;
+            }
+            None if !found.is_empty() => {
+                empty_after_match += 1;
+                if empty_after_match == 2 {
+                    break;
+                }
+            }
+            None => {}
+        }
+    }
+    found
 }
 
 fn classify_status(
@@ -104,6 +142,8 @@ pub struct YtMusicClient {
     http: reqwest::Client,
     /// Dados de autenticação (quando logado via cookies).
     auth: Option<Arc<Auth>>,
+    /// Índice da conta Google selecionada dentro da sessão de cookies.
+    auth_user: u8,
 }
 
 impl YtMusicClient {
@@ -114,18 +154,47 @@ impl YtMusicClient {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             )
+            // Sem timeout, uma conexão pendurada deixa a tarefa contada no
+            // spinner (`busy`) em voo para sempre — a UI ficaria "carregando"
+            // sem nunca se recuperar.
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(20))
             .build()
             .expect("falha ao construir cliente HTTP");
-        Self { http, auth: None }
+        Self {
+            http,
+            auth: None,
+            auth_user: 0,
+        }
     }
 
     /// Cria um cliente autenticado a partir de um arquivo de cookies (Netscape).
     ///
     /// Se os cookies forem inválidos/incompletos, retorna um cliente anônimo.
-    pub fn with_cookies(path: &str) -> std::result::Result<Self, auth::AuthError> {
+    pub fn with_cookies_for_account(
+        path: &str,
+        auth_user: u8,
+    ) -> std::result::Result<Self, auth::AuthError> {
         let mut client = Self::new();
         client.auth = Some(Arc::new(Auth::from_cookie_file(path)?));
+        client.auth_user = auth_user;
         Ok(client)
+    }
+
+    pub fn with_cookies(path: &str) -> std::result::Result<Self, auth::AuthError> {
+        Self::with_cookies_for_account(path, 0)
+    }
+
+    #[cfg(test)]
+    fn new_with_auth_user_for_test(auth_user: u8) -> Self {
+        let mut client = Self::new();
+        client.auth_user = auth_user;
+        client
+    }
+
+    #[cfg(test)]
+    fn auth_user(&self) -> u8 {
+        self.auth_user
     }
 
     /// Indica se o cliente está autenticado (login por cookies bem-sucedido).
@@ -195,7 +264,7 @@ impl YtMusicClient {
             req = req
                 .header("Cookie", a.cookie_header.clone())
                 .header("Authorization", a.authorization_header())
-                .header("X-Goog-AuthUser", "0")
+                .header("X-Goog-AuthUser", self.auth_user.to_string())
                 .header("X-Origin", auth::ORIGIN);
         }
 
@@ -251,6 +320,7 @@ impl YtMusicClient {
                 title,
                 subtitle,
                 thumbnail: extract_thumbnail(r),
+                kind: CollectionKind::Playlist,
             });
         }
         Ok(out)
@@ -323,6 +393,18 @@ impl YtMusicClient {
         Ok(())
     }
 
+    /// Obtém a identidade da conta logada (via `account/account_menu`).
+    ///
+    /// Retorna `None` se anônimo ou se a identidade não puder ser extraída.
+    pub async fn get_account_identity(&self) -> YtMusicResult<Option<AccountIdentity>> {
+        if !self.is_authenticated() {
+            return Ok(None);
+        }
+        let body = json!({ "context": self.context() });
+        let data = self.post("account/account_menu", body).await?;
+        Ok(parse::parse_account_identity(&data))
+    }
+
     /// Obtém o nome da conta logada (via `account/account_menu`).
     ///
     /// Retorna `None` se anônimo ou se o nome não puder ser extraído.
@@ -333,6 +415,43 @@ impl YtMusicClient {
         let body = json!({ "context": self.context() });
         let data = self.post("account/account_menu", body).await?;
         Ok(parse::parse_account_name(&data))
+    }
+
+    /// Enumera as contas Google identificáveis contidas em um cookie jar.
+    pub async fn enumerate_cookie_accounts(path: &str) -> YtMusicResult<Vec<SignInAccount>> {
+        let mut slots = Vec::new();
+
+        for index in 0..=9 {
+            let client = Self::with_cookies_for_account(path, index)?;
+            let identity = match client.get_account_identity().await {
+                Ok(identity) => identity,
+                Err(YtMusicError::SessionExpired { .. }) => None,
+                Err(error) => return Err(error),
+            };
+            slots.push(identity);
+
+            if let Some(last_match) = account_indices_from_slots(&slots).last().copied() {
+                if slots.len() >= usize::from(last_match) + 3 {
+                    break;
+                }
+            }
+        }
+
+        let mut accounts = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for index in account_indices_from_slots(&slots) {
+            let identity = slots[usize::from(index)]
+                .as_ref()
+                .expect("account index comes from a populated slot");
+            if seen.insert((identity.name.clone(), identity.handle.clone())) {
+                accounts.push(SignInAccount {
+                    index,
+                    name: identity.name.clone(),
+                    handle: identity.handle.clone(),
+                });
+            }
+        }
+        Ok(accounts)
     }
 
     /// Busca completa: músicas, artistas, álbuns e playlists.
@@ -413,6 +532,7 @@ impl YtMusicClient {
                         title: texts.first().cloned().unwrap_or_default(),
                         subtitle: texts.get(1).cloned().unwrap_or_default(),
                         thumbnail: extract_thumbnail(r),
+                        kind: CollectionKind::Album,
                     });
                 }
             }
@@ -438,6 +558,7 @@ impl YtMusicClient {
                         title: texts.first().cloned().unwrap_or_default(),
                         subtitle: texts.get(1).cloned().unwrap_or_default(),
                         thumbnail: extract_thumbnail(r),
+                        kind: CollectionKind::Playlist,
                     });
                 }
             }
@@ -663,6 +784,18 @@ impl Default for YtMusicClient {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    #[test]
+    fn account_probe_stops_after_two_empty_slots_after_match() {
+        let slots = [Some("A"), Some("B"), None, None, Some("ignored")];
+        assert_eq!(account_indices_from_slots(&slots), vec![0, 1]);
+    }
+
+    #[test]
+    fn authenticated_client_keeps_selected_auth_user() {
+        let client = YtMusicClient::new_with_auth_user_for_test(3);
+        assert_eq!(client.auth_user(), 3);
+    }
 
     #[test]
     fn authenticated_unauthorized_response_means_expired_session() {

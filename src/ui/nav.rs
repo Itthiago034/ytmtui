@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use ratatui_image::StatefulImage;
 
-use crate::app::{App, AuthenticationState, Focus, Section};
+use crate::app::{App, AuthState, Focus, Section};
 
 /// Indexes (into `Section::ALL`) that start a new visual group; a blank
 /// separator row is drawn above each. Browse sections, then the playback
@@ -84,7 +84,7 @@ fn draw_artwork(f: &mut Frame, app: &mut App, area: Rect) {
 fn account_line(app: &App, width: usize) -> Line<'static> {
     let max = width.saturating_sub(4);
     match app.authentication {
-        AuthenticationState::Authenticated => {
+        AuthState::Authenticated => {
             let name = app
                 .account_name
                 .clone()
@@ -95,14 +95,14 @@ fn account_line(app: &App, width: usize) -> Line<'static> {
                 Span::styled(crate::ui::truncate_chars(&name, max), style),
             ])
         }
-        AuthenticationState::Expired => {
+        AuthState::Expired => {
             let style = Style::default().fg(Color::Yellow);
             Line::from(vec![
                 Span::styled(" ● ", style),
                 Span::styled("session expired".to_string(), style),
             ])
         }
-        AuthenticationState::Anonymous | AuthenticationState::InvalidCookies => {
+        AuthState::Anonymous | AuthState::InvalidCredentials => {
             let style = Style::default().fg(app.theme().muted);
             Line::from(vec![
                 Span::styled(" ○ ", style),

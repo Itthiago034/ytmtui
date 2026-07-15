@@ -54,7 +54,14 @@ rustfft = "6"
 # Column-width-aware text truncation/padding (CJK/emoji occupy 2 columns)
 unicode-width = "0.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
+async-trait = "0.1.89"
 
 [profile.release]
 opt-level = 3
 lto = true
+# Uma unidade de codegen deixa o LTO otimizar o binário inteiro de uma vez;
+# strip tira os símbolos de debug do binário distribuído. Não usar
+# `panic = "abort"`: a thread de áudio depende de catch_unwind.
+codegen-units = 1
+strip = "symbols"

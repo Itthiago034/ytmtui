@@ -1,249 +1,288 @@
-use std::path::{Path, PathBuf};
+//! Two-phase authentication coordination for [`App`].
+//!
+//! Preparation is deliberately separate from activation: the provider keeps
+//! prepared credentials private while the active account and App state stay
+//! unchanged until the user confirms one of the safe account previews.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthenticationState {
-    Anonymous,
-    Authenticated,
-    Expired,
-    InvalidCookies,
+use std::sync::Arc;
+
+use crate::provider::SignInPreview;
+
+use super::{App, AuthState, Msg};
+
+/// Current phase of the interactive authentication workflow.
+#[derive(Debug, Clone)]
+pub enum AuthenticationFlow {
+    Idle,
+    Preparing {
+        operation_id: u64,
+    },
+    AwaitingConfirmation {
+        operation_id: u64,
+        preview: SignInPreview,
+        selected: usize,
+    },
+    Activating {
+        operation_id: u64,
+        preview_id: u64,
+    },
 }
 
-impl AuthenticationState {
-    pub fn is_authenticated(self) -> bool {
-        matches!(self, Self::Authenticated)
+impl App {
+    /// Leaves only when no credential-changing task can still race with
+    /// configuration persistence during shutdown.
+    pub fn request_quit(&mut self) {
+        if matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Preparing { .. } | AuthenticationFlow::Activating { .. }
+        ) {
+            self.status = "Aguarde a conexão em andamento terminar antes de sair.".to_string();
+            return;
+        }
+        self.running = false;
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CookiePathResolution {
-    pub path: Option<String>,
-    pub missing_requested_path: Option<String>,
-}
+    /// Prepares browser credentials and account choices without changing the
+    /// currently active account, cookies, or authenticated App data.
+    pub fn prepare_sign_in(&mut self) {
+        if !self.provider.capabilities().sign_in {
+            self.status = format!(
+                "{} não tem fluxo de conexão interativo.",
+                self.provider.display_name()
+            );
+            return;
+        }
+        if !matches!(self.authentication_flow, AuthenticationFlow::Idle) {
+            self.status = "Aguarde: a conexão anterior ainda está em andamento.".to_string();
+            return;
+        }
 
-pub fn resolve_cookie_path(
-    environment: Option<String>,
-    configured: Option<String>,
-    default: Option<PathBuf>,
-) -> CookiePathResolution {
-    let missing_requested_path = environment
-        .as_ref()
-        .filter(|path| !path.is_empty() && !std::path::Path::new(path).is_file())
-        .cloned()
-        .or_else(|| {
-            configured
-                .as_ref()
-                .filter(|path| !path.is_empty() && !std::path::Path::new(path).is_file())
-                .cloned()
+        let operation_id = self.next_authentication_operation;
+        self.next_authentication_operation = self.next_authentication_operation.wrapping_add(1);
+        self.begin_task();
+        self.authentication_flow = AuthenticationFlow::Preparing { operation_id };
+        self.status = format!("Preparando conexão com {}…", self.provider.display_name());
+
+        let provider = Arc::clone(&self.provider);
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let progress_tx = tx.clone();
+            let progress = move |message: String| {
+                let _ = progress_tx.send(Msg::Status(message));
+            };
+            match provider.prepare_sign_in(&progress) {
+                Ok(preview) => {
+                    let _ = tx.send(Msg::SignInPrepared {
+                        operation_id,
+                        preview,
+                    });
+                }
+                Err(message) => {
+                    let _ = tx.send(Msg::SignInFailed {
+                        operation_id,
+                        message: format!("Falha ao preparar conexão — {message}"),
+                        preview_id: None,
+                    });
+                }
+            }
         });
-
-    let default = default.map(|path| path.to_string_lossy().into_owned());
-    let path = [environment, configured, default]
-        .into_iter()
-        .flatten()
-        .find(|path| !path.is_empty() && std::path::Path::new(path).is_file());
-
-    CookiePathResolution {
-        path,
-        missing_requested_path,
     }
-}
 
-/// Chromium-family browsers the in-app sign-in can import cookies from, in
-/// order of preference, with the configuration directory (relative to
-/// `$HOME`) that holds their profiles. The names are the exact identifiers
-/// `yt-dlp --cookies-from-browser` accepts.
-const CHROMIUM_CANDIDATES: &[(&str, &str)] = &[
-    ("brave", ".config/BraveSoftware/Brave-Browser"),
-    ("chrome", ".config/google-chrome"),
-    ("chromium", ".config/chromium"),
-    ("edge", ".config/microsoft-edge"),
-    ("vivaldi", ".config/vivaldi"),
-    ("opera", ".config/opera"),
-];
-
-/// Whether a Chromium-family configuration directory contains an actual
-/// cookie database. An installed-but-unused browser (directory present, no
-/// `Cookies` sqlite) would otherwise be tried first and fail, hiding the
-/// browser the user really signs in with.
-fn chromium_has_cookies(base: &Path) -> bool {
-    ["Default", "Profile 1", "Profile 2", "Profile 3"]
-        .iter()
-        .map(|profile| base.join(profile))
-        .any(|p| p.join("Cookies").is_file() || p.join("Network/Cookies").is_file())
-}
-
-/// Best Firefox profile directory when Firefox keeps its profiles in the
-/// XDG location (`~/.config/mozilla/firefox`) instead of `~/.mozilla` —
-/// common on distros that patch Firefox for XDG dirs (e.g. CachyOS), where
-/// yt-dlp's default lookup misses it. Prefers the `default-release` profile
-/// and requires an actual `cookies.sqlite`, which also keeps
-/// profile-sync-daemon `-backup` copies from shadowing the live profile.
-fn firefox_xdg_profile(home: &Path) -> Option<PathBuf> {
-    let base = home.join(".config/mozilla/firefox");
-    let mut profiles: Vec<PathBuf> = std::fs::read_dir(base)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|p| p.join("cookies.sqlite").is_file())
-        .collect();
-    profiles.sort_by_key(|p| !p.to_string_lossy().ends_with("default-release"));
-    profiles.into_iter().next()
-}
-
-/// Detects browsers with a usable cookie store under `home`, as
-/// `--cookies-from-browser` argument values (possibly carrying an explicit
-/// `firefox:<profile-path>` for XDG Firefox setups).
-pub fn detect_browsers(home: &Path) -> Vec<String> {
-    let mut out: Vec<String> = CHROMIUM_CANDIDATES
-        .iter()
-        .filter(|(_, dir)| chromium_has_cookies(&home.join(dir)))
-        .map(|(name, _)| name.to_string())
-        .collect();
-    if home.join(".mozilla/firefox").is_dir() {
-        out.push("firefox".to_string());
-    } else if let Some(profile) = firefox_xdg_profile(home) {
-        out.push(format!("firefox:{}", profile.display()));
-    }
-    out
-}
-
-/// Exports YouTube Music cookies from `browser` into `dest` (Netscape
-/// format) using `yt-dlp --cookies-from-browser` — the same recipe as
-/// `scripts/refresh-cookies.sh`, but callable from inside the app. Writes to
-/// a temp file first and only replaces `dest` after confirming the export
-/// contains a `SAPISID` cookie (what the API authentication derives from).
-pub fn export_browser_cookies(browser: &str, dest: &Path) -> Result<(), String> {
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {dir:?}: {e}"))?;
-    }
-    let tmp = dest.with_extension(format!("import-{}.tmp", std::process::id()));
-    let result = (|| {
-        let output = std::process::Command::new("yt-dlp")
-            .arg("--cookies-from-browser")
-            .arg(browser)
-            .arg("--cookies")
-            .arg(&tmp)
-            .args(["--skip-download", "--no-warnings", "-O", "%(title)s"])
-            // Any watchable URL works; visiting one is what makes yt-dlp
-            // load the browser jar and save it to --cookies on exit.
-            .arg("https://www.youtube.com/watch?v=jNQXAC9IVRw")
-            .output()
-            .map_err(|e| format!("could not run yt-dlp: {e}"))?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err(err.lines().last().unwrap_or("yt-dlp failed").to_string());
+    /// Returns the safe preview and selected list position while confirmation
+    /// is pending. Provider-owned credential paths never enter this state.
+    pub fn sign_in_preview(&self) -> Option<(&SignInPreview, usize)> {
+        match &self.authentication_flow {
+            AuthenticationFlow::AwaitingConfirmation {
+                preview, selected, ..
+            } => Some((preview, *selected)),
+            _ => None,
         }
-        let cookies = std::fs::read_to_string(&tmp)
-            .map_err(|e| format!("yt-dlp produced no cookie file: {e}"))?;
-        if !cookies.contains("SAPISID") {
-            return Err(format!(
-                "no YouTube session in {browser} — sign in to music.youtube.com there first"
-            ));
+    }
+
+    /// Moves the preview selection down, wrapping at the end of the list.
+    pub fn select_next_sign_in_account(&mut self) {
+        let AuthenticationFlow::AwaitingConfirmation {
+            preview, selected, ..
+        } = &mut self.authentication_flow
+        else {
+            return;
+        };
+        if !preview.accounts.is_empty() {
+            *selected = (*selected + 1) % preview.accounts.len();
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+
+    /// Moves the preview selection up, wrapping at the start of the list.
+    pub fn select_previous_sign_in_account(&mut self) {
+        let AuthenticationFlow::AwaitingConfirmation {
+            preview, selected, ..
+        } = &mut self.authentication_flow
+        else {
+            return;
+        };
+        if !preview.accounts.is_empty() {
+            *selected = selected
+                .checked_sub(1)
+                .unwrap_or(preview.accounts.len() - 1);
         }
-        std::fs::rename(&tmp, dest).map_err(|e| format!("could not save cookies: {e}"))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_authenticated_state_is_authenticated() {
-        assert!(AuthenticationState::Authenticated.is_authenticated());
-        assert!(!AuthenticationState::Anonymous.is_authenticated());
-        assert!(!AuthenticationState::Expired.is_authenticated());
-        assert!(!AuthenticationState::InvalidCookies.is_authenticated());
     }
 
-    #[test]
-    fn detect_browsers_requires_a_real_cookie_store() {
-        let home = tempfile::tempdir().expect("temporary home");
-        assert!(detect_browsers(home.path()).is_empty());
+    /// Activates the selected account. This is the only asynchronous phase
+    /// that may commit provider credentials and later update App account data.
+    pub fn confirm_sign_in(&mut self) {
+        let selection = match &self.authentication_flow {
+            AuthenticationFlow::AwaitingConfirmation {
+                operation_id,
+                preview,
+                selected,
+            } => preview
+                .accounts
+                .get(*selected)
+                .map(|account| (*operation_id, preview.id, account.index)),
+            _ => return,
+        };
+        let Some((operation_id, preview_id, account_index)) = selection else {
+            self.status = "Nenhuma conta disponível para conectar.".to_string();
+            return;
+        };
 
-        // An installed-but-never-used Brave (no Cookies db) is skipped.
-        std::fs::create_dir_all(
-            home.path()
-                .join(".config/BraveSoftware/Brave-Browser/Default"),
-        )
-        .unwrap();
-        std::fs::create_dir_all(home.path().join(".mozilla/firefox")).unwrap();
-        assert_eq!(detect_browsers(home.path()), vec!["firefox"]);
+        self.begin_task();
+        // Retire every in-flight account-scoped response from the active
+        // generation before the provider may swap cookies. This closes the
+        // interval between the provider commit and `Msg::SignedIn` reaching
+        // the UI loop.
+        self.session_generation = self.session_generation.wrapping_add(1);
+        self.authentication_flow = AuthenticationFlow::Activating {
+            operation_id,
+            preview_id,
+        };
+        self.status = format!("Conectando ao {}…", self.provider.display_name());
 
-        // Once the cookie db exists, Brave is preferred.
-        std::fs::write(
-            home.path()
-                .join(".config/BraveSoftware/Brave-Browser/Default/Cookies"),
-            "",
-        )
-        .unwrap();
-        assert_eq!(detect_browsers(home.path()), vec!["brave", "firefox"]);
+        let provider = Arc::clone(&self.provider);
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            match provider.activate_sign_in(preview_id, account_index) {
+                Ok(summary) => {
+                    let _ = tx.send(Msg::SignedIn {
+                        operation_id,
+                        preview_id,
+                        method: summary.method,
+                        credentials_path: summary.credentials_path,
+                        account_name: summary.account_name,
+                    });
+                }
+                Err(message) => {
+                    let _ = tx.send(Msg::SignInFailed {
+                        operation_id,
+                        message: format!("Falha ao conectar — {message}"),
+                        preview_id: Some(preview_id),
+                    });
+                }
+            }
+        });
     }
 
-    #[test]
-    fn detect_browsers_finds_xdg_firefox_profiles_with_explicit_path() {
-        let home = tempfile::tempdir().expect("temporary home");
-        let base = home.path().join(".config/mozilla/firefox");
-        // A psd `-backup` copy and the live profile: the live one wins.
-        for profile in ["abc.default-release-backup", "abc.default-release"] {
-            let dir = base.join(profile);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("cookies.sqlite"), "").unwrap();
+    /// Discards a prepared sign-in while preserving all active account state.
+    pub fn cancel_sign_in(&mut self) {
+        let previous = std::mem::replace(&mut self.authentication_flow, AuthenticationFlow::Idle);
+        if let AuthenticationFlow::AwaitingConfirmation { preview, .. } = previous {
+            self.provider.cancel_sign_in(preview.id);
+            self.status = "Conexão cancelada; a conta atual foi preservada.".to_string();
+        } else {
+            self.authentication_flow = previous;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_sign_in_preview_for_test(&mut self, preview: SignInPreview) {
+        self.authentication_flow = AuthenticationFlow::AwaitingConfirmation {
+            operation_id: 0,
+            preview,
+            selected: 0,
+        };
+    }
+
+    pub(super) fn handle_sign_in_prepared(
+        &mut self,
+        operation_id: u64,
+        mut preview: SignInPreview,
+    ) {
+        if !matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Preparing { operation_id: expected } if expected == operation_id
+        ) {
+            self.provider.cancel_sign_in(preview.id);
+            return;
+        }
+        self.finish_task();
+
+        preview.current_account_name.clone_from(&self.account_name);
+        self.status = "Escolha uma conta para concluir a conexão.".to_string();
+        self.authentication_flow = AuthenticationFlow::AwaitingConfirmation {
+            operation_id,
+            preview,
+            selected: 0,
+        };
+    }
+
+    pub(super) fn handle_signed_in(
+        &mut self,
+        operation_id: u64,
+        preview_id: u64,
+        method: String,
+        credentials_path: Option<String>,
+        account_name: String,
+    ) {
+        if !matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Activating {
+                operation_id: expected_operation,
+                preview_id: expected_preview,
+            } if expected_operation == operation_id && expected_preview == preview_id
+        ) {
+            return;
+        }
+        self.finish_task();
+        self.authentication_flow = AuthenticationFlow::Idle;
+        self.authentication = AuthState::Authenticated;
+        if credentials_path.is_some() {
+            self.cookies = credentials_path;
+        }
+        self.account_name = Some(account_name);
+        self.status = format!("✔ Conectado via {method}. Carregando suas músicas…");
+
+        // Account-only data is reloaded only after activation has committed.
+        self.load_account();
+        self.load_home();
+        self.load_library();
+    }
+
+    pub(super) fn handle_sign_in_failed(
+        &mut self,
+        operation_id: u64,
+        message: String,
+        preview_id: Option<u64>,
+    ) {
+        let matches_preparing = matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Preparing { operation_id: expected } if expected == operation_id
+        ) && preview_id.is_none();
+        let matches_activating = matches!(
+            self.authentication_flow,
+            AuthenticationFlow::Activating {
+                operation_id: expected_operation,
+                preview_id: expected_preview,
+            } if expected_operation == operation_id && preview_id == Some(expected_preview)
+        );
+        if !matches_preparing && !matches_activating {
+            return;
         }
 
-        let detected = detect_browsers(home.path());
-        assert_eq!(detected.len(), 1);
-        assert!(
-            detected[0].starts_with("firefox:") && detected[0].ends_with("abc.default-release"),
-            "explicit profile path: {detected:?}"
-        );
-    }
-
-    #[test]
-    fn environment_path_wins_when_it_exists() {
-        let dir = tempfile::tempdir().expect("temporary directory");
-        let env = dir.path().join("env.txt");
-        let configured = dir.path().join("configured.txt");
-        std::fs::write(&env, "env").expect("environment fixture");
-        std::fs::write(&configured, "configured").expect("configured fixture");
-
-        let resolution = resolve_cookie_path(
-            Some(env.to_string_lossy().into_owned()),
-            Some(configured.to_string_lossy().into_owned()),
-            None,
-        );
-
-        assert_eq!(resolution.path.as_deref(), env.to_str());
-        assert_eq!(resolution.missing_requested_path, None);
-    }
-
-    #[test]
-    fn missing_environment_path_falls_back_and_is_reported() {
-        let dir = tempfile::tempdir().expect("temporary directory");
-        let missing = dir.path().join("missing.txt");
-        let fallback = dir.path().join("cookies.txt");
-        std::fs::write(&fallback, "fallback").expect("fallback fixture");
-
-        let resolution = resolve_cookie_path(
-            Some(missing.to_string_lossy().into_owned()),
-            None,
-            Some(fallback.clone()),
-        );
-
-        assert_eq!(resolution.path.as_deref(), fallback.to_str());
-        assert_eq!(
-            resolution.missing_requested_path.as_deref(),
-            missing.to_str()
-        );
+        self.finish_task();
+        if let Some(preview_id) = preview_id {
+            self.provider.cancel_sign_in(preview_id);
+        }
+        self.authentication_flow = AuthenticationFlow::Idle;
+        self.status = format!("⚠ {message}");
     }
 }

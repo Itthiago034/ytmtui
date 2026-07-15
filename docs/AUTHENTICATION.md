@@ -24,13 +24,42 @@ data, personalized recommendations, and like/unlike actions.
    browser.
 2. Open ytmtui.
 3. Press `g`.
-4. Choose or let ytmtui detect a browser session.
-5. ytmtui imports cookies through `yt-dlp --cookies-from-browser`, saves them
-   to `~/.config/ytmtui/cookies.txt`, and reconnects without requiring a full
-   app restart.
+4. ytmtui tries Firefox first. It tries Brave, Chrome, Chromium, Edge, Vivaldi,
+   or Opera in that order only if exporting or validating the earlier
+   candidate fails.
+5. Review the detected browser/profile and YouTube account list. The selected
+   profile is passed directly to `yt-dlp`, so Firefox or Brave can use the
+   same profile where you signed in. Move with
+   `Up`/`Down` or `k`/`j`, then press `Enter` to confirm the selected account.
+6. ytmtui installs the prepared cookies at
+   `~/.config/ytmtui/cookies.txt` and reconnects without requiring a full app
+   restart.
+
+Preparation and confirmation are separate. The account preview appears before
+the live cookie file or active client is replaced. Pressing `Esc` in the
+preview cancels the prepared sign-in and preserves the current cookies,
+account, library, and session.
+
+Before replacing the active cookies, ytmtui rechecks the selected account. If
+the browser session expired or switched accounts in the meantime, the active
+session remains unchanged.
+
+After confirmation, ytmtui saves the successful browser/profile and selected
+YouTube account index in `~/.config/ytmtui/config.json`. On restart, a non-zero
+account index is reused. The saved browser/profile preference persists without
+moving that browser ahead of Firefox in discovery order.
 
 If the browser has no valid YouTube Music session, sign in there first and
 press `g` again.
+
+## Diagnose Without Changing Cookies
+
+Run `ytmtui doctor` outside the TUI to check runtime tools, supported browsers,
+cookie-file permissions and validity, connectivity, and the configured YouTube
+account. The command never refreshes or replaces cookies. Exit code `0` means
+no required check failed, even if optional warnings remain; `1` means at least
+one required check failed. Sensitive details are redacted, but review the
+output before sharing it.
 
 ## Script-Based Refresh
 
@@ -76,6 +105,6 @@ On a personal residential connection, this is usually not needed.
 
 - ytmtui never asks for or stores your password.
 - Cookie files are local to your machine.
-- The default cookie file is written with restrictive permissions.
+- Prepared and installed cookie files use mode `0600` on Unix.
 - Treat cookies like account credentials: do not commit them, paste them into
   issues, or share them.

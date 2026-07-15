@@ -3,13 +3,17 @@
 //! Ponto de entrada: configura o terminal, cria o estado da aplicação e roda
 //! o laço principal de eventos/renderização.
 
-use ytmtui::{app, event, player, ui};
+use ytmtui::config::ArtworkMode;
+use ytmtui::{app, event, mpris, player, ui};
 
+use std::ffi::OsStr;
 use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self as cevent, Event, KeyEventKind};
+use crossterm::event::{
+    self as cevent, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -21,6 +25,14 @@ use app::App;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut args = std::env::args_os();
+    let _program = args.next();
+    if matches!(args.next().as_deref(), Some(value) if value == OsStr::new("doctor")) {
+        let report = ytmtui::doctor::run().await;
+        print!("{}", report.render());
+        std::process::exit(report.exit_code());
+    }
+
     // Garante restauração do terminal mesmo em caso de panic. Panics na thread
     // de áudio são capturados lá (catch_unwind), então aqui os ignoramos para
     // não sair da tela alternativa nem imprimir lixo por cima da TUI.
@@ -37,8 +49,9 @@ async fn main() -> Result<()> {
     let mut app = App::new()?;
 
     // Album-art support: real image protocols on terminals known to answer
-    // the capability query, Unicode half-blocks everywhere else.
-    app.picker = Some(build_picker());
+    // the capability query, Unicode half-blocks everywhere else — or no
+    // picker at all when `artwork_mode` is "off".
+    app.picker = build_picker(app.artwork_mode);
 
     // Avisa (uma vez) se faltar alguma ferramenta essencial de reprodução.
     let missing = player::missing_dependencies();
@@ -59,12 +72,16 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Registra o player no MPRIS (widget de mídia do desktop, playerctl,
+    // teclas multimídia). `None` em ambientes sem D-Bus — segue sem ele.
+    let mut mpris = mpris::Mpris::new(app.tx.clone());
+
     // Carrega recomendações, biblioteca e nome da conta (se logado).
     app.load_home();
     app.load_library();
     app.load_account();
 
-    let res = run(&mut terminal, &mut app).await;
+    let res = run(&mut terminal, &mut app, mpris.as_mut()).await;
 
     // Persiste preferências e remove os arquivos temporários de áudio.
     app.save_config();
@@ -79,7 +96,11 @@ async fn main() -> Result<()> {
 }
 
 /// Laço principal: desenha, lê eventos e processa mensagens.
-async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+async fn run(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    mut mpris: Option<&mut mpris::Mpris>,
+) -> Result<()> {
     while app.running {
         if app.take_clear_screen() {
             terminal.clear()?;
@@ -93,12 +114,16 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
         // raises CPU use while Home is open with a track actively playing;
         // every other section/state keeps the coarser tiers. Key presses
         // interrupt the poll immediately either way.
+        // The idle tier also caps how long an MPRIS command (media keys,
+        // desktop widget) can sit unprocessed in the channel — a key press
+        // interrupts the poll, a channel message does not — so it stays at
+        // 400ms rather than something longer.
         let poll_timeout = if app.needs_fast_animation() {
             Duration::from_millis(60)
         } else if app.needs_animation() {
             Duration::from_millis(200)
         } else {
-            Duration::from_millis(800)
+            Duration::from_millis(400)
         };
         if cevent::poll(poll_timeout)? {
             match cevent::read()? {
@@ -112,6 +137,13 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
                 // as imagens ao redimensionar; retransmite a capa e força um
                 // clear para não sobrar lixo gráfico da janela antiga.
                 Event::Resize(_, _) => app.rebuild_artwork(),
+                // Roda do mouse: três itens por "clique" da roda, como na
+                // maioria das interfaces.
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollDown => event::handle_scroll(app, 3),
+                    MouseEventKind::ScrollUp => event::handle_scroll(app, -3),
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -119,6 +151,11 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
         // Processa resultados das tasks assíncronas e tarefas periódicas.
         app.drain_messages();
         app.tick();
+
+        // Espelha o estado de reprodução no D-Bus (apenas diffs).
+        if let Some(m) = mpris.as_deref_mut() {
+            m.sync(app);
+        }
     }
     Ok(())
 }
@@ -127,7 +164,9 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // Captura de mouse para rolagem nas listas; a seleção de texto do
+    // emulador continua disponível com Shift+arrastar.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -136,7 +175,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 /// Restaura o terminal ao estado normal.
 fn restore_terminal() -> Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }
 
@@ -164,29 +203,49 @@ fn env_reports_image_support(
         || program.contains("ghostty")
 }
 
-/// Builds the album-art picker. Capable terminals are queried for their
-/// real protocol (Kitty graphics, Sixel, iTerm2) and font size; everywhere
-/// else half-blocks are used with the cell size reported by the windowing
-/// system, or a conservative guess when unavailable.
-fn build_picker() -> ratatui_image::picker::Picker {
+/// Whether `mode` wants a picker built at all. `Off` means no cover art is
+/// ever downloaded or drawn, so `build_picker` short-circuits before
+/// touching the terminal.
+fn wants_picker(mode: ArtworkMode) -> bool {
+    mode != ArtworkMode::Off
+}
+
+/// Whether `build_picker` should query the terminal for its real image
+/// protocol. Only `Auto` does — and only when the environment identifies a
+/// terminal known to answer the query; `HalfBlocks` always skips it (even
+/// on a capable terminal) to force the Unicode fallback.
+fn should_query_protocol(mode: ArtworkMode, env_supported: bool) -> bool {
+    mode == ArtworkMode::Auto && env_supported
+}
+
+/// Builds the album-art picker according to `mode`: `Auto` queries capable
+/// terminals for their real protocol (Kitty graphics, Sixel, iTerm2) and
+/// falls back to half-blocks otherwise; `HalfBlocks` always uses half-blocks
+/// (skipping the query entirely); `Off` returns `None`, so no picker is
+/// created and no cover art is ever drawn.
+fn build_picker(mode: ArtworkMode) -> Option<ratatui_image::picker::Picker> {
     use ratatui_image::picker::Picker;
 
-    let supported = env_reports_image_support(
+    if !wants_picker(mode) {
+        return None;
+    }
+
+    let env_supported = env_reports_image_support(
         std::env::var("TERM").ok().as_deref(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),
         std::env::var_os("KITTY_WINDOW_ID").is_some(),
         std::env::var_os("KONSOLE_VERSION").is_some(),
     );
-    if supported {
+    if should_query_protocol(mode, env_supported) {
         if let Ok(picker) = Picker::from_query_stdio() {
-            return picker;
+            return Some(picker);
         }
     }
     let font_size = crossterm::terminal::window_size()
         .ok()
         .and_then(|s| cell_size_from(s.columns, s.rows, s.width, s.height))
         .unwrap_or((8, 16));
-    Picker::from_fontsize(font_size)
+    Some(Picker::from_fontsize(font_size))
 }
 
 /// Cell size in pixels derived from the reported window size; `None` when
@@ -243,5 +302,24 @@ mod tests {
             false
         ));
         assert!(!env_reports_image_support(None, None, false, false));
+    }
+
+    #[test]
+    fn artwork_mode_off_never_wants_a_picker() {
+        assert!(!wants_picker(ArtworkMode::Off));
+        assert!(wants_picker(ArtworkMode::Auto));
+        assert!(wants_picker(ArtworkMode::HalfBlocks));
+    }
+
+    #[test]
+    fn only_auto_mode_queries_the_real_protocol() {
+        // Auto follows the terminal's reported support either way.
+        assert!(should_query_protocol(ArtworkMode::Auto, true));
+        assert!(!should_query_protocol(ArtworkMode::Auto, false));
+        // HalfBlocks always skips the query, even on a capable terminal.
+        assert!(!should_query_protocol(ArtworkMode::HalfBlocks, true));
+        assert!(!should_query_protocol(ArtworkMode::HalfBlocks, false));
+        // Off is moot (build_picker never gets this far), but stays false.
+        assert!(!should_query_protocol(ArtworkMode::Off, true));
     }
 }

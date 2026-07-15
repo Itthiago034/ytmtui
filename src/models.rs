@@ -1,17 +1,23 @@
-//! Modelos de dados usados pelo cliente do YouTube Music.
+//! Modelos compartilhados entre a UI e os provedores de música.
+//!
+//! Todo provedor converte suas respostas para estes tipos antes de qualquer
+//! coisa chegar à interface (ver `crate::provider::MusicProvider`), então a
+//! UI não conhece formatos específicos de nenhum serviço.
 //!
 //! Alguns campos (ex.: thumbnails de playlist/artista) ainda não são exibidos
 //! na interface atual, mas fazem parte do modelo para uso futuro.
 #![allow(dead_code)]
 
-/// Representa uma faixa (música) do YouTube Music.
+/// Representa uma faixa (música).
 ///
 /// Serializável para persistir o histórico local de reprodução
 /// (`recent.json`) entre sessões.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Track {
-    /// Identificador do vídeo no YouTube (usado para streaming).
+    /// Identificador da faixa no provedor de origem. O nome do campo é
+    /// histórico (YouTube) e persiste no `recent.json` — renomear exigiria
+    /// um alias de serde; fica para quando houver um segundo provedor.
     pub video_id: String,
     /// Título da música.
     pub title: String,
@@ -27,11 +33,12 @@ pub struct Track {
     pub thumbnail: Option<String>,
 }
 
-impl Track {
-    /// Retorna a URL de reprodução no YouTube Music para esta faixa.
-    pub fn watch_url(&self) -> String {
-        format!("https://music.youtube.com/watch?v={}", self.video_id)
-    }
+/// Classificação neutra do provedor para uma coleção navegável.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CollectionKind {
+    Album,
+    #[default]
+    Playlist,
 }
 
 /// Representa uma playlist ou álbum.
@@ -42,6 +49,7 @@ pub struct Playlist {
     pub title: String,
     pub subtitle: String,
     pub thumbnail: Option<String>,
+    pub kind: CollectionKind,
 }
 
 /// Um artista retornado na busca.
@@ -71,9 +79,8 @@ pub struct LyricLine {
     pub end_ms: u64,
 }
 
-/// Result of a lyrics fetch: real per-line timestamps when the API exposes
-/// them for the track (see `YtMusicClient::get_lyrics`), or the plain
-/// Musixmatch-sourced text otherwise.
+/// Result of a lyrics fetch: real per-line timestamps when the provider
+/// exposes them for the track, or plain unsynced text otherwise.
 #[derive(Debug, Clone)]
 pub enum Lyrics {
     Synced(Vec<LyricLine>),
@@ -81,7 +88,7 @@ pub enum Lyrics {
 }
 
 /// A named shelf on the Home screen (e.g. "Quick picks", "Mixed for you"),
-/// as YouTube Music itself groups recommendations.
+/// as the provider itself groups recommendations.
 #[derive(Debug, Clone, Default)]
 pub struct HomeSection {
     pub title: String,

@@ -1,21 +1,28 @@
 //! Estado central da aplicação e lógica de coordenação.
+//!
+//! O app fala com o serviço de música exclusivamente pelo contrato
+//! [`MusicProvider`]; o provedor concreto (YouTube Music) só aparece na
+//! raiz de composição ([`App::new`]).
 
 mod authentication;
 
-pub use authentication::AuthenticationState;
-use authentication::{detect_browsers, export_browser_cookies, resolve_cookie_path};
+pub use crate::provider::AuthState;
+pub use authentication::AuthenticationFlow;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ratatui::widgets::ListState;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::config::Config;
-use crate::player::{self, AudioPlayer};
+use crate::config::{AnimationSpeed, ArtworkMode, Config, HomeDensity, VisualizerStyle};
+use crate::home::{HomeCardPayload, HomeDirection, HomeView};
+use crate::models::{Artist, Playlist, SearchResults, Track};
+use crate::player::AudioPlayer;
+use crate::provider::{MusicProvider, ProviderError, SignInPreview};
 use crate::visualizer::SpectrumAnalyzer;
-use crate::ytmusic::{Artist, Playlist, SearchResults, Track, YtMusicClient, YtMusicError};
 
 /// Seções da barra lateral (também define o conteúdo do painel principal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,9 +142,30 @@ impl RepeatMode {
 pub enum Msg {
     SearchResults(SearchResults),
     LibraryPlaylists(Vec<Playlist>),
-    HomeSections(Vec<crate::ytmusic::HomeSection>),
+    LibraryPlaylistsForSession {
+        session_generation: u64,
+        playlists: Vec<Playlist>,
+    },
+    HomeSections(Vec<crate::models::HomeSection>),
+    HomeSectionsForSession {
+        session_generation: u64,
+        sections: Vec<crate::models::HomeSection>,
+    },
+    /// `load_home` failed with something other than `SessionExpired`. Kept
+    /// distinct from the generic `Error` so its handler can leave `self.home`
+    /// untouched — cached shelves stay on screen instead of the whole Home
+    /// screen flipping to an error message.
+    HomeFailed(String),
+    HomeFailedForSession {
+        session_generation: u64,
+        message: String,
+    },
     RadioTracks(Vec<Track>),
     AccountName(Option<String>),
+    AccountNameForSession {
+        session_generation: u64,
+        name: Option<String>,
+    },
     PlaylistTracks {
         title: String,
         tracks: Vec<Track>,
@@ -147,7 +175,7 @@ pub enum Msg {
     /// apart from the currently playing one and discarded.
     Lyrics {
         video_id: String,
-        lyrics: Option<crate::ytmusic::Lyrics>,
+        lyrics: Option<crate::models::Lyrics>,
     },
     /// Same rationale as `Lyrics`: the cover art is tagged with the track it
     /// belongs to.
@@ -166,12 +194,29 @@ pub enum Msg {
     Error(String),
     /// Cookies are present, but the API session is no longer valid.
     SessionExpired,
-    /// In-app sign-in finished: browser cookies were exported to `path`.
-    /// `browser` is the `--cookies-from-browser` value that worked (e.g.
-    /// "brave" or "firefox:/path/to/profile").
-    CookiesImported {
-        path: String,
-        browser: String,
+    SessionExpiredForSession {
+        session_generation: u64,
+    },
+    /// Safe account choices prepared without changing the active session.
+    SignInPrepared {
+        operation_id: u64,
+        preview: SignInPreview,
+    },
+    /// Confirmed activation finished successfully; only handling this
+    /// message may publish account state and reload account-only data.
+    SignedIn {
+        operation_id: u64,
+        preview_id: u64,
+        method: String,
+        credentials_path: Option<String>,
+        account_name: String,
+    },
+    /// A preparation or activation failed. When activation had a preview,
+    /// its id is retained so the provider can discard pending credentials.
+    SignInFailed {
+        operation_id: u64,
+        message: String,
+        preview_id: Option<u64>,
     },
     /// Radio built around `seed` (a track played from the search results):
     /// similar tracks to append to the queue *behind* what's playing —
@@ -180,6 +225,10 @@ pub enum Msg {
         seed: String,
         tracks: Vec<Track>,
     },
+    /// Comando vindo do desktop via MPRIS (widget de mídia, playerctl,
+    /// teclas multimídia). Reenviado pelo callback da `souvlaki` para que a
+    /// mutação de estado aconteça no loop principal.
+    Media(souvlaki::MediaControlEvent),
 }
 
 /// Máximo de faixas mantidas no histórico local da tela Início.
@@ -212,9 +261,9 @@ pub enum SearchHit {
     Playlist(Playlist),
 }
 
-fn client_error_message(context: &str, error: YtMusicError) -> Msg {
+fn client_error_message(context: &str, error: ProviderError) -> Msg {
     match error {
-        YtMusicError::SessionExpired { .. } => Msg::SessionExpired,
+        ProviderError::SessionExpired => Msg::SessionExpired,
         other => Msg::Error(format!("{context}: {other}")),
     }
 }
@@ -222,7 +271,9 @@ fn client_error_message(context: &str, error: YtMusicError) -> Msg {
 /// Estado completo da aplicação.
 pub struct App {
     pub running: bool,
-    pub client: YtMusicClient,
+    /// Serviço de música por trás da UI. `Arc<dyn>`: as tasks assíncronas
+    /// clonam o handle e falam apenas com o contrato.
+    pub provider: Arc<dyn MusicProvider>,
     pub player: AudioPlayer,
     /// Real-time FFT spectrum feeding the Home screen's visualizer bars.
     pub visualizer: SpectrumAnalyzer,
@@ -255,10 +306,19 @@ pub struct App {
     pub library: Vec<Playlist>,
     /// Recomendações da tela inicial, agrupadas nas mesmas seções nomeadas
     /// que o YouTube Music usa ("Quick picks", "Mixed for you", ...).
-    pub home: Vec<crate::ytmusic::HomeSection>,
+    pub home: Vec<crate::models::HomeSection>,
     /// Últimas faixas reproduzidas (histórico local em `recent.json`),
     /// exibidas como o primeiro grupo da tela Início e tocáveis com Enter.
     pub recent: Vec<Track>,
+    /// Persistir o histórico em disco? `true` só em [`App::new`];
+    /// [`App::with_provider`] mantém tudo em memória.
+    persist_recent: bool,
+    /// Set when the last `load_home` failed with something other than an
+    /// expired session; cleared on the next successful load or the next
+    /// loading attempt. Cached `home`/`recent` shelves are never cleared by
+    /// a failed refresh, so this only drives the small retry banner/empty
+    /// state — it never hides content that's still valid.
+    pub home_error: Option<String>,
     /// videoIds curtidos nesta sessão (para alternar curtir/descurtir).
     pub liked: std::collections::HashSet<String>,
     /// Autoplay: continuar com uma rádio quando a fila termina.
@@ -267,13 +327,24 @@ pub struct App {
     /// música dos resultados da busca; consumida por `play_selected` para
     /// buscar as semelhantes após iniciar a reprodução.
     pending_radio_seed: Option<String>,
-    /// Current cookie authentication state.
-    pub authentication: AuthenticationState,
+    /// Estado de autenticação atual (espelho do provedor para a UI).
+    pub authentication: AuthState,
+    /// Two-phase browser/account authentication workflow.
+    pub authentication_flow: AuthenticationFlow,
+    /// Monotonic token binding asynchronous authentication messages to the
+    /// operation that started them.
+    next_authentication_operation: u64,
+    /// Increments only after a sign-in activation commits. Account-scoped
+    /// network replies carry this token so an old account cannot overwrite
+    /// the new one after the client is swapped.
+    session_generation: u64,
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
     pub account_name: Option<String>,
     /// Índice do tema de cores ativo (ver `crate::theme`).
     pub theme_index: usize,
     pub list_state: ListState,
+    /// Number of Home card columns available in the current layout.
+    pub home_columns: usize,
 
     // Reprodução.
     pub queue: Vec<Track>,
@@ -287,10 +358,18 @@ pub struct App {
     pub repeat: RepeatMode,
     /// Estado do gerador pseudoaleatório (xorshift) para o shuffle.
     rng_state: u64,
+    /// videoIds já tocados no ciclo atual do shuffle: cada faixa toca uma
+    /// vez antes de qualquer repetição. Com repeat off, o esgotamento do
+    /// ciclo encerra a fila (e o autoplay pode assumir), em vez do sorteio
+    /// infinito. Zerado ao trocar a fila ou alternar o shuffle.
+    shuffle_played: std::collections::HashSet<String>,
 
     // Extras.
     pub lyrics: crate::lyrics::LyricsState,
     pub lyrics_scroll: u16,
+    /// Rolagem manual da tela de Ajuda (a lista de atalhos é maior que
+    /// terminais baixos). Clampada na renderização ao tamanho real do texto.
+    pub help_scroll: u16,
     /// Terminal image support detected at startup (Kitty/Sixel/iTerm2, with
     /// a Unicode half-block fallback). `None` until the main loop sets it.
     pub picker: Option<Picker>,
@@ -313,14 +392,54 @@ pub struct App {
     pub cookies: Option<String>,
     /// Um download de áudio está em andamento.
     pub loading_audio: bool,
-    /// Uma tarefa de carregamento (busca/playlist/artista/biblioteca) está ativa.
-    pub busy: bool,
+    /// Quantas tarefas de carregamento (busca/playlist/artista/biblioteca/
+    /// sign-in) estão em voo. Um contador, e não um bool: o sync periódico
+    /// dispara Home e Biblioteca juntas, e a primeira resposta não pode
+    /// apagar o spinner enquanto a outra ainda carrega.
+    busy_tasks: usize,
     /// Quadro atual do spinner de carregamento (avança a cada tick).
     pub spinner_frame: usize,
     /// How often background sync (Home + Library) re-fetches.
     pub sync_interval: std::time::Duration,
     /// When the last background sync fired.
     pub last_synced: std::time::Instant,
+
+    // Aparência / animações (Etapa 5). Todos os cinco vêm da config e ainda
+    // não são editáveis em runtime — `save_config` sempre relê e preserva o
+    // que já está em disco, no mesmo padrão de `sync_interval_secs`.
+    /// Modo de exibição da capa do álbum (consumido por `main.rs::build_picker`).
+    pub artwork_mode: ArtworkMode,
+    /// Densidade dos cards da grade da tela Início (consumido por `ui::main_panel`).
+    pub home_density: HomeDensity,
+    /// Estilo do visualizador de espectro do player. Chamado `visualizer_style`
+    /// (e não `visualizer`) para não colidir com o analisador FFT acima.
+    pub visualizer_style: VisualizerStyle,
+    /// Velocidade das animações: escala a janela de [`Self::kick_animation`]
+    /// e os estágios de revelação/fade-in lidos por `ui::main_panel` e
+    /// `ui::now_playing`.
+    pub animation_speed: AnimationSpeed,
+    /// Reduz/desativa animações não essenciais: [`Self::kick_animation`]
+    /// vira no-op, o marquee de títulos longos volta a truncar com '…', o
+    /// wipe do karaokê mostra a linha ativa já inteira "cantada", e a
+    /// revelação em estágios do card selecionado/metadados do now-playing
+    /// pula direto para o estado final.
+    pub reduced_motion: bool,
+    /// Instante até quando uma animação de transição (seleção da Home,
+    /// troca de faixa) ainda está em curso; `None` quando nenhuma está
+    /// ativa. Enquanto `animating()` é verdadeiro, [`Self::needs_fast_animation`]
+    /// segura o tier de redraw de 60ms só pela duração da transição, em vez
+    /// de indefinidamente — ver [`Self::kick_animation`].
+    animate_until: Option<std::time::Instant>,
+    /// Instante da última mudança de seleção na grade Início; consumido por
+    /// `ui::main_panel::draw_card` para a revelação em estágios do card
+    /// selecionado (fundo → título accent → badge). `None` antes de
+    /// qualquer navegação, o que já corresponde ao estado final completo.
+    pub(crate) selection_changed_at: Option<std::time::Instant>,
+    /// Instante em que a faixa atual mudou pela última vez (setado em
+    /// [`Self::start_current`]); consumido por `ui::now_playing` para o
+    /// fade-in de duas etapas do título. Nunca `None`: antes da primeira
+    /// faixa o valor é irrelevante, pois `current` ainda é `None`.
+    pub(crate) track_changed_at: std::time::Instant,
 }
 
 impl App {
@@ -332,24 +451,18 @@ impl App {
         // Carrega preferências persistidas.
         let config = Config::load();
 
-        let default_cookies = dirs::config_dir().map(|dir| dir.join("ytmtui/cookies.txt"));
-        let resolution = resolve_cookie_path(
-            std::env::var("YTM_COOKIES").ok(),
-            config.cookies.clone(),
-            default_cookies,
-        );
-        let cookies = resolution.path;
-
         let mut player = AudioPlayer::new()?;
         player.set_volume(config.volume);
 
-        let (client, authentication) = match cookies.as_deref() {
-            Some(path) => match YtMusicClient::with_cookies(path) {
-                Ok(client) => (client, AuthenticationState::Authenticated),
-                Err(_) => (YtMusicClient::new(), AuthenticationState::InvalidCookies),
-            },
-            None => (YtMusicClient::new(), AuthenticationState::Anonymous),
-        };
+        // Raiz de composição: o único ponto em que o provedor concreto
+        // aparece — daqui em diante o app só conhece o contrato.
+        let (provider, bootstrap) = crate::ytmusic::YtMusic::from_environment(
+            config.cookies.clone(),
+            config.authentication.clone(),
+        );
+        let provider: Arc<dyn MusicProvider> = Arc::new(provider);
+        let authentication = bootstrap.auth;
+        let cookies = bootstrap.cookies;
 
         // Tema salvo e nome de exibição personalizado (opcional).
         let theme_index = crate::theme::index_by_name(&config.theme);
@@ -363,24 +476,24 @@ impl App {
             | 1;
 
         let status = match authentication {
-            AuthenticationState::Authenticated => {
+            AuthState::Authenticated => {
                 "Signed in. Loading your library... Press / to search or ? for help.".to_string()
             }
-            AuthenticationState::InvalidCookies => {
+            AuthState::InvalidCredentials => {
                 "Cookie file is invalid. Press g to sign in from your browser.".to_string()
             }
-            AuthenticationState::Anonymous => match resolution.missing_requested_path.as_deref() {
+            AuthState::Anonymous => match bootstrap.missing_requested_path.as_deref() {
                 Some(path) => format!("Configured cookie file does not exist: {path}"),
                 None => "Welcome to ytmtui. Press / to search or ? for help.".to_string(),
             },
-            AuthenticationState::Expired => {
+            AuthState::Expired => {
                 "Session expired. Press g to sign in again from your browser.".to_string()
             }
         };
 
         Ok(Self {
             running: true,
-            client,
+            provider,
             player,
             visualizer: SpectrumAnalyzer::new(),
             tx,
@@ -399,13 +512,19 @@ impl App {
             library: Vec::new(),
             home: Vec::new(),
             recent: load_recent(),
+            persist_recent: true,
+            home_error: None,
             liked: std::collections::HashSet::new(),
             autoplay: true,
             pending_radio_seed: None,
             authentication,
+            authentication_flow: AuthenticationFlow::Idle,
+            next_authentication_operation: 1,
+            session_generation: 0,
             account_name,
             theme_index,
             list_state,
+            home_columns: 1,
             queue: Vec::new(),
             queue_index: None,
             current: None,
@@ -413,8 +532,10 @@ impl App {
             shuffle: config.shuffle,
             repeat: RepeatMode::from_config(&config.repeat),
             rng_state: seed,
+            shuffle_played: std::collections::HashSet::new(),
             lyrics: crate::lyrics::LyricsState::None,
             lyrics_scroll: 0,
+            help_scroll: 0,
             picker: None,
             artwork: None,
             artwork_source: None,
@@ -422,12 +543,20 @@ impl App {
             status,
             cookies,
             loading_audio: false,
-            busy: false,
+            busy_tasks: 0,
             spinner_frame: 0,
             // Defends against a hand-edited config value of 0 creating a
             // hot loop of re-fetches.
             sync_interval: std::time::Duration::from_secs(config.sync_interval_secs.max(30)),
             last_synced: std::time::Instant::now(),
+            artwork_mode: ArtworkMode::from_config(&config.artwork_mode),
+            home_density: HomeDensity::from_config(&config.home_density),
+            visualizer_style: VisualizerStyle::from_config(&config.visualizer),
+            animation_speed: AnimationSpeed::from_config(&config.animation_speed),
+            reduced_motion: config.reduced_motion,
+            animate_until: None,
+            selection_changed_at: None,
+            track_changed_at: std::time::Instant::now(),
         })
     }
 
@@ -435,9 +564,28 @@ impl App {
         self.authentication.is_authenticated()
     }
 
+    /// Há alguma tarefa de carregamento de conteúdo (rede) em andamento?
+    pub fn busy(&self) -> bool {
+        self.busy_tasks > 0
+    }
+
+    /// Registra o início de uma tarefa contada no spinner. Cada tarefa
+    /// iniciada por aqui deve terminar em exatamente uma mensagem que chame
+    /// [`Self::finish_task`] (payload, `SessionExpired` ou `Error`).
+    pub(crate) fn begin_task(&mut self) {
+        self.busy_tasks += 1;
+    }
+
+    /// Registra o fim de uma tarefa contada. Saturante: tarefas não contadas
+    /// (download de áudio, curtir, rádio de autoplay) também reportam erros
+    /// pelo canal, e um decremento a mais não pode enlouquecer o contador.
+    fn finish_task(&mut self) {
+        self.busy_tasks = self.busy_tasks.saturating_sub(1);
+    }
+
     /// Há alguma tarefa de carregamento em andamento (rede ou áudio)?
     pub fn is_loading(&self) -> bool {
-        self.busy || self.loading_audio
+        self.busy() || self.loading_audio
     }
 
     /// Whether the UI currently benefits from frequent redraws: a loading
@@ -448,15 +596,65 @@ impl App {
     }
 
     /// Whether the open section is actively animating and needs the fast
-    /// redraw tier: the Home spectrum visualizer, or the synced-lyrics
-    /// karaoke wipe — both must look like continuous motion. Only true while
-    /// a track is audibly playing, so the cost is paid exactly when the
-    /// animation is visible.
+    /// redraw tier: the Home spectrum visualizer, the synced-lyrics karaoke
+    /// wipe, or a time-based transition kicked off by
+    /// [`Self::kick_animation`] (selection change, track change) — all must
+    /// look like continuous motion while they're visible.
+    ///
+    /// `reduced_motion` puts the app in an economy mode: the two continuous
+    /// drivers (visualizer/karaoke) stop requiring the 60ms tier and fall
+    /// back to the 200ms one via [`Self::needs_animation`] — there is no
+    /// continuous motion left to redraw quickly for. Transitions never fire
+    /// under `reduced_motion` either, since [`Self::kick_animation`] is a
+    /// no-op there, so `animating()` is always false in that mode.
     pub fn needs_fast_animation(&self) -> bool {
+        if self.animating() {
+            return true;
+        }
+        if self.reduced_motion {
+            return false;
+        }
         let animated_section = self.section == Section::Inicio
             || (self.section == Section::Letra
                 && matches!(self.lyrics, crate::lyrics::LyricsState::Synced { .. }));
         animated_section && self.current.is_some() && !self.player.is_paused()
+    }
+
+    /// Extends the fast-redraw window by `base` (scaled by
+    /// [`AnimationSpeed::factor`]) from now, so a just-kicked-off transition
+    /// (selection change, track change) keeps drawing at the 60ms tier for
+    /// exactly as long as it takes to play out — never indefinitely. A
+    /// no-op under `reduced_motion`: that mode never wants the fast tier for
+    /// a transition, since the transition itself is skipped (see
+    /// `ui::main_panel::reveal_stage`/`ui::now_playing`'s stage functions).
+    /// Calling this while an earlier animation is still running only ever
+    /// extends the deadline, never shortens it (`max`), so overlapping kicks
+    /// (e.g. rapid selection changes) don't cut each other's tail short.
+    pub(crate) fn kick_animation(&mut self, base: std::time::Duration) {
+        if self.reduced_motion {
+            return;
+        }
+        let scaled_ms = (base.as_millis() as f64 * self.animation_speed.factor()).round() as u64;
+        let candidate = std::time::Instant::now() + std::time::Duration::from_millis(scaled_ms);
+        self.animate_until = Some(match self.animate_until {
+            Some(existing) => existing.max(candidate),
+            None => candidate,
+        });
+    }
+
+    /// Whether a transition kicked off by [`Self::kick_animation`] is still
+    /// in progress.
+    fn animating(&self) -> bool {
+        self.animate_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    /// Marks the Home grid's selection as just-changed (drives
+    /// `ui::main_panel::draw_card`'s staged reveal of the selected card) and
+    /// kicks a matching fast-redraw window.
+    fn mark_selection_changed(&mut self) {
+        self.selection_changed_at = Some(std::time::Instant::now());
+        self.kick_animation(std::time::Duration::from_millis(220));
     }
 
     /// Consumes the pending full-clear flag set by [`Self::clear_artwork`].
@@ -475,19 +673,26 @@ impl App {
 
     /// Carrega (em background) as playlists da biblioteca, se autenticado.
     pub fn load_library(&mut self) {
-        if !self.is_authenticated() {
+        if !self.provider.capabilities().library || !self.is_authenticated() {
             return;
         }
-        self.busy = true;
-        let client = self.client.clone();
+        self.begin_task();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
+        let session_generation = self.session_generation;
         tokio::spawn(async move {
-            match client.get_library_playlists().await {
+            match provider.library_playlists().await {
                 Ok(pls) => {
-                    let _ = tx.send(Msg::LibraryPlaylists(pls));
+                    let _ = tx.send(Msg::LibraryPlaylistsForSession {
+                        session_generation,
+                        playlists: pls,
+                    });
+                }
+                Err(ProviderError::SessionExpired) => {
+                    let _ = tx.send(Msg::SessionExpiredForSession { session_generation });
                 }
                 Err(error) => {
-                    let _ = tx.send(client_error_message("Could not load library", error));
+                    let _ = tx.send(Msg::Error(format!("Could not load library: {error}")));
                 }
             }
         });
@@ -495,19 +700,32 @@ impl App {
 
     /// Carrega (em background) as recomendações da tela inicial.
     pub fn load_home(&mut self) {
-        self.busy = true;
-        let client = self.client.clone();
+        if !self.provider.capabilities().home {
+            return;
+        }
+        // A new attempt supersedes whatever error the last one left behind:
+        // the loading state itself is the feedback while it's in flight.
+        self.home_error = None;
+        self.begin_task();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
+        let session_generation = self.session_generation;
         tokio::spawn(async move {
-            match client.get_home().await {
+            match provider.home().await {
                 Ok(sections) => {
-                    let _ = tx.send(Msg::HomeSections(sections));
+                    let _ = tx.send(Msg::HomeSectionsForSession {
+                        session_generation,
+                        sections,
+                    });
+                }
+                Err(ProviderError::SessionExpired) => {
+                    let _ = tx.send(Msg::SessionExpiredForSession { session_generation });
                 }
                 Err(error) => {
-                    let _ = tx.send(client_error_message(
-                        "Could not load recommendations",
-                        error,
-                    ));
+                    let _ = tx.send(Msg::HomeFailedForSession {
+                        session_generation,
+                        message: format!("Could not load recommendations: {error}"),
+                    });
                 }
             }
         });
@@ -560,8 +778,22 @@ impl App {
 
     /// Total de itens selecionáveis na tela Início: o histórico recente vem
     /// primeiro, seguido dos itens das seções de recomendações.
+    pub fn home_view(&self) -> HomeView {
+        HomeView::project(self.provider.id(), &self.recent, &self.home)
+    }
+
     pub fn home_total_count(&self) -> usize {
-        self.recent.len() + self.home_item_count()
+        self.home_view().len()
+    }
+
+    pub fn move_home(&mut self, direction: HomeDirection) {
+        let current = self.list_state.selected().unwrap_or(0);
+        let next = self
+            .home_view()
+            .move_index(current, direction, self.home_columns);
+        self.list_state
+            .select((self.home_total_count() > 0).then_some(next));
+        self.mark_selection_changed();
     }
 
     /// Registra uma faixa no histórico local (topo da lista, sem duplicatas,
@@ -571,6 +803,13 @@ impl App {
         self.recent.retain(|t| t.video_id != track.video_id);
         self.recent.insert(0, track.clone());
         self.recent.truncate(RECENT_CAP);
+        // Persistência só quando o app foi construído a partir do disco
+        // (`App::new`). `with_provider` (testes/injeção) fica em memória —
+        // um teste que toca uma faixa não pode escrever no recent.json
+        // real do usuário.
+        if !self.persist_recent {
+            return;
+        }
         let Some(path) = recent_path() else { return };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -612,16 +851,23 @@ impl App {
         let Some(idx) = self.list_state.selected() else {
             return;
         };
-        if idx < self.recent.len() {
-            self.queue = self.recent.clone();
-            self.queue_index = Some(idx);
-            self.start_current();
-            return;
-        }
-        let Some(pl) = self.home_item_at(idx - self.recent.len()).cloned() else {
+        let Some(card) = self.home_view().flat_card(idx).cloned() else {
             return;
         };
-        self.load_playlist(pl);
+        match card.payload {
+            HomeCardPayload::Track(track) => {
+                let recent_index = self
+                    .recent
+                    .iter()
+                    .position(|candidate| candidate.video_id == track.video_id)
+                    .unwrap_or(0);
+                self.queue = self.recent.clone();
+                self.queue_index = Some(recent_index);
+                self.shuffle_played.clear();
+                self.start_current();
+            }
+            HomeCardPayload::Collection(collection) => self.load_playlist(collection),
+        }
     }
 
     /// Abre o artista selecionado, carregando suas principais faixas.
@@ -642,12 +888,12 @@ impl App {
             return;
         }
         self.status = format!("Carregando artista \"{}\"...", artist.name);
-        self.busy = true;
-        let client = self.client.clone();
+        self.begin_task();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         let title = format!("Artist: {}", artist.name);
         tokio::spawn(async move {
-            match client.get_artist(&artist.browse_id).await {
+            match provider.artist_tracks(&artist.browse_id).await {
                 Ok(tracks) => {
                     let _ = tx.send(Msg::PlaylistTracks { title, tracks });
                 }
@@ -681,6 +927,14 @@ impl App {
                 .selected()
                 .and_then(|i| self.songs.get(i))
                 .cloned(),
+            Section::Inicio => self
+                .list_state
+                .selected()
+                .and_then(|i| self.home_view().flat_card(i).cloned())
+                .and_then(|card| match card.payload {
+                    HomeCardPayload::Track(track) => Some(track),
+                    HomeCardPayload::Collection(_) => None,
+                }),
             Section::Fila => None, // já está na fila
             _ => None,
         };
@@ -693,9 +947,7 @@ impl App {
             self.start_current();
         } else {
             // Recalcula o próximo (a fila mudou de tamanho).
-            if let Some(idx) = self.queue_index {
-                self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
-            }
+            self.recompute_next();
             self.status = format!(
                 "➕ \"{title}\" adicionada à fila ({} na fila).",
                 self.queue.len()
@@ -703,50 +955,76 @@ impl App {
         }
     }
 
-    /// Login com uma tecla: importa cookies do primeiro navegador instalado
-    /// que tenha uma sessão do YouTube, salva em `~/.config/ytmtui/cookies.txt`
-    /// e reconecta o cliente sem reiniciar o app. Também serve para renovar
-    /// uma sessão expirada.
-    pub fn sign_in(&mut self) {
-        if self.busy {
-            self.status = "Aguarde a tarefa atual terminar antes de conectar.".to_string();
-            return;
-        }
-        let Some(home) = dirs::home_dir() else {
-            self.status = "⚠ Não foi possível localizar o diretório home.".to_string();
+    /// Remove a faixa selecionada da fila. A faixa em reprodução não pode
+    /// ser removida (pule com `n` ou pare com `s`): mantê-la evita um estado
+    /// ambíguo de "tocando algo que não está na fila".
+    pub fn queue_remove_selected(&mut self) {
+        let Some(idx) = self.list_state.selected().filter(|&i| i < self.queue.len()) else {
             return;
         };
-        let browsers = detect_browsers(&home);
-        if browsers.is_empty() {
-            self.status =
-                "⚠ Nenhum navegador suportado encontrado (Brave/Chrome/Firefox…).".to_string();
+        if self.queue_index == Some(idx) && self.current.is_some() {
+            self.status = "A faixa em reprodução não sai da fila — pule com n.".to_string();
             return;
         }
-        let Some(dest) = dirs::config_dir().map(|d| d.join("ytmtui/cookies.txt")) else {
-            self.status = "⚠ Não foi possível localizar o diretório de config.".to_string();
-            return;
-        };
-        self.busy = true;
-        let first = browsers[0].split(':').next().unwrap_or(&browsers[0]);
-        self.status = format!("Conectando: importando cookies de {first}…");
-        let tx = self.tx.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut last_error = String::new();
-            for browser in browsers {
-                let _ = tx.send(Msg::Status(format!("Importando cookies de {browser}…")));
-                match export_browser_cookies(&browser, &dest) {
-                    Ok(()) => {
-                        let _ = tx.send(Msg::CookiesImported {
-                            path: dest.to_string_lossy().into_owned(),
-                            browser,
-                        });
-                        return;
-                    }
-                    Err(e) => last_error = format!("{browser}: {e}"),
-                }
+        let removed = self.queue.remove(idx);
+        if let Some(qi) = self.queue_index {
+            if idx < qi {
+                self.queue_index = Some(qi - 1);
+            } else if idx == qi {
+                // Só alcançável com a reprodução parada (guarda acima).
+                self.queue_index = None;
             }
-            let _ = tx.send(Msg::Error(format!("Falha ao conectar — {last_error}")));
-        });
+        }
+        let len = self.queue.len();
+        self.list_state.select((len > 0).then(|| idx.min(len - 1)));
+        self.recompute_next();
+        self.status = format!("Removida da fila: {}", removed.title);
+    }
+
+    /// Move a faixa selecionada uma posição para cima/baixo na fila,
+    /// levando a seleção junto e repontando o índice da faixa atual se ela
+    /// participar da troca.
+    pub fn queue_move_selected(&mut self, delta: isize) {
+        let Some(idx) = self.list_state.selected().filter(|&i| i < self.queue.len()) else {
+            return;
+        };
+        let target = idx as isize + delta;
+        if target < 0 || target as usize >= self.queue.len() {
+            return;
+        }
+        let target = target as usize;
+        self.queue.swap(idx, target);
+        if let Some(qi) = self.queue_index {
+            if qi == idx {
+                self.queue_index = Some(target);
+            } else if qi == target {
+                self.queue_index = Some(idx);
+            }
+        }
+        self.list_state.select(Some(target));
+        self.recompute_next();
+    }
+
+    /// Limpa a fila, preservando apenas a faixa em reprodução (se houver).
+    pub fn queue_clear(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        match self.current.clone() {
+            Some(current) => {
+                self.queue = vec![current];
+                self.queue_index = Some(0);
+                self.list_state.select(Some(0));
+            }
+            None => {
+                self.queue.clear();
+                self.queue_index = None;
+                self.list_state.select(None);
+            }
+        }
+        self.next_index = None;
+        self.shuffle_played.clear();
+        self.status = "Fila limpa.".to_string();
     }
 
     /// Curte ou descurte a faixa atual (alterna com base no estado da sessão).
@@ -755,6 +1033,13 @@ impl App {
             self.status = "Nada tocando para curtir.".to_string();
             return;
         };
+        if !self.provider.capabilities().likes {
+            self.status = format!(
+                "{} não suporta curtir faixas.",
+                self.provider.display_name()
+            );
+            return;
+        }
         if !self.is_authenticated() {
             self.status = "⚠ Conecte sua conta para curtir faixas.".to_string();
             return;
@@ -768,10 +1053,10 @@ impl App {
             self.liked.remove(&vid);
             self.status = format!("🤍 Removeu a curtida: {}", track.title);
         }
-        let client = self.client.clone();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = client.rate_song(&vid, like).await {
+            if let Err(e) = provider.rate_track(&vid, like).await {
                 let _ = tx.send(Msg::Error(format!("Não foi possível curtir: {e}")));
             }
         });
@@ -779,20 +1064,29 @@ impl App {
 
     /// Carrega (em background) o nome da conta, se autenticado e sem nome
     /// personalizado já definido na config.
-    pub fn load_account(&self) {
+    pub fn load_account(&mut self) {
         if !self.is_authenticated() {
             return;
         }
-        let client = self.client.clone();
+        self.begin_task();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
+        let session_generation = self.session_generation;
         tokio::spawn(async move {
-            match client.get_account_name().await {
-                Ok(Some(name)) => {
-                    let _ = tx.send(Msg::AccountName(Some(name)));
+            match provider.account_name().await {
+                // `None` também é enviado: toda tarefa contada precisa
+                // terminar em exatamente uma mensagem (ver `begin_task`).
+                Ok(name) => {
+                    let _ = tx.send(Msg::AccountNameForSession {
+                        session_generation,
+                        name,
+                    });
                 }
-                Ok(None) => {}
+                Err(ProviderError::SessionExpired) => {
+                    let _ = tx.send(Msg::SessionExpiredForSession { session_generation });
+                }
                 Err(error) => {
-                    let _ = tx.send(client_error_message("Could not load account", error));
+                    let _ = tx.send(Msg::Error(format!("Could not load account: {error}")));
                 }
             }
         });
@@ -824,11 +1118,20 @@ impl App {
             shuffle: self.shuffle,
             repeat: self.repeat.as_config().to_string(),
             cookies,
+            authentication: saved.authentication,
             theme: self.theme().name.to_string(),
             username,
             // Not editable at runtime yet; preserve whatever's on disk
             // rather than overwriting it with the in-memory Duration.
             sync_interval_secs: saved.sync_interval_secs,
+            // Same story as `sync_interval_secs` above: these five have no
+            // in-app editor yet, so whatever's on disk wins over the
+            // in-memory value loaded at startup.
+            artwork_mode: saved.artwork_mode,
+            home_density: saved.home_density,
+            visualizer: saved.visualizer,
+            animation_speed: saved.animation_speed,
+            reduced_motion: saved.reduced_motion,
         }
         .save();
     }
@@ -846,23 +1149,52 @@ impl App {
     /// Alterna a reprodução aleatória.
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
+        self.shuffle_played.clear();
+        // A faixa atual conta como já tocada no ciclo que começa agora.
+        if self.shuffle {
+            if let Some(t) = &self.current {
+                self.shuffle_played.insert(t.video_id.clone());
+            }
+        }
         self.status = if self.shuffle {
             "🔀 Aleatório ativado.".to_string()
         } else {
             "➡ Aleatório desativado.".to_string()
         };
         // Recalcula o próximo com base no novo modo.
-        if let Some(idx) = self.queue_index {
-            self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
-        }
+        self.recompute_next();
     }
 
     /// Alterna o modo de repetição (Off → Todos → Um).
     pub fn cycle_repeat(&mut self) {
         self.repeat = self.repeat.next();
         self.status = format!("🔁 Repetição: {}.", self.repeat.label());
-        if let Some(idx) = self.queue_index {
-            self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
+        self.recompute_next();
+    }
+
+    /// Recalcula `next_index` a partir da posição atual, respeitando os
+    /// modos de shuffle/repeat vigentes.
+    fn recompute_next(&mut self) {
+        self.next_index = self
+            .queue_index
+            .and_then(|idx| self.compute_next(idx, self.repeat != RepeatMode::Off));
+    }
+
+    /// Para a reprodução e limpa todo o estado "tocando agora" (faixa, capa,
+    /// letra e download em andamento) — diferente de `player.stop()` sozinho,
+    /// que silencia o áudio mas deixaria a UI mostrando a faixa como ativa.
+    /// A fila é preservada: Enter na Fila retoma de onde o usuário quiser.
+    pub fn stop_playback(&mut self) {
+        let had_track = self.current.is_some() || self.loading_audio;
+        self.player.stop();
+        self.current = None;
+        self.loading_audio = false;
+        self.lyrics = crate::lyrics::LyricsState::None;
+        self.lyrics_scroll = 0;
+        self.visualizer.reset();
+        if had_track {
+            self.clear_artwork();
+            self.status = "⏹ Reprodução parada.".to_string();
         }
     }
 
@@ -883,7 +1215,9 @@ impl App {
     /// Calcula o índice da próxima faixa a partir de `idx`.
     ///
     /// `allow_wrap` indica se, ao chegar ao fim em ordem sequencial, deve voltar
-    /// ao início. No modo aleatório, escolhe um índice diferente do atual.
+    /// ao início. No modo aleatório, sorteia entre as faixas ainda não tocadas
+    /// no ciclo atual (ver `shuffle_played`); esgotado o ciclo, `allow_wrap`
+    /// decide entre começar outro ciclo ou encerrar a fila.
     fn compute_next(&mut self, idx: usize, allow_wrap: bool) -> Option<usize> {
         let len = self.queue.len();
         if len == 0 {
@@ -893,6 +1227,19 @@ impl App {
             return if allow_wrap { Some(0) } else { None };
         }
         if self.shuffle {
+            let unplayed: Vec<usize> = (0..len)
+                .filter(|&i| i != idx && !self.shuffle_played.contains(&self.queue[i].video_id))
+                .collect();
+            if !unplayed.is_empty() {
+                let pick = (self.next_rand() % unplayed.len() as u64) as usize;
+                return Some(unplayed[pick]);
+            }
+            if !allow_wrap {
+                return None;
+            }
+            // Novo ciclo: tudo volta a valer, menos repetir a atual em
+            // seguida.
+            self.shuffle_played.clear();
             let mut n = idx;
             while n == idx {
                 n = (self.next_rand() % len as u64) as usize;
@@ -915,11 +1262,10 @@ impl App {
         if track.video_id.is_empty() {
             return;
         }
-        let url = track.watch_url();
-        let vid = track.video_id.clone();
-        let cookies = self.cookies.clone();
+        let track = track.clone();
+        let provider = Arc::clone(&self.provider);
         tokio::task::spawn_blocking(move || {
-            let _ = player::download_audio(&url, &vid, cookies.as_deref());
+            let _ = provider.resolve_playable(&track);
         });
     }
 
@@ -937,7 +1283,7 @@ impl App {
         }
     }
 
-    /// Move a seleção da lista principal.
+    /// Move a seleção da lista principal (com wrap nas pontas).
     pub fn move_selection(&mut self, delta: isize) {
         let len = self.main_len();
         if len == 0 {
@@ -946,6 +1292,58 @@ impl App {
         let cur = self.list_state.selected().unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(len as isize) as usize;
         self.list_state.select(Some(next));
+        if self.section == Section::Inicio {
+            self.mark_selection_changed();
+        }
+    }
+
+    /// Salta a seleção em `delta` itens, saturando nas pontas — para
+    /// PageUp/PageDown e scroll do mouse, onde o wrap da navegação linha a
+    /// linha seria desorientador.
+    pub fn page_selection(&mut self, delta: isize) {
+        let len = self.main_len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.list_state.selected().unwrap_or(0) as isize;
+        let next = (cur + delta).clamp(0, len as isize - 1) as usize;
+        self.list_state.select(Some(next));
+        if self.section == Section::Inicio {
+            self.mark_selection_changed();
+        }
+    }
+
+    /// Seleciona o primeiro item da lista principal (tecla Home).
+    pub fn select_first(&mut self) {
+        if self.main_len() > 0 {
+            self.list_state.select(Some(0));
+            if self.section == Section::Inicio {
+                self.mark_selection_changed();
+            }
+        }
+    }
+
+    /// Seleciona o último item da lista principal (tecla End).
+    pub fn select_last(&mut self) {
+        let len = self.main_len();
+        if len > 0 {
+            self.list_state.select(Some(len - 1));
+            if self.section == Section::Inicio {
+                self.mark_selection_changed();
+            }
+        }
+    }
+
+    /// Abre diretamente a seção de índice `index` (teclas 1–8), movendo o
+    /// foco para o painel principal.
+    pub fn jump_to_section(&mut self, index: usize) {
+        if index >= Section::ALL.len() {
+            return;
+        }
+        self.sidebar_index = index;
+        self.section = Section::ALL[index];
+        self.focus = Focus::Main;
+        self.list_state.select(Some(0));
     }
 
     /// Move a seleção da barra lateral.
@@ -965,11 +1363,11 @@ impl App {
             return;
         }
         self.status = format!("Buscando por \"{q}\"...");
-        self.busy = true;
-        let client = self.client.clone();
+        self.begin_task();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            match client.search(&q).await {
+            match provider.search(&q).await {
                 Ok(res) => {
                     let _ = tx.send(Msg::SearchResults(res));
                 }
@@ -1011,12 +1409,12 @@ impl App {
     /// rotula o painel de resultados ("Playlist"/"Album").
     fn load_browse(&mut self, pl: Playlist, kind: &str) {
         self.status = format!("Carregando \"{}\"...", pl.title);
-        self.busy = true;
-        let client = self.client.clone();
+        self.begin_task();
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         let title = format!("{kind}: {}", pl.title);
         tokio::spawn(async move {
-            match client.get_playlist_tracks(&pl.browse_id).await {
+            match provider.playlist_tracks(&pl.browse_id).await {
                 Ok(tracks) => {
                     let _ = tx.send(Msg::PlaylistTracks { title, tracks });
                 }
@@ -1043,10 +1441,13 @@ impl App {
     /// Busca (em background) a rádio de faixas semelhantes à `seed` para
     /// completar a fila atrás do que está tocando.
     fn fetch_related(&self, seed: String) {
-        let client = self.client.clone();
+        if !self.provider.capabilities().radio {
+            return;
+        }
+        let provider = Arc::clone(&self.provider);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Ok(tracks) = client.get_radio(&seed).await {
+            if let Ok(tracks) = provider.radio(&seed).await {
                 let _ = tx.send(Msg::RelatedTracks { seed, tracks });
             }
         });
@@ -1068,9 +1469,7 @@ impl App {
         }
         let added = self.queue.len() - before;
         if added > 0 {
-            if let Some(idx) = self.queue_index {
-                self.next_index = self.compute_next(idx, self.repeat != RepeatMode::Off);
-            }
+            self.recompute_next();
         }
         added
     }
@@ -1101,6 +1500,7 @@ impl App {
                         self.pending_radio_seed = Some(track.video_id.clone());
                         self.queue = vec![track];
                         self.queue_index = Some(0);
+                        self.shuffle_played.clear();
                     }
                     SearchHit::Artist(artist) => {
                         self.load_artist(artist);
@@ -1129,6 +1529,7 @@ impl App {
                     .min(self.songs.len() - 1);
                 self.queue = self.songs.clone();
                 self.queue_index = Some(idx);
+                self.shuffle_played.clear();
             }
             Section::Fila => {
                 if self.queue.is_empty() {
@@ -1182,6 +1583,11 @@ impl App {
             return;
         };
         self.current = Some(track.clone());
+        self.track_changed_at = std::time::Instant::now();
+        self.kick_animation(std::time::Duration::from_millis(300));
+        if self.shuffle {
+            self.shuffle_played.insert(track.video_id.clone());
+        }
         self.remember_recent(&track);
         self.lyrics = crate::lyrics::LyricsState::None;
         self.lyrics_scroll = 0;
@@ -1190,22 +1596,24 @@ impl App {
         self.loading_audio = true;
         self.status = format!("Baixando \"{}\"...", track.title);
 
-        // 1) Download / resolução do áudio (bloqueante) em task dedicada.
+        // 1) Resolução do áudio (bloqueante) em task dedicada, a cargo do
+        // provedor (download/cache/remux ficam do lado de lá do contrato).
         let tx = self.tx.clone();
-        let url = track.watch_url();
-        let vid_audio = track.video_id.clone();
-        let cookies = self.cookies.clone();
-        tokio::task::spawn_blocking(move || {
-            match player::download_audio(&url, &vid_audio, cookies.as_deref()) {
-                Ok(path) => {
-                    let _ = tx.send(Msg::AudioReady {
-                        video_id: vid_audio,
-                        path,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("Falha ao obter áudio: {e}")));
-                }
+        let provider = Arc::clone(&self.provider);
+        let provider_name = provider.display_name();
+        let track_audio = track.clone();
+        tokio::task::spawn_blocking(move || match provider.resolve_playable(&track_audio) {
+            Ok(path) => {
+                let _ = tx.send(Msg::AudioReady {
+                    video_id: track_audio.video_id,
+                    path,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(Msg::Error(format!(
+                    "Falha ao obter áudio ({provider_name}): {e}",
+                    provider_name = provider_name
+                )));
             }
         });
 
@@ -1215,26 +1623,28 @@ impl App {
             self.prefetch(n);
         }
 
-        // 2) Letras.
-        let client = self.client.clone();
-        let tx2 = self.tx.clone();
-        let vid = track.video_id.clone();
-        tokio::spawn(async move {
-            if let Ok(lyr) = client.get_lyrics(&vid).await {
-                let _ = tx2.send(Msg::Lyrics {
-                    video_id: vid,
-                    lyrics: lyr,
-                });
-            }
-        });
+        // 2) Letras (só quando o provedor as fornece).
+        if self.provider.capabilities().lyrics {
+            let provider = Arc::clone(&self.provider);
+            let tx2 = self.tx.clone();
+            let vid = track.video_id.clone();
+            tokio::spawn(async move {
+                if let Ok(lyr) = provider.lyrics(&vid).await {
+                    let _ = tx2.send(Msg::Lyrics {
+                        video_id: vid,
+                        lyrics: lyr,
+                    });
+                }
+            });
+        }
 
         // 3) Capa (artwork).
         if let Some(url) = track.thumbnail.clone() {
             let tx3 = self.tx.clone();
-            let http = self.client.clone();
+            let provider = Arc::clone(&self.provider);
             let vid_art = track.video_id.clone();
             tokio::spawn(async move {
-                if let Ok(bytes) = http.fetch_bytes(&url).await {
+                if let Ok(bytes) = provider.fetch_artwork(&url).await {
                     let _ = tx3.send(Msg::ArtworkBytes {
                         video_id: vid_art,
                         bytes,
@@ -1299,14 +1709,14 @@ impl App {
             }
             None => {
                 // Fim da fila: tenta continuar com uma rádio (autoplay).
-                if self.autoplay {
+                if self.autoplay && self.provider.capabilities().radio {
                     if let Some(seed) = self.current.as_ref().map(|t| t.video_id.clone()) {
                         if !seed.is_empty() {
                             self.status = "📻 Fila concluída — carregando rádio...".to_string();
-                            let client = self.client.clone();
+                            let provider = Arc::clone(&self.provider);
                             let tx = self.tx.clone();
                             tokio::spawn(async move {
-                                match client.get_radio(&seed).await {
+                                match provider.radio(&seed).await {
                                     Ok(tracks) => {
                                         let _ = tx.send(Msg::RadioTracks(tracks));
                                     }
@@ -1337,7 +1747,7 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::SearchResults(res) => {
-                    self.busy = false;
+                    self.finish_task();
                     self.songs = res.songs;
                     self.songs_title = "Search results".to_string();
                     self.playlists = res.playlists;
@@ -1358,8 +1768,18 @@ impl App {
                     // desyncs Enter-key handling from what's on screen.
                     self.list_state.select(Some(0));
                 }
+                Msg::LibraryPlaylistsForSession {
+                    session_generation,
+                    playlists,
+                } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::LibraryPlaylists(playlists));
+                    } else {
+                        self.finish_task();
+                    }
+                }
                 Msg::LibraryPlaylists(pls) => {
-                    self.busy = false;
+                    self.finish_task();
                     // A background sync (Feature 3) re-runs this same load
                     // periodically; preserve the current selection by
                     // `browse_id` instead of always resetting to the top, or
@@ -1384,29 +1804,41 @@ impl App {
                         self.list_state
                             .select((!self.library.is_empty()).then_some(new_index).flatten());
                     }
-                    self.status = format!(
-                        "Library loaded: {} playlist(s). Open Library in the menu.",
-                        self.library.len()
-                    );
+                    // Só o primeiro carregamento anuncia na status bar: o
+                    // sync periódico repassa por aqui a cada poucos minutos
+                    // e não pode apagar o que o usuário estava lendo
+                    // ("▶ Tocando…", um erro, etc.).
+                    if was_empty && !self.library.is_empty() {
+                        self.status = format!(
+                            "Library loaded: {} playlist(s). Open Library in the menu.",
+                            self.library.len()
+                        );
+                    }
+                }
+                Msg::HomeSectionsForSession {
+                    session_generation,
+                    sections,
+                } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::HomeSections(sections));
+                    } else {
+                        self.finish_task();
+                    }
                 }
                 Msg::HomeSections(sections) => {
-                    self.busy = false;
+                    self.finish_task();
+                    self.home_error = None;
                     let was_empty = self.home.is_empty();
-                    // Selection indices on Home count the local recent-tracks
-                    // group first; recommendation lookups must skip past it.
-                    let recent_len = self.recent.len();
-                    let previous_id = (self.section == Section::Inicio)
+                    let previous_key = (self.section == Section::Inicio)
                         .then(|| self.list_state.selected())
                         .flatten()
-                        .and_then(|i| i.checked_sub(recent_len))
-                        .and_then(|i| self.home_item_at(i))
-                        .map(|p| p.browse_id.clone());
+                        .and_then(|i| self.home_view().flat_card(i).map(|card| card.key.clone()));
                     self.home = sections;
                     if self.section == Section::Inicio {
-                        let count = self.home_total_count();
-                        let new_index = previous_id
-                            .and_then(|id| self.home_flat_index_of(&id))
-                            .map(|i| i + recent_len)
+                        let view = self.home_view();
+                        let count = view.len();
+                        let new_index = previous_key
+                            .and_then(|key| view.flat_index_of(&key))
                             .or(if was_empty {
                                 Some(0)
                             } else {
@@ -1416,6 +1848,24 @@ impl App {
                         self.list_state
                             .select((count > 0).then_some(new_index).flatten());
                     }
+                }
+                Msg::HomeFailedForSession {
+                    session_generation,
+                    message,
+                } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::HomeFailed(message));
+                    } else {
+                        self.finish_task();
+                    }
+                }
+                Msg::HomeFailed(message) => {
+                    self.finish_task();
+                    self.home_error = Some(message);
+                    // `self.home`/`self.recent` are deliberately left alone:
+                    // whatever shelves were already cached stay on screen,
+                    // per the empty-state/banner split in `draw_home_sections`.
+                    self.status = "⚠ Falha ao carregar recomendações — R recarrega.".to_string();
                 }
                 Msg::RadioTracks(tracks) => {
                     if tracks.is_empty() {
@@ -1432,16 +1882,34 @@ impl App {
                         self.start_current();
                     }
                 }
+                Msg::AccountNameForSession {
+                    session_generation,
+                    name,
+                } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::AccountName(name));
+                    } else {
+                        self.finish_task();
+                    }
+                }
                 Msg::AccountName(name) => {
+                    self.finish_task();
                     if let Some(n) = name {
                         if self.account_name.is_none() {
                             self.account_name = Some(n);
                         }
                     }
                 }
+                Msg::SessionExpiredForSession { session_generation } => {
+                    if session_generation == self.session_generation {
+                        let _ = self.tx.send(Msg::SessionExpired);
+                    } else {
+                        self.finish_task();
+                    }
+                }
                 Msg::SessionExpired => {
-                    self.busy = false;
-                    self.authentication = AuthenticationState::Expired;
+                    self.finish_task();
+                    self.authentication = AuthState::Expired;
                     self.library.clear();
                     self.account_name = None;
                     self.status = "Session expired. Press g to sign in again from your \
@@ -1449,7 +1917,7 @@ impl App {
                         .to_string();
                 }
                 Msg::PlaylistTracks { title, tracks } => {
-                    self.busy = false;
+                    self.finish_task();
                     self.songs = tracks;
                     self.songs_title = title;
                     // Uma lista concreta de faixas substitui a visão mista da
@@ -1465,7 +1933,7 @@ impl App {
                     // past must not overwrite the current track's lyrics.
                     if self.is_current_track(&video_id) {
                         use crate::lyrics::LyricsState;
-                        use crate::ytmusic::Lyrics;
+                        use crate::models::Lyrics;
                         self.lyrics = match lyrics {
                             Some(Lyrics::Synced(lines)) => LyricsState::Synced {
                                 lines,
@@ -1501,27 +1969,28 @@ impl App {
                         self.player.play_file(path);
                     }
                 }
-                Msg::CookiesImported { path, browser } => {
-                    self.busy = false;
-                    match YtMusicClient::with_cookies(&path) {
-                        Ok(client) => {
-                            self.client = client;
-                            self.cookies = Some(path);
-                            self.authentication = AuthenticationState::Authenticated;
-                            self.account_name = None;
-                            let name = browser.split(':').next().unwrap_or(&browser);
-                            self.status =
-                                format!("✔ Conectado via {name}. Carregando suas músicas…");
-                            self.load_account();
-                            self.load_home();
-                            self.load_library();
-                        }
-                        Err(e) => {
-                            self.authentication = AuthenticationState::InvalidCookies;
-                            self.status = format!("⚠ Cookies importados são inválidos: {e}");
-                        }
-                    }
-                }
+                Msg::SignInPrepared {
+                    operation_id,
+                    preview,
+                } => self.handle_sign_in_prepared(operation_id, preview),
+                Msg::SignedIn {
+                    operation_id,
+                    preview_id,
+                    method,
+                    credentials_path,
+                    account_name,
+                } => self.handle_signed_in(
+                    operation_id,
+                    preview_id,
+                    method,
+                    credentials_path,
+                    account_name,
+                ),
+                Msg::SignInFailed {
+                    operation_id,
+                    message,
+                    preview_id,
+                } => self.handle_sign_in_failed(operation_id, message, preview_id),
                 Msg::RelatedTracks { seed, tracks } => {
                     let added = self.append_related(&seed, tracks);
                     if added > 0 {
@@ -1531,13 +2000,59 @@ impl App {
                         }
                     }
                 }
+                Msg::Media(event) => self.handle_media_event(event),
                 Msg::Status(s) => self.status = s,
                 Msg::Error(e) => {
                     self.loading_audio = false;
-                    self.busy = false;
+                    self.finish_task();
                     self.status = format!("⚠ {e}");
                 }
             }
+        }
+    }
+
+    /// Aplica um comando de mídia vindo do desktop (MPRIS): os mesmos
+    /// caminhos dos atalhos de teclado, então o comportamento é idêntico.
+    fn handle_media_event(&mut self, event: souvlaki::MediaControlEvent) {
+        use souvlaki::{MediaControlEvent as E, SeekDirection};
+        match event {
+            E::Play => {
+                if self.player.is_paused() {
+                    self.player.toggle_pause();
+                }
+            }
+            E::Pause => {
+                if !self.player.is_paused() {
+                    self.player.toggle_pause();
+                }
+            }
+            E::Toggle => self.player.toggle_pause(),
+            E::Next => self.next_track(),
+            E::Previous => self.prev_track(),
+            E::Stop => self.stop_playback(),
+            E::Seek(SeekDirection::Forward) => self.seek_forward(),
+            E::Seek(SeekDirection::Backward) => self.seek_backward(),
+            E::SeekBy(direction, amount) => {
+                let secs = amount.as_secs().max(1);
+                if self.current.is_some() {
+                    match direction {
+                        SeekDirection::Forward => self.player.seek_forward(secs),
+                        SeekDirection::Backward => self.player.seek_backward(secs),
+                    }
+                }
+            }
+            E::SetPosition(souvlaki::MediaPosition(position)) => {
+                if self.current.is_some() {
+                    self.player.seek_to(position);
+                }
+            }
+            E::SetVolume(volume) => {
+                self.player.set_volume(volume.clamp(0.0, 1.0) as f32);
+            }
+            E::Quit => self.request_quit(),
+            // Uma TUI não tem janela própria para trazer à frente, e abrir
+            // URIs externas não faz sentido aqui.
+            E::Raise | E::OpenUri(_) => {}
         }
     }
 
@@ -1557,8 +2072,15 @@ impl App {
         if self.section == Section::Inicio {
             let audible = self.current.is_some() && !self.player.is_paused();
             if audible {
+                // Todos os chunks acumulados entram na janela, mas a FFT
+                // roda uma única vez por tick: só o frame final é desenhado.
+                let mut fed = false;
                 for chunk in self.player.drain_sample_chunks() {
                     self.visualizer.push_samples(&chunk);
+                    fed = true;
+                }
+                if fed {
+                    self.visualizer.compute_frame();
                 }
             } else {
                 self.visualizer.decay_idle();
@@ -1582,21 +2104,24 @@ impl App {
     }
 }
 
-#[cfg(test)]
 impl App {
-    /// Builds an `App` with fixed defaults for rendering tests.
-    ///
-    /// Unlike [`App::new`], this constructor never reads configuration files,
-    /// environment variables, or cookie files, so tests are deterministic on
-    /// any machine.
-    pub(crate) fn new_for_tests() -> Self {
+    /// Raiz de composição alternativa: constrói o app em torno de um
+    /// provedor já pronto, sem ler configuração, variáveis de ambiente,
+    /// cookies ou histórico do disco. É o ponto de entrada dos testes de
+    /// fronteira (mock) e de provedores selecionados externamente.
+    pub fn with_provider(provider: Arc<dyn MusicProvider>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+        let authentication = if provider.is_authenticated() {
+            AuthState::Authenticated
+        } else {
+            AuthState::Anonymous
+        };
 
         Self {
             running: true,
-            client: YtMusicClient::new(),
+            provider,
             player: AudioPlayer::new().expect("audio thread should start"),
             visualizer: SpectrumAnalyzer::new(),
             tx,
@@ -1614,16 +2139,22 @@ impl App {
             search_mixed: false,
             library: Vec::new(),
             home: Vec::new(),
-            // Tests must not read (or later write) the user's real
-            // recent.json; they start with an empty in-memory history.
+            // Sem leitura do recent.json real: histórico começa vazio e
+            // nunca é gravado de volta (persist_recent = false).
             recent: Vec::new(),
+            persist_recent: false,
+            home_error: None,
             liked: std::collections::HashSet::new(),
             autoplay: true,
             pending_radio_seed: None,
-            authentication: AuthenticationState::Anonymous,
+            authentication,
+            authentication_flow: AuthenticationFlow::Idle,
+            next_authentication_operation: 1,
+            session_generation: 0,
             account_name: None,
             theme_index: 0,
             list_state,
+            home_columns: 1,
             queue: Vec::new(),
             queue_index: None,
             current: None,
@@ -1631,8 +2162,10 @@ impl App {
             shuffle: false,
             repeat: RepeatMode::Off,
             rng_state: 0x9E3779B97F4A7C15,
+            shuffle_played: std::collections::HashSet::new(),
             lyrics: crate::lyrics::LyricsState::None,
             lyrics_scroll: 0,
+            help_scroll: 0,
             picker: None,
             artwork: None,
             artwork_source: None,
@@ -1640,25 +2173,199 @@ impl App {
             status: "Ready.".to_string(),
             cookies: None,
             loading_audio: false,
-            busy: false,
+            busy_tasks: 0,
             spinner_frame: 0,
             sync_interval: std::time::Duration::from_secs(300),
             last_synced: std::time::Instant::now(),
+            artwork_mode: ArtworkMode::Auto,
+            home_density: HomeDensity::Comfortable,
+            visualizer_style: VisualizerStyle::Gradient,
+            animation_speed: AnimationSpeed::Normal,
+            reduced_motion: false,
+            animate_until: None,
+            selection_changed_at: None,
+            track_changed_at: std::time::Instant::now(),
         }
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Builds an `App` with fixed defaults for rendering tests.
+    ///
+    /// Unlike [`App::new`], this constructor never reads configuration files,
+    /// environment variables, or cookie files, so tests are deterministic on
+    /// any machine.
+    pub(crate) fn new_for_tests() -> Self {
+        Self::with_provider(Arc::new(crate::provider::mock::MockProvider::default()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ytmusic::YtMusicError;
-    use reqwest::StatusCode;
+
+    #[test]
+    fn test_preview_helper_installs_the_first_account_selection() {
+        let mut app = App::new_for_tests();
+        app.set_sign_in_preview_for_test(SignInPreview {
+            id: 7,
+            method: "mock".to_string(),
+            profile_label: None,
+            accounts: vec![crate::provider::SignInAccount {
+                index: 3,
+                name: "Preview Account".to_string(),
+                handle: None,
+            }],
+            current_account_name: None,
+        });
+
+        let (preview, selected) = app.sign_in_preview().expect("preview installed");
+        assert_eq!(preview.id, 7);
+        assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn stale_sign_in_messages_cannot_publish_or_cancel_another_operation() {
+        let mut app = App::new_for_tests();
+        app.authentication = AuthState::Authenticated;
+        app.account_name = Some("Existing Account".to_string());
+        app.authentication_flow = AuthenticationFlow::Activating {
+            operation_id: 4,
+            preview_id: 7,
+        };
+
+        app.tx
+            .send(Msg::SignedIn {
+                operation_id: 99,
+                preview_id: 7,
+                method: "firefox".to_string(),
+                credentials_path: Some("wrong-cookies.txt".to_string()),
+                account_name: "Wrong Account".to_string(),
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SignInFailed {
+                operation_id: 99,
+                message: "stale failure".to_string(),
+                preview_id: Some(7),
+            })
+            .unwrap();
+        app.drain_messages();
+
+        assert!(matches!(
+            app.authentication_flow,
+            AuthenticationFlow::Activating {
+                operation_id: 4,
+                preview_id: 7
+            }
+        ));
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
+        assert_ne!(app.cookies.as_deref(), Some("wrong-cookies.txt"));
+    }
+
+    #[test]
+    fn stale_session_payloads_cannot_overwrite_a_newly_activated_account() {
+        let mut app = App::new_for_tests();
+        app.session_generation = 2;
+        app.authentication = AuthState::Authenticated;
+        app.account_name = Some("New Account".to_string());
+        app.home = vec![crate::models::HomeSection {
+            title: "New home".to_string(),
+            items: vec![],
+        }];
+        app.library = vec![Playlist {
+            title: "New library".to_string(),
+            ..Default::default()
+        }];
+
+        app.tx
+            .send(Msg::HomeSectionsForSession {
+                session_generation: 1,
+                sections: vec![],
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::LibraryPlaylistsForSession {
+                session_generation: 1,
+                playlists: vec![],
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::AccountNameForSession {
+                session_generation: 1,
+                name: Some("Old Account".to_string()),
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SessionExpiredForSession {
+                session_generation: 1,
+            })
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("New Account"));
+        assert_eq!(app.home[0].title, "New home");
+        assert_eq!(app.library[0].title, "New library");
+    }
+
+    #[tokio::test]
+    async fn a_session_expiry_queued_before_sign_in_cannot_expire_the_new_account() {
+        let mut app = App::new_for_tests();
+        // `confirm_sign_in` advances this before the provider can commit.
+        app.session_generation = 1;
+        app.authentication_flow = AuthenticationFlow::Activating {
+            operation_id: 4,
+            preview_id: 7,
+        };
+        app.tx
+            .send(Msg::SessionExpiredForSession {
+                session_generation: 0,
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SignedIn {
+                operation_id: 4,
+                preview_id: 7,
+                method: "firefox".to_string(),
+                credentials_path: None,
+                account_name: "New Account".to_string(),
+            })
+            .unwrap();
+
+        app.drain_messages();
+
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("New Account"));
+    }
+
+    #[tokio::test]
+    async fn confirming_sign_in_retires_the_previous_session_before_activation_runs() {
+        let mut app = App::new_for_tests();
+        app.set_sign_in_preview_for_test(SignInPreview {
+            id: 7,
+            method: "firefox".to_string(),
+            profile_label: None,
+            accounts: vec![crate::provider::SignInAccount {
+                index: 0,
+                name: "New Account".to_string(),
+                handle: None,
+            }],
+            current_account_name: None,
+        });
+
+        app.confirm_sign_in();
+
+        assert_eq!(app.session_generation, 1);
+    }
 
     #[test]
     fn background_home_refresh_preserves_selection_by_browse_id() {
         let mut app = App::new_for_tests();
         app.section = Section::Inicio;
-        app.home = vec![crate::ytmusic::HomeSection {
+        app.home = vec![crate::models::HomeSection {
             title: "Quick picks".to_string(),
             items: vec![
                 Playlist {
@@ -1676,7 +2383,7 @@ mod tests {
 
         // A background refresh reorders VL2 ahead of VL1.
         app.tx
-            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
                 title: "Quick picks".to_string(),
                 items: vec![
                     Playlist {
@@ -1703,7 +2410,7 @@ mod tests {
     fn background_home_refresh_clamps_when_the_selected_item_is_gone() {
         let mut app = App::new_for_tests();
         app.section = Section::Inicio;
-        app.home = vec![crate::ytmusic::HomeSection {
+        app.home = vec![crate::models::HomeSection {
             title: "Quick picks".to_string(),
             items: vec![
                 Playlist {
@@ -1720,7 +2427,7 @@ mod tests {
 
         // VL2 is gone from the refreshed data.
         app.tx
-            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
                 title: "Quick picks".to_string(),
                 items: vec![Playlist {
                     browse_id: "VL1".to_string(),
@@ -1781,7 +2488,7 @@ mod tests {
         assert!(app.home.is_empty());
 
         app.tx
-            .send(Msg::HomeSections(vec![crate::ytmusic::HomeSection {
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
                 title: "Quick picks".to_string(),
                 items: vec![Playlist {
                     browse_id: "VL1".to_string(),
@@ -1803,11 +2510,11 @@ mod tests {
         let mut app = App::new_for_tests();
         assert!(!app.needs_animation(), "idle app needs no animation");
 
-        app.busy = true;
+        app.begin_task();
         assert!(app.needs_animation(), "loading shows the spinner");
-        app.busy = false;
+        app.finish_task();
 
-        app.current = Some(crate::ytmusic::Track::default());
+        app.current = Some(crate::models::Track::default());
         assert!(app.needs_animation(), "playback progress animates");
     }
 
@@ -1836,9 +2543,9 @@ mod tests {
         );
     }
 
-    fn home_sections() -> Vec<crate::ytmusic::HomeSection> {
+    fn home_sections() -> Vec<crate::models::HomeSection> {
         vec![
-            crate::ytmusic::HomeSection {
+            crate::models::HomeSection {
                 title: "Quick picks".to_string(),
                 items: vec![
                     Playlist {
@@ -1853,7 +2560,7 @@ mod tests {
                     },
                 ],
             },
-            crate::ytmusic::HomeSection {
+            crate::models::HomeSection {
                 title: "Mixed for you".to_string(),
                 items: vec![Playlist {
                     browse_id: "VL3".to_string(),
@@ -1902,7 +2609,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        app.artists = vec![crate::ytmusic::Artist {
+        app.artists = vec![crate::models::Artist {
             browse_id: "UC1".to_string(),
             name: "Artist one".to_string(),
             ..Default::default()
@@ -2007,6 +2714,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn entering_a_recent_home_card_preserves_history_order_and_selected_index() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.recent = (1..=3)
+            .map(|i| Track {
+                video_id: format!("r{i}"),
+                title: format!("Recent {i}"),
+                ..Default::default()
+            })
+            .collect();
+        app.list_state.select(Some(1));
+
+        app.open_selected_home();
+
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|track| track.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r1", "r2", "r3"]
+        );
+        assert_eq!(app.queue_index, Some(1));
+        assert_eq!(
+            app.current.as_ref().map(|track| track.video_id.as_str()),
+            Some("r2")
+        );
+    }
+
+    #[test]
+    fn enqueueing_a_recent_home_track_does_not_interrupt_playback() {
+        let playing = Track {
+            video_id: "playing".into(),
+            title: "Playing".into(),
+            ..Default::default()
+        };
+        let recent = Track {
+            video_id: "recent".into(),
+            title: "Recent".into(),
+            ..Default::default()
+        };
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.recent = vec![recent];
+        app.queue = vec![playing.clone()];
+        app.queue_index = Some(0);
+        app.current = Some(playing);
+        app.list_state.select(Some(0));
+
+        app.enqueue_selected();
+
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|track| track.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["playing", "recent"]
+        );
+        assert_eq!(app.queue_index, Some(0));
+        assert_eq!(
+            app.current.as_ref().map(|track| track.video_id.as_str()),
+            Some("playing")
+        );
+        assert!(app.status.contains("adicionada à fila"));
+    }
+
     #[test]
     fn home_item_count_sums_across_sections_excluding_headers() {
         let mut app = App::new_for_tests();
@@ -2066,15 +2839,423 @@ mod tests {
     }
 
     #[test]
-    fn session_expiry_maps_to_the_dedicated_message() {
-        let message = client_error_message(
-            "Could not load library",
-            YtMusicError::SessionExpired {
-                status: StatusCode::UNAUTHORIZED,
-                endpoint: "browse".to_string(),
-            },
+    fn stop_clears_the_now_playing_state_but_keeps_the_queue() {
+        let mut app = App::new_for_tests();
+        app.current = Some(Track::default());
+        app.loading_audio = true;
+        app.lyrics = crate::lyrics::LyricsState::Plain("la la".to_string());
+        app.artwork_source = Some(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([1, 2, 3]),
+        )));
+        app.queue = vec![Track::default(), Track::default()];
+        app.queue_index = Some(1);
+
+        app.stop_playback();
+
+        assert!(app.current.is_none(), "no track shown as playing");
+        assert!(!app.loading_audio);
+        assert!(app.artwork_source.is_none(), "cover cleared");
+        assert!(app.clear_screen, "graphics leftovers get erased");
+        assert!(matches!(app.lyrics, crate::lyrics::LyricsState::None));
+        assert_eq!(app.queue.len(), 2, "queue survives for a later resume");
+
+        // Stopping when idle must not request a screen clear (no flicker).
+        let mut idle = App::new_for_tests();
+        idle.stop_playback();
+        assert!(!idle.clear_screen);
+    }
+
+    #[test]
+    fn concurrent_loads_keep_the_spinner_until_the_last_one_finishes() {
+        let mut app = App::new_for_tests();
+        // Simulates `sync_home_and_library`: two counted tasks in flight.
+        app.begin_task();
+        app.begin_task();
+
+        app.tx.send(Msg::HomeSections(Vec::new())).unwrap();
+        app.drain_messages();
+        assert!(
+            app.is_loading(),
+            "first response must not hide the spinner while the second load is in flight"
         );
 
+        app.tx.send(Msg::LibraryPlaylists(Vec::new())).unwrap();
+        app.drain_messages();
+        assert!(!app.is_loading());
+    }
+
+    #[test]
+    fn stray_errors_never_underflow_the_busy_counter() {
+        let mut app = App::new_for_tests();
+        // An uncounted task (audio download, like) reporting an error while
+        // nothing counted is in flight must saturate at zero...
+        app.tx.send(Msg::Error("boom".to_string())).unwrap();
+        app.drain_messages();
+        assert!(!app.is_loading());
+
+        // ...so a counted task started right after still shows its spinner.
+        app.begin_task();
+        assert!(app.is_loading());
+    }
+
+    #[test]
+    fn background_library_refresh_does_not_clobber_the_status_bar() {
+        let mut app = App::new_for_tests();
+        app.library = vec![Playlist {
+            browse_id: "L1".to_string(),
+            ..Default::default()
+        }];
+        app.status = "▶ Tocando: Song — Artist".to_string();
+
+        app.tx
+            .send(Msg::LibraryPlaylists(vec![Playlist {
+                browse_id: "L1".to_string(),
+                ..Default::default()
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.status, "▶ Tocando: Song — Artist",
+            "periodic refresh must not overwrite what the user is reading"
+        );
+    }
+
+    fn track(id: &str) -> Track {
+        Track {
+            video_id: id.to_string(),
+            title: format!("Track {id}"),
+            ..Default::default()
+        }
+    }
+
+    fn queue_app() -> App {
+        let mut app = App::new_for_tests();
+        app.section = Section::Fila;
+        app.queue = vec![track("a"), track("b"), track("c"), track("d")];
+        app.queue_index = Some(1);
+        app.current = Some(track("b"));
+        app
+    }
+
+    #[test]
+    fn removing_a_track_before_the_current_one_shifts_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(0));
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_index, Some(0), "current track followed its move");
+        assert_eq!(app.queue[0].video_id, "b");
+    }
+
+    #[test]
+    fn the_playing_track_cannot_be_removed_from_the_queue() {
+        let mut app = queue_app();
+        app.list_state.select(Some(1)); // the playing track
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 4, "queue unchanged");
+        assert_eq!(app.queue_index, Some(1));
+    }
+
+    #[test]
+    fn removing_after_the_current_track_keeps_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(3));
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_index, Some(1));
+        // Selection clamps to the new last row instead of dangling.
+        assert_eq!(app.list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn moving_a_track_follows_selection_and_repoints_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(2)); // "c"
+        app.queue_move_selected(-1); // swaps with "b" (the playing track)
+        assert_eq!(app.queue[1].video_id, "c");
+        assert_eq!(app.queue[2].video_id, "b");
+        assert_eq!(app.queue_index, Some(2), "playing track followed the swap");
+        assert_eq!(
+            app.list_state.selected(),
+            Some(1),
+            "selection followed the move"
+        );
+
+        // Edges saturate: can't move the first row further up.
+        app.list_state.select(Some(0));
+        app.queue_move_selected(-1);
+        assert_eq!(app.queue[0].video_id, "a");
+    }
+
+    #[test]
+    fn clearing_the_queue_keeps_only_the_playing_track() {
+        let mut app = queue_app();
+        app.queue_clear();
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].video_id, "b");
+        assert_eq!(app.queue_index, Some(0));
+
+        // With nothing playing, the queue empties entirely.
+        let mut stopped = queue_app();
+        stopped.current = None;
+        stopped.queue_clear();
+        assert!(stopped.queue.is_empty());
+        assert_eq!(stopped.queue_index, None);
+    }
+
+    #[test]
+    fn shuffle_visits_every_track_once_then_ends_when_repeat_is_off() {
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a"), track("b"), track("c"), track("d")];
+        app.shuffle = true;
+        // Simulates `start_current` for the first track.
+        app.queue_index = Some(0);
+        app.shuffle_played.insert("a".to_string());
+
+        let mut visited = vec!["a".to_string()];
+        let mut idx = 0;
+        while let Some(next) = app.compute_next(idx, false) {
+            let id = app.queue[next].video_id.clone();
+            assert!(
+                !visited.contains(&id),
+                "shuffle must not repeat a track within a cycle"
+            );
+            visited.push(id.clone());
+            app.shuffle_played.insert(id);
+            idx = next;
+        }
+        assert_eq!(visited.len(), 4, "every track played exactly once");
+    }
+
+    #[test]
+    fn shuffle_starts_a_new_cycle_when_repeat_all_wraps() {
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a"), track("b"), track("c")];
+        app.shuffle = true;
+        // Cycle exhausted: everything already played.
+        for id in ["a", "b", "c"] {
+            app.shuffle_played.insert(id.to_string());
+        }
+        let next = app.compute_next(1, true);
+        assert!(next.is_some(), "repeat all recycles the queue");
+        assert_ne!(
+            next,
+            Some(1),
+            "never repeats the current track back-to-back"
+        );
+    }
+
+    #[test]
+    fn number_keys_jump_to_sections() {
+        let mut app = App::new_for_tests();
+        app.jump_to_section(5);
+        assert_eq!(app.section, Section::Fila);
+        assert_eq!(app.sidebar_index, 5);
+        assert_eq!(app.focus, Focus::Main);
+        // Out of range is a no-op.
+        app.jump_to_section(99);
+        assert_eq!(app.section, Section::Fila);
+    }
+
+    #[test]
+    fn page_selection_saturates_at_the_list_edges() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Fila;
+        app.queue = vec![track("a"), track("b"), track("c")];
+        app.list_state.select(Some(1));
+        app.page_selection(10);
+        assert_eq!(app.list_state.selected(), Some(2), "clamps to the end");
+        app.page_selection(-10);
+        assert_eq!(app.list_state.selected(), Some(0), "clamps to the start");
+    }
+
+    #[test]
+    fn session_expiry_maps_to_the_dedicated_message() {
+        let message = client_error_message("Could not load library", ProviderError::SessionExpired);
         assert!(matches!(message, Msg::SessionExpired));
+    }
+
+    #[test]
+    fn home_failed_preserves_cached_shelves_and_clears_the_spinner() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        app.begin_task();
+
+        app.tx.send(Msg::HomeFailed("boom".to_string())).unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.home.len(),
+            2,
+            "cached shelves survive a failed background refresh"
+        );
+        assert_eq!(app.home_error.as_deref(), Some("boom"));
+        assert!(!app.is_loading(), "the spinner is released on failure");
+        assert!(
+            app.status.contains('R'),
+            "status hints at the retry key: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn home_sections_success_clears_a_previous_error() {
+        let mut app = App::new_for_tests();
+        app.home_error = Some("boom".to_string());
+
+        app.tx.send(Msg::HomeSections(Vec::new())).unwrap();
+        app.drain_messages();
+
+        assert!(
+            app.home_error.is_none(),
+            "a successful load clears the stale error"
+        );
+    }
+
+    #[test]
+    fn load_home_without_the_home_capability_creates_no_task() {
+        let mut mock = crate::provider::mock::MockProvider::default();
+        mock.capabilities.home = false;
+        let mut app = App::with_provider(std::sync::Arc::new(mock));
+
+        app.load_home();
+
+        assert!(
+            !app.is_loading(),
+            "no capability means no task, hence no spinner"
+        );
+    }
+
+    // --- Etapa 6: animações time-based + reduced motion ---------------
+
+    #[test]
+    fn kick_animation_is_a_no_op_under_reduced_motion() {
+        let mut app = App::new_for_tests();
+        app.reduced_motion = true;
+        app.kick_animation(std::time::Duration::from_millis(500));
+        assert!(
+            !app.animating(),
+            "reduced motion must never hold the fast redraw tier open"
+        );
+    }
+
+    #[test]
+    fn kick_animation_scales_the_window_by_animation_speed() {
+        // Same base duration, three speeds: the resulting deadline must
+        // order Slow > Normal > Fast, matching `AnimationSpeed::factor`.
+        let base = std::time::Duration::from_millis(200);
+        let deadline_for = |speed: AnimationSpeed| {
+            let mut app = App::new_for_tests();
+            app.animation_speed = speed;
+            let before = std::time::Instant::now();
+            app.kick_animation(base);
+            app.animate_until.expect("kick sets a deadline") - before
+        };
+        let fast = deadline_for(AnimationSpeed::Fast);
+        let normal = deadline_for(AnimationSpeed::Normal);
+        let slow = deadline_for(AnimationSpeed::Slow);
+        assert!(
+            fast < normal,
+            "fast ({fast:?}) must be shorter than normal ({normal:?})"
+        );
+        assert!(
+            normal < slow,
+            "normal ({normal:?}) must be shorter than slow ({slow:?})"
+        );
+    }
+
+    #[test]
+    fn animating_expires_after_the_kicked_window_elapses() {
+        let mut app = App::new_for_tests();
+        // A 1ms kick is effectively already expired by the time the assert
+        // below runs — no sleep needed in the test.
+        app.kick_animation(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(!app.animating(), "the animation window must expire");
+    }
+
+    #[test]
+    fn needs_fast_animation_is_true_while_animating_even_with_nothing_playing() {
+        let mut app = App::new_for_tests();
+        assert!(!app.needs_fast_animation(), "idle app needs no animation");
+        app.kick_animation(std::time::Duration::from_millis(500));
+        assert!(
+            app.needs_fast_animation(),
+            "a kicked-off transition holds the fast tier even without playback"
+        );
+    }
+
+    #[test]
+    fn reduced_motion_drops_the_fast_tier_even_while_the_visualizer_would_animate() {
+        let mut app = App::new_for_tests();
+        app.reduced_motion = true;
+        app.section = Section::Inicio;
+        app.current = Some(Track::default());
+        // Not paused: without `reduced_motion` this would need the fast tier
+        // (Home visualizer). Under `reduced_motion`, it must not.
+        assert!(!app.player.is_paused());
+        assert!(
+            !app.needs_fast_animation(),
+            "reduced motion falls back to the 200ms tier for continuous drivers"
+        );
+        assert!(
+            app.needs_animation(),
+            "playback progress still animates at the economy tier"
+        );
+    }
+
+    #[test]
+    fn moving_the_home_selection_marks_the_change_and_kicks_the_fast_tier() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.home = home_sections();
+        app.list_state.select(Some(0));
+        assert!(app.selection_changed_at.is_none());
+
+        app.move_home(HomeDirection::Down);
+
+        assert!(
+            app.selection_changed_at.is_some(),
+            "move_home marks the selection as just-changed"
+        );
+        assert!(
+            app.needs_fast_animation(),
+            "the selection-change kick holds the fast tier"
+        );
+    }
+
+    #[test]
+    fn move_selection_marks_the_change_only_in_the_home_section() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Fila;
+        app.queue = vec![track("a"), track("b")];
+        app.move_selection(1);
+        assert!(
+            app.selection_changed_at.is_none(),
+            "the queue section has no card-reveal transition to drive"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_a_track_marks_track_changed_at_and_kicks_the_fast_tier() {
+        // `start_current` spawns background tasks (audio resolution, lyrics,
+        // artwork), so this needs a real Tokio runtime, like
+        // `entering_a_recent_home_card_preserves_history_order_and_selected_index`
+        // above.
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a")];
+        app.queue_index = Some(0);
+        let before = std::time::Instant::now();
+
+        app.start_current();
+
+        assert!(app.track_changed_at >= before);
+        assert!(
+            app.needs_fast_animation(),
+            "starting a track kicks the fast tier for the metadata fade-in"
+        );
     }
 }

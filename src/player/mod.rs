@@ -1,9 +1,10 @@
 //! Player de áudio.
 //!
 //! A reprodução é feita com a crate `rodio`, rodando em uma thread dedicada
-//! (a `OutputStream` do rodio não é `Send`). A resolução do stream de áudio a
-//! partir do YouTube Music é feita com o `yt-dlp`, que baixa a melhor faixa de
-//! áudio para um arquivo temporário reproduzido em seguida.
+//! (a `OutputStream` do rodio não é `Send`). A resolução do stream de áudio
+//! fica a cargo de cada provedor (`MusicProvider::resolve_playable`); este
+//! módulo mantém apenas o playback e os utilitários de cache/preparo de
+//! arquivos locais que qualquer provedor pode reutilizar.
 
 use anyhow::{anyhow, Result};
 use std::fs::File;
@@ -184,17 +185,16 @@ impl AudioPlayer {
 
     /// Avança `secs` segundos na faixa atual.
     pub fn seek_forward(&mut self, secs: u64) {
-        let target = self.position() + Duration::from_secs(secs);
-        {
-            let mut s = self.state.lock().unwrap();
-            s.position = target;
-        }
-        let _ = self.tx.send(Cmd::Seek(target));
+        self.seek_to(self.position() + Duration::from_secs(secs));
     }
 
     /// Retrocede `secs` segundos na faixa atual.
     pub fn seek_backward(&mut self, secs: u64) {
-        let target = self.position().saturating_sub(Duration::from_secs(secs));
+        self.seek_to(self.position().saturating_sub(Duration::from_secs(secs)));
+    }
+
+    /// Salta para uma posição absoluta na faixa atual (seek do MPRIS).
+    pub fn seek_to(&mut self, target: Duration) {
         {
             let mut s = self.state.lock().unwrap();
             s.position = target;
@@ -344,8 +344,51 @@ fn is_playable_ext(ext: &str) -> bool {
     matches!(ext, "aac" | "mp3" | "ogg" | "oga" | "flac" | "wav")
 }
 
+/// Extensões de arquivos parciais/incompletos do yt-dlp (nunca reproduzir,
+/// nunca remover: pode haver um download em andamento usando-os).
+pub(crate) fn is_partial(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("part" | "ytdl")
+    )
+}
+
+/// Limite de áudios mantidos no cache da sessão. O diretório fica no tmp do
+/// sistema — tmpfs (RAM) em várias distros — então uma sessão longa de rádio
+/// não pode acumular faixas sem limite.
+const MAX_CACHED_TRACKS: usize = 24;
+
+/// Remove os áudios menos recentes quando o cache passa de
+/// [`MAX_CACHED_TRACKS`], sem tocar em `keep` (a faixa recém-resolvida) nem
+/// em downloads parciais em andamento. Em Linux, apagar um arquivo ainda
+/// aberto pelo player é seguro (o descritor continua válido); noutros SOs a
+/// remoção falha e é ignorada.
+pub(crate) fn evict_cache(dir: &std::path::Path, keep: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && !is_partial(p) && p != keep)
+        .filter_map(|p| {
+            let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
+            Some((p, modified))
+        })
+        .collect();
+    // `keep` conta como um dos MAX_CACHED_TRACKS.
+    if files.len() < MAX_CACHED_TRACKS {
+        return;
+    }
+    files.sort_by_key(|(_, modified)| *modified);
+    let excess = files.len() + 1 - MAX_CACHED_TRACKS;
+    for (path, _) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Procura no cache um arquivo de áudio já pronto para tocar para o `video_id`.
-fn find_cached(dir: &std::path::Path, video_id: &str) -> Option<PathBuf> {
+pub(crate) fn find_cached(dir: &std::path::Path, video_id: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -375,7 +418,7 @@ fn find_cached(dir: &std::path::Path, video_id: &str) -> Option<PathBuf> {
 /// 3. Se a cópia falhar (ex.: áudio `opus`), transcodifica para `mp3`.
 /// 4. Sem `ffmpeg` disponível, devolve o arquivo original (o player captura
 ///    eventual falha de decodificação sem derrubar o app).
-fn prepare_for_playback(src: PathBuf) -> PathBuf {
+pub(crate) fn prepare_for_playback(src: PathBuf) -> PathBuf {
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
@@ -419,104 +462,4 @@ fn prepare_for_playback(src: PathBuf) -> PathBuf {
 
 fn file_is_non_empty(p: &std::path::Path) -> bool {
     std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
-}
-
-/// Resolve e baixa o áudio de uma faixa do YouTube Music para um arquivo
-/// temporário, usando `yt-dlp`. Retorna o caminho do arquivo baixado.
-///
-/// Otimizações:
-/// - **Sem transcodificação**: baixa preferencialmente o formato `m4a` (AAC),
-///   que o `symphonia` decodifica nativamente, evitando a etapa lenta de
-///   conversão para mp3 via ffmpeg.
-/// - **Cache**: se o áudio da faixa já foi baixado nesta sessão, reutiliza o
-///   arquivo em vez de baixar de novo (replay instantâneo / prefetch).
-///
-/// Esta função é bloqueante e deve ser executada em uma task dedicada.
-/// `cookies` é o caminho opcional para um arquivo de cookies (contorna a
-/// verificação anti-bot do YouTube em alguns ambientes/IPs).
-pub fn download_audio(watch_url: &str, video_id: &str, cookies: Option<&str>) -> Result<PathBuf> {
-    let dir = temp_dir();
-    std::fs::create_dir_all(&dir)?;
-
-    // Cache: reutiliza o arquivo já baixado para esta faixa.
-    if !video_id.is_empty() {
-        if let Some(cached) = find_cached(&dir, video_id) {
-            return Ok(cached);
-        }
-    }
-
-    let out_template = dir.join("%(id)s.%(ext)s");
-
-    let mut cmd = Command::new("yt-dlp");
-    cmd.arg("--no-playlist")
-        .arg("--quiet")
-        .arg("--no-warnings")
-        // Prefere m4a/AAC (decodificável direto pelo symphonia), sem re-encode.
-        .arg("-f")
-        .arg("bestaudio[ext=m4a]/bestaudio")
-        // Usa deno como runtime JS e baixa o solver de desafios quando preciso.
-        .arg("--js-runtimes")
-        .arg("deno")
-        .arg("--remote-components")
-        .arg("ejs:github")
-        .arg("-o")
-        .arg(&out_template)
-        .arg("--print")
-        .arg("after_move:filepath")
-        .arg(watch_url);
-
-    if let Some(c) = cookies {
-        cmd.arg("--cookies").arg(c);
-    }
-
-    let output = cmd
-        .output()
-        .map_err(|e| anyhow!("não foi possível executar o yt-dlp ({e}). Ele está instalado?"))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "yt-dlp falhou: {}",
-            err.lines().last().unwrap_or("erro desconhecido")
-        ));
-    }
-
-    // O caminho final é impresso na última linha do stdout.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(path) = stdout.lines().rev().find(|l| !l.trim().is_empty()) {
-        let p = PathBuf::from(path.trim());
-        if p.exists() {
-            return Ok(prepare_for_playback(p));
-        }
-    }
-
-    // Fallback 1: procura no cache pelo id da faixa.
-    if !video_id.is_empty() {
-        if let Some(cached) = find_cached(&dir, video_id) {
-            return Ok(cached);
-        }
-    }
-
-    // Fallback 2: arquivo mais recente no diretório.
-    let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
-    for entry in std::fs::read_dir(&dir)?.flatten() {
-        let path = entry.path();
-        let is_partial = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e == "part" || e == "ytdl")
-            .unwrap_or(false);
-        if path.is_file() && !is_partial {
-            if let Ok(meta) = entry.metadata() {
-                if let Ok(modified) = meta.modified() {
-                    if newest.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
-                        newest = Some((path, modified));
-                    }
-                }
-            }
-        }
-    }
-    newest
-        .map(|(p, _)| prepare_for_playback(p))
-        .ok_or_else(|| anyhow!("arquivo de áudio não encontrado após o download"))
 }

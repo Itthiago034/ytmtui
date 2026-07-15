@@ -49,6 +49,9 @@ movimentos familiares de terminal e comandos de uma tecla.
 | Tecla | Ação |
 |---|---|
 | `g` | Entrar ou renovar cookies pelo navegador |
+| `↑` / `↓` ou `k` / `j` | Seleciona uma conta no diálogo de confirmação |
+| `Enter` | Confirma a conta selecionada do navegador |
+| `Esc` | Cancela a confirmação e preserva a conta atual |
 | `f` | Curtir/descurtir faixa atual quando conectado |
 
 ## Aparência

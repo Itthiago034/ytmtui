@@ -15,7 +15,8 @@ use super::{signin, stream, YtMusicClient, YtMusicError};
 use crate::config::{AuthenticationConfig, Config};
 use crate::models::{HomeSection, Lyrics, Playlist, SearchResults, Track};
 use crate::provider::{
-    AuthState, Capabilities, MusicProvider, ProviderError, Result, SignInPreview, SignInSummary,
+    AuthState, Capabilities, MusicProvider, ProviderError, Result, SignInAccount, SignInPreview,
+    SignInSummary,
 };
 
 impl From<YtMusicError> for ProviderError {
@@ -170,7 +171,7 @@ impl YtMusic {
     ) -> std::result::Result<SignInSummary, String>
     where
         P: FnOnce(&ActivationConfig) -> std::io::Result<()>,
-        B: FnOnce(&str, u8) -> std::result::Result<YtMusicClient, String>,
+        B: FnOnce(&str, u8) -> std::result::Result<(YtMusicClient, SignInAccount), String>,
     {
         let mut pending_guard = self
             .pending_sign_in
@@ -190,7 +191,12 @@ impl YtMusic {
 
         let prepared_path = pending.prepared.path.clone();
         let prepared_path_string = prepared_path.to_string_lossy().into_owned();
-        let client = build_client(&prepared_path_string, account_index)?;
+        let (client, revalidated_account) = build_client(&prepared_path_string, account_index)?;
+        if revalidated_account != account {
+            return Err(
+                "selected account changed before credentials could be activated".to_string(),
+            );
+        }
         let active_string = active.to_string_lossy().into_owned();
         let activation = ActivationConfig {
             method: pending.prepared.candidate.method.clone(),
@@ -346,8 +352,19 @@ impl MusicProvider for YtMusic {
                     .map_err(|error| std::io::Error::other(error.to_string()))
             },
             |path, account_index| {
-                YtMusicClient::with_cookies_for_account(path, account_index)
-                    .map_err(|_| "prepared credentials are invalid".to_string())
+                let client = YtMusicClient::with_cookies_for_account(path, account_index)
+                    .map_err(|_| "prepared credentials are invalid".to_string())?;
+                let identity = signin::block_on_current_runtime(client.get_account_identity())
+                    .map_err(|_| "prepared session could not be revalidated".to_string())?
+                    .ok_or_else(|| "prepared session could not be revalidated".to_string())?;
+                Ok((
+                    client,
+                    SignInAccount {
+                        index: account_index,
+                        name: identity.name,
+                        handle: identity.handle,
+                    },
+                ))
             },
         )
     }
@@ -496,7 +513,16 @@ mod tests {
                 0,
                 &active,
                 |_| Err(std::io::Error::other("synthetic persistence failure")),
-                |_, account_index| Ok(YtMusicClient::new_with_auth_user_for_test(account_index)),
+                |_, account_index| {
+                    Ok((
+                        YtMusicClient::new_with_auth_user_for_test(account_index),
+                        SignInAccount {
+                            index: account_index,
+                            name: "Prepared Account".to_string(),
+                            handle: None,
+                        },
+                    ))
+                },
             )
             .unwrap_err();
 
@@ -508,6 +534,81 @@ mod tests {
         assert!(!prepared.exists());
         assert!(provider.pending_sign_in.lock().unwrap().is_none());
         assert!(!provider.is_authenticated());
+        assert_eq!(provider.cookies().as_deref(), Some("old-active-path"));
+    }
+
+    #[test]
+    fn revalidation_failure_preserves_the_active_session_and_pending_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let active = temp.path().join("cookies.txt");
+        let prepared = temp.path().join("prepared.txt");
+        std::fs::write(&active, "old active credentials").unwrap();
+        std::fs::write(&prepared, "new prepared credentials").unwrap();
+        let provider = provider_for_test();
+        *provider.pending_sign_in.lock().unwrap() = Some(PendingSignIn {
+            id: 7,
+            prepared: prepared_credentials(prepared.clone()),
+        });
+
+        let error = provider
+            .activate_sign_in_with(
+                7,
+                0,
+                &active,
+                |_| panic!("persistence must not run before revalidation"),
+                |_, _| Err("prepared session expired".to_string()),
+            )
+            .unwrap_err();
+
+        assert!(error.contains("prepared session expired"));
+        assert_eq!(
+            std::fs::read_to_string(&active).unwrap(),
+            "old active credentials"
+        );
+        assert!(prepared.exists());
+        assert!(provider.pending_sign_in.lock().unwrap().is_some());
+        assert_eq!(provider.cookies().as_deref(), Some("old-active-path"));
+    }
+
+    #[test]
+    fn changed_revalidated_identity_preserves_the_active_session_and_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let active = temp.path().join("cookies.txt");
+        let prepared = temp.path().join("prepared.txt");
+        std::fs::write(&active, "old active credentials").unwrap();
+        std::fs::write(&prepared, "new prepared credentials").unwrap();
+        let provider = provider_for_test();
+        *provider.pending_sign_in.lock().unwrap() = Some(PendingSignIn {
+            id: 7,
+            prepared: prepared_credentials(prepared.clone()),
+        });
+
+        let error = provider
+            .activate_sign_in_with(
+                7,
+                0,
+                &active,
+                |_| panic!("persistence must not run before revalidation"),
+                |_, account_index| {
+                    Ok((
+                        YtMusicClient::new_with_auth_user_for_test(account_index),
+                        SignInAccount {
+                            index: account_index,
+                            name: "Different Account".to_string(),
+                            handle: None,
+                        },
+                    ))
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.contains("selected account changed"));
+        assert_eq!(
+            std::fs::read_to_string(&active).unwrap(),
+            "old active credentials"
+        );
+        assert!(prepared.exists());
+        assert!(provider.pending_sign_in.lock().unwrap().is_some());
         assert_eq!(provider.cookies().as_deref(), Some("old-active-path"));
     }
 }

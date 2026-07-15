@@ -479,7 +479,7 @@ where
     Ok(())
 }
 
-fn block_on_current_runtime<F>(future: F) -> F::Output
+pub(super) fn block_on_current_runtime<F>(future: F) -> F::Output
 where
     F: std::future::Future,
 {

@@ -42,10 +42,32 @@ impl BrowserCandidate {
     }
 
     pub fn yt_dlp_argument(&self) -> String {
-        match (&*self.method, &self.profile_path) {
-            ("firefox", Some(profile)) => format!("firefox:{}", profile.display()),
-            _ => self.method.clone(),
-        }
+        self.profile_path
+            .as_deref()
+            .map(|profile| format!("{}:{}", self.method, profile.display()))
+            .or_else(|| {
+                self.profile_label
+                    .as_deref()
+                    .map(|profile| format!("{}:{profile}", self.method))
+            })
+            .unwrap_or_else(|| self.method.clone())
+    }
+
+    fn progress_label(&self) -> String {
+        let browser = match self.method.as_str() {
+            "firefox" => "Firefox",
+            "brave" => "Brave",
+            "chrome" => "Chrome",
+            "chromium" => "Chromium",
+            "edge" => "Edge",
+            "vivaldi" => "Vivaldi",
+            "opera" => "Opera",
+            _ => "browser",
+        };
+        self.profile_label
+            .as_deref()
+            .map(|profile| format!("{browser} / {profile}"))
+            .unwrap_or_else(|| browser.into())
     }
 }
 
@@ -135,7 +157,8 @@ where
 
     let mut failures = Vec::new();
     for candidate in candidates {
-        progress("preparing browser credentials".into());
+        let candidate_label = candidate.progress_label();
+        progress(format!("Trying {candidate_label}…"));
         let temporary = tempfile::Builder::new()
             .prefix(PREPARED_FILE_PREFIX)
             .tempfile_in(config_dir)
@@ -150,7 +173,7 @@ where
 
         if let Err(error) = backend.export(&candidate, temporary.path()) {
             let reason = error.sanitized_reason().to_string();
-            progress(reason.clone());
+            progress(format!("{candidate_label}: {reason}"));
             failures.push(CandidateFailure::sanitized(&candidate, reason));
             continue;
         }
@@ -161,13 +184,13 @@ where
             Ok(_) => {
                 let error = SignInError::NoIdentifiableAccount;
                 let reason = error.sanitized_reason().to_string();
-                progress(reason.clone());
+                progress(format!("{candidate_label}: {reason}"));
                 failures.push(CandidateFailure::sanitized(&candidate, reason));
                 continue;
             }
             Err(error) => {
                 let reason = error.sanitized_reason().to_string();
-                progress(reason.clone());
+                progress(format!("{candidate_label}: {reason}"));
                 failures.push(CandidateFailure::sanitized(&candidate, reason));
                 continue;
             }
@@ -302,14 +325,23 @@ fn chromium_has_cookies(base: &Path) -> bool {
         .any(|p| p.join("Cookies").is_file() || p.join("Network/Cookies").is_file())
 }
 
-/// Best Firefox profile directory when Firefox keeps its profiles in the
-/// XDG location (`~/.config/mozilla/firefox`) instead of `~/.mozilla` —
-/// common on distros that patch Firefox for XDG dirs (e.g. CachyOS), where
-/// yt-dlp's default lookup misses it. Prefers the `default-release` profile
-/// and requires an actual `cookies.sqlite`, which also keeps
-/// profile-sync-daemon `-backup` copies from shadowing the live profile.
-fn firefox_xdg_profile(home: &Path) -> Option<PathBuf> {
-    let base = home.join(".config/mozilla/firefox");
+/// Finds a Firefox profile with a real cookie database. Both the traditional
+/// `~/.mozilla` and XDG locations can coexist; callers preserve their order
+/// and try every usable Firefox candidate before Chromium fallbacks.
+fn firefox_profile(base: &Path, preferred: Option<&str>) -> Option<PathBuf> {
+    preferred
+        .map(|profile| base.join(profile))
+        .filter(|profile| profile.join("cookies.sqlite").is_file())
+        .or_else(|| {
+            ["default-release", "default"]
+                .iter()
+                .map(|profile| base.join(profile))
+                .find(|profile| profile.join("cookies.sqlite").is_file())
+        })
+        .or_else(|| firefox_profile_from_directory(base))
+}
+
+fn firefox_profile_from_directory(base: &Path) -> Option<PathBuf> {
     let mut profiles: Vec<PathBuf> = std::fs::read_dir(base)
         .ok()?
         .flatten()
@@ -356,21 +388,11 @@ pub fn detect_browser_candidates(
     };
 
     let mut candidates = Vec::new();
-    let firefox_base = home.join(".mozilla/firefox");
-    if firefox_base.is_dir() {
-        let mut candidate = BrowserCandidate::firefox(None);
-        candidate.profile_label = preferred_profile_label(
-            &firefox_base,
-            preferred_for("firefox"),
-            &["default-release", "default"],
-        );
-        candidates.push(candidate);
-    } else {
-        let xdg_base = home.join(".config/mozilla/firefox");
-        let preferred_xdg = preferred_for("firefox")
-            .map(|profile| xdg_base.join(profile))
-            .filter(|profile| profile.join("cookies.sqlite").is_file());
-        if let Some(profile) = preferred_xdg.or_else(|| firefox_xdg_profile(home)) {
+    for firefox_base in [
+        home.join(".mozilla/firefox"),
+        home.join(".config/mozilla/firefox"),
+    ] {
+        if let Some(profile) = firefox_profile(&firefox_base, preferred_for("firefox")) {
             candidates.push(BrowserCandidate::firefox(Some(profile)));
         }
     }
@@ -661,7 +683,7 @@ mod tests {
         assert_eq!(error.to_string(), "all browser attempts failed");
         assert_eq!(
             progress.lock().unwrap().last().unwrap(),
-            "browser export failed"
+            "Firefox: browser export failed"
         );
         assert!(!progress
             .lock()
@@ -835,8 +857,13 @@ mod tests {
                 .join(".config/BraveSoftware/Brave-Browser/Default"),
         )
         .unwrap();
-        std::fs::create_dir_all(home.path().join(".mozilla/firefox")).unwrap();
-        assert_eq!(detect_browsers(home.path()), vec!["firefox"]);
+        let firefox = home.path().join(".mozilla/firefox/default-release");
+        std::fs::create_dir_all(&firefox).unwrap();
+        std::fs::write(firefox.join("cookies.sqlite"), "").unwrap();
+        assert_eq!(
+            detect_browsers(home.path()),
+            vec![format!("firefox:{}", firefox.display())]
+        );
 
         // Once the cookie db exists, Brave becomes the fallback; Firefox
         // stays first so `g` uses the account the user chose there.
@@ -846,13 +873,21 @@ mod tests {
             "",
         )
         .unwrap();
-        assert_eq!(detect_browsers(home.path()), vec!["firefox", "brave"]);
+        assert_eq!(
+            detect_browsers(home.path()),
+            vec![
+                format!("firefox:{}", firefox.display()),
+                "brave:Default".to_string()
+            ]
+        );
     }
 
     #[test]
     fn typed_detection_keeps_firefox_first_when_brave_profile_is_saved() {
         let home = tempfile::tempdir().expect("temporary home");
-        std::fs::create_dir_all(home.path().join(".mozilla/firefox")).unwrap();
+        let firefox = home.path().join(".mozilla/firefox/default-release");
+        std::fs::create_dir_all(&firefox).unwrap();
+        std::fs::write(firefox.join("cookies.sqlite"), "").unwrap();
         for profile in ["Default", "Profile 1"] {
             let directory = home
                 .path()
@@ -880,7 +915,7 @@ mod tests {
             vec!["firefox", "brave", "chrome"]
         );
         assert_eq!(detected[1].profile_label.as_deref(), Some("Profile 1"));
-        assert_eq!(detected[1].yt_dlp_argument(), "brave");
+        assert_eq!(detected[1].yt_dlp_argument(), "brave:Profile 1");
     }
 
     #[test]
@@ -946,6 +981,21 @@ mod tests {
             detected[0].starts_with("firefox:") && detected[0].ends_with("abc.default-release"),
             "explicit profile path: {detected:?}"
         );
+    }
+
+    #[test]
+    fn empty_legacy_firefox_directory_does_not_hide_a_usable_xdg_profile() {
+        let home = tempfile::tempdir().expect("temporary home");
+        std::fs::create_dir_all(home.path().join(".mozilla/firefox")).unwrap();
+        let xdg_profile = home
+            .path()
+            .join(".config/mozilla/firefox/abc.default-release");
+        std::fs::create_dir_all(&xdg_profile).unwrap();
+        std::fs::write(xdg_profile.join("cookies.sqlite"), "").unwrap();
+
+        let detected = detect_browsers(home.path());
+
+        assert_eq!(detected, vec![format!("firefox:{}", xdg_profile.display())]);
     }
 
     #[test]

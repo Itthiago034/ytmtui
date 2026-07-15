@@ -410,7 +410,12 @@ pub fn detect_browser_candidates(
             .then(|| preferred_for("firefox"))
             .flatten();
         if let Some(profile) = firefox_profile(&firefox_base, preferred) {
-            candidates.push(BrowserCandidate::firefox(Some(profile)));
+            let already_detected = candidates
+                .iter()
+                .any(|candidate| candidate.profile_path.as_ref() == Some(&profile));
+            if !already_detected {
+                candidates.push(BrowserCandidate::firefox(Some(profile)));
+            }
         }
     }
 
@@ -992,6 +997,7 @@ mod tests {
 
         let detected = detect_browser_candidates(home.path(), &saved);
 
+        assert_eq!(detected.len(), 2, "the saved XDG profile is not retried");
         assert_eq!(detected[0].profile_path.as_deref(), Some(xdg.as_path()));
         assert_eq!(detected[1].profile_path.as_deref(), Some(legacy.as_path()));
     }

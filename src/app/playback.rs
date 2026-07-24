@@ -281,8 +281,25 @@ impl App {
             let tx3 = self.tx.clone();
             let provider = Arc::clone(&self.provider);
             let vid_art = track.video_id.clone();
+            let cache = crate::artwork::cache_dir();
             tokio::spawn(async move {
+                // Covers rarely change and are re-requested constantly —
+                // every repeat, every `p`, every revisit to the same album.
+                // Check the disk before the network.
+                if let Some(bytes) = cache
+                    .as_deref()
+                    .and_then(|dir| crate::artwork::read_cached(dir, &url))
+                {
+                    let _ = tx3.send(Msg::ArtworkBytes {
+                        video_id: vid_art,
+                        bytes,
+                    });
+                    return;
+                }
                 if let Ok(bytes) = provider.fetch_artwork(&url).await {
+                    if let Some(dir) = cache.as_deref() {
+                        crate::artwork::write_cached(dir, &url, &bytes);
+                    }
                     let _ = tx3.send(Msg::ArtworkBytes {
                         video_id: vid_art,
                         bytes,

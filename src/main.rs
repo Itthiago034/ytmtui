@@ -85,6 +85,12 @@ async fn main() -> Result<()> {
     // teclas multimídia). `None` em ambientes sem D-Bus — segue sem ele.
     let mut mpris = mpris::Mpris::new(app.tx.clone());
 
+    // Poda o cache de capas uma vez por sessão, fora da thread da UI: é
+    // I/O de diretório e não tem por que atrasar o primeiro frame.
+    if let Some(dir) = artwork::cache_dir() {
+        tokio::task::spawn_blocking(move || artwork::prune(&dir));
+    }
+
     // Carrega recomendações, biblioteca e nome da conta (se logado).
     app.load_home();
     app.load_library();

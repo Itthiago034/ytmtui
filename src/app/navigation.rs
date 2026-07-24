@@ -117,14 +117,15 @@ mod tests {
     #[test]
     fn number_keys_jump_to_sections() {
         let mut app = App::new_for_tests();
-        app.jump_to_section(5);
+        app.jump_to_section(6);
         assert_eq!(app.section, Section::Fila);
-        assert_eq!(app.sidebar_index, 5);
+        assert_eq!(app.sidebar_index, 6);
         assert_eq!(app.focus, Focus::Main);
         // Out of range is a no-op.
         app.jump_to_section(99);
         assert_eq!(app.section, Section::Fila);
     }
+
     #[test]
     fn page_selection_saturates_at_the_list_edges() {
         let mut app = App::new_for_tests();
@@ -136,6 +137,7 @@ mod tests {
         app.page_selection(-10);
         assert_eq!(app.list_state.selected(), Some(0), "clamps to the start");
     }
+
     #[test]
     fn move_selection_marks_the_change_only_in_the_home_section() {
         let mut app = App::new_for_tests();

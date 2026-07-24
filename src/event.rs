@@ -130,9 +130,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') if app.section == Section::Fila && app.focus == Focus::Main => {
             app.queue_clear()
         }
-        // Salto direto de seção: 1 = Início … 8 = Ajuda.
-        KeyCode::Char(c @ '1'..='8') => {
+        // Salto direto de seção: 1 = Início … 9 = Ajuda.
+        KeyCode::Char(c @ '1'..='9') => {
             app.jump_to_section(c as usize - '1' as usize);
+        }
+        // Abre a tela da faixa atual (capa grande, progresso, letra).
+        KeyCode::Char('w') => {
+            app.set_section(Section::Tocando);
+            app.sidebar_index = Section::Tocando.index();
+            app.focus = Focus::Main;
         }
         // Curte / descurte a faixa atual.
         KeyCode::Char('f') => app.like_current(),

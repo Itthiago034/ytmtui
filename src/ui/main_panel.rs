@@ -26,6 +26,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Playlists => "Playlists".to_string(),
         Section::Artistas => "Artists".to_string(),
         Section::Fila => "Queue".to_string(),
+        Section::Tocando => "Now Playing".to_string(),
         // The Lyrics panel names the track it's showing lyrics for.
         Section::Letra => match &app.current {
             Some(t) => crate::ui::truncate_chars(
@@ -79,6 +80,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Biblioteca => draw_library(f, app, area, block),
         Section::Playlists => draw_playlists(f, app, area, block),
         Section::Artistas => draw_artists(f, app, area, block),
+        Section::Tocando => super::now_playing_screen::draw(f, app, area, block),
         Section::Letra => draw_lyrics(f, app, area, block),
         Section::Ajuda => draw_help(f, app, area, block),
     }
@@ -984,7 +986,7 @@ const BAR_GLYPHS: [&str; 9] = ["  ", "▁ ", "▂ ", "▃ ", "▄ ", "▅ ", "�
 /// Glyph do peak cap (linha fina no alto da célula onde o pico está).
 const PEAK_GLYPH: &str = "▔ ";
 
-fn draw_bars(
+pub(super) fn draw_bars(
     f: &mut Frame,
     bars: &[f32],
     peaks: &[f32],
@@ -1241,7 +1243,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ("  ↑/↓  or  k/j", "move selection"),
         ("  PgUp/PgDn", "jump 10 items; Home/End first/last"),
         ("  mouse wheel", "scroll the list"),
-        ("  1..8", "jump straight to a section"),
+        ("  1..9", "jump straight to a section"),
         ("  ←/→  or  h/l", "switch between menu and list"),
         ("  Tab", "toggle focus menu/list"),
         ("  Enter", "play / open playlist / open artist"),
@@ -1270,6 +1272,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ("  z", "toggle shuffle"),
         ("  r", "repeat mode (off/all/one)"),
         ("  f", "like / unlike the current track"),
+        ("  w", "open Now Playing (big cover, lyric line)"),
         ("", ""),
         ("Appearance", ""),
         ("  t", "cycle the color theme"),

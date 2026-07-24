@@ -315,6 +315,7 @@ mod tests {
         assert_eq!(preview.id, 7);
         assert_eq!(selected, 0);
     }
+
     #[test]
     fn stale_sign_in_messages_cannot_publish_or_cancel_another_operation() {
         let mut app = App::new_for_tests();
@@ -354,6 +355,7 @@ mod tests {
         assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
         assert_ne!(app.cookies.as_deref(), Some("wrong-cookies.txt"));
     }
+
     #[test]
     fn stale_session_payloads_cannot_overwrite_a_newly_activated_account() {
         let mut app = App::new_for_tests();
@@ -399,6 +401,7 @@ mod tests {
         assert_eq!(app.home[0].title, "New home");
         assert_eq!(app.library[0].title, "New library");
     }
+
     #[tokio::test]
     async fn a_session_expiry_queued_before_sign_in_cannot_expire_the_new_account() {
         let mut app = App::new_for_tests();
@@ -428,6 +431,7 @@ mod tests {
         assert_eq!(app.authentication, AuthState::Authenticated);
         assert_eq!(app.account_name.as_deref(), Some("New Account"));
     }
+
     #[tokio::test]
     async fn confirming_sign_in_retires_the_previous_session_before_activation_runs() {
         let mut app = App::new_for_tests();

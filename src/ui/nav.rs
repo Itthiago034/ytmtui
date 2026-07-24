@@ -13,8 +13,8 @@ use crate::app::{App, AuthState, Focus, Section};
 
 /// Indexes (into `Section::ALL`) that start a new visual group; a blank
 /// separator row is drawn above each. Browse sections, then the playback
-/// pair (Queue/Lyrics), then Help.
-const GROUP_STARTS: [usize; 2] = [5, 7];
+/// group (Now Playing/Queue/Lyrics), then Help.
+const GROUP_STARTS: [usize; 2] = [5, 8];
 
 /// Rows taken by the header (blank, title, account, blank) plus the menu
 /// with its group separators.
@@ -63,14 +63,18 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
 /// Album art at the bottom of the column, below the menu, when a cover has
 /// been prepared and the terminal is tall enough.
+///
+/// This is a thumbnail, deliberately: the Now Playing section (`w`) is where
+/// the cover gets real room. Capping it low keeps the art visible on a
+/// standard 24-row terminal, which the menu alone nearly fills.
 fn draw_artwork(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(protocol) = app.artwork.as_mut() else {
         return;
     };
-    if area.height <= MENU_ROWS + 4 || area.width <= 4 {
+    if area.height <= MENU_ROWS + 2 || area.width <= 4 {
         return;
     }
-    let height = (area.height - MENU_ROWS - 2).min(9);
+    let height = (area.height - MENU_ROWS - 2).min(5);
     let art = Rect {
         x: area.x + 1,
         y: area.y + area.height - height - 1,

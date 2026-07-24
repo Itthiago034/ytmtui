@@ -233,6 +233,7 @@ mod tests {
             "selection follows VL2 to its new position"
         );
     }
+
     #[test]
     fn background_home_refresh_clamps_when_the_selected_item_is_gone() {
         let mut app = App::new_for_tests();
@@ -270,6 +271,7 @@ mod tests {
             "clamps to the nearest valid index instead of resetting to the top"
         );
     }
+
     #[test]
     fn background_library_refresh_preserves_selection_by_browse_id() {
         let mut app = App::new_for_tests();
@@ -306,6 +308,7 @@ mod tests {
             "selection follows L2 to its new position"
         );
     }
+
     #[test]
     fn first_home_load_still_selects_the_top_item() {
         let mut app = App::new_for_tests();
@@ -329,6 +332,7 @@ mod tests {
             "the very first load still selects the top item"
         );
     }
+
     #[tokio::test]
     async fn entering_a_recent_home_card_preserves_history_order_and_selected_index() {
         let mut app = App::new_for_tests();
@@ -357,12 +361,14 @@ mod tests {
             Some("r2")
         );
     }
+
     #[test]
     fn home_item_count_sums_across_sections_excluding_headers() {
         let mut app = App::new_for_tests();
         app.home = home_sections();
         assert_eq!(app.home_item_count(), 3);
     }
+
     #[test]
     fn home_total_count_puts_recent_tracks_before_recommendations() {
         let mut app = App::new_for_tests();
@@ -385,6 +391,7 @@ mod tests {
             Some("VL3")
         );
     }
+
     #[test]
     fn home_item_at_flattens_across_section_boundaries() {
         let mut app = App::new_for_tests();
@@ -403,6 +410,7 @@ mod tests {
         );
         assert!(app.home_item_at(3).is_none());
     }
+
     #[test]
     fn home_flat_index_of_finds_items_regardless_of_section() {
         let mut app = App::new_for_tests();
@@ -411,6 +419,7 @@ mod tests {
         assert_eq!(app.home_flat_index_of("VL3"), Some(2));
         assert_eq!(app.home_flat_index_of("missing"), None);
     }
+
     #[test]
     fn home_failed_preserves_cached_shelves_and_clears_the_spinner() {
         let mut app = App::new_for_tests();
@@ -433,6 +442,7 @@ mod tests {
             app.status
         );
     }
+
     #[test]
     fn home_sections_success_clears_a_previous_error() {
         let mut app = App::new_for_tests();
@@ -446,6 +456,7 @@ mod tests {
             "a successful load clears the stale error"
         );
     }
+
     #[test]
     fn load_home_without_the_home_capability_creates_no_task() {
         let mut mock = crate::provider::mock::MockProvider::default();

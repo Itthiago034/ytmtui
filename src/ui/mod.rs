@@ -15,6 +15,7 @@ mod authentication;
 mod main_panel;
 mod nav;
 mod now_playing;
+mod now_playing_screen;
 pub mod splash;
 pub mod state;
 
@@ -298,6 +299,7 @@ fn contextual_shortcuts(app: &App) -> &'static str {
         Section::Fila => "Enter play · d remove · J/K move · c clear · ? help",
         Section::Buscar => "Enter play · a queue · Space pause · / search · ? help",
         Section::Biblioteca => "g sign in · Enter open · / search · ? help · q quit",
+        Section::Tocando => "Space pause · n next · f like · ¶ lyrics · ? help",
         Section::Letra => "↑↓ scroll · / search · ? help · q quit",
         Section::Ajuda => "↑↓ scroll · / search · q quit",
         _ => "Enter open · / search · ? help · q quit",

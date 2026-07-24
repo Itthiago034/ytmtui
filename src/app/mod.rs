@@ -62,6 +62,7 @@ pub enum Section {
     Biblioteca,
     Playlists,
     Artistas,
+    Tocando,
     Fila,
     Letra,
     Ajuda,
@@ -69,12 +70,13 @@ pub enum Section {
 
 impl Section {
     /// Ordem de exibição na barra lateral.
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::Inicio,
         Section::Buscar,
         Section::Biblioteca,
         Section::Playlists,
         Section::Artistas,
+        Section::Tocando,
         Section::Fila,
         Section::Letra,
         Section::Ajuda,
@@ -88,6 +90,7 @@ impl Section {
             Section::Biblioteca => "Library",
             Section::Playlists => "Playlists",
             Section::Artistas => "Artists",
+            Section::Tocando => "Now Playing",
             Section::Fila => "Queue",
             Section::Letra => "Lyrics",
             Section::Ajuda => "Help",
@@ -104,6 +107,7 @@ impl Section {
             Section::Biblioteca => "♪",
             Section::Playlists => "♫",
             Section::Artistas => "◆",
+            Section::Tocando => "◉",
             Section::Fila => "≡",
             Section::Letra => "¶",
             Section::Ajuda => "?",

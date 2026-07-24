@@ -190,7 +190,7 @@ fn narrow_layout_uses_a_single_column_with_a_header_row() {
 
     // The first row is a compact navigation header, not a sidebar column.
     assert!(lines[0].contains("Home"), "header row: {:?}", lines[0]);
-    assert!(lines[0].contains("1/8"), "section position: {:?}", lines[0]);
+    assert!(lines[0].contains("1/9"), "section position: {:?}", lines[0]);
     // No wide-mode nav column: "Library" only exists in the sidebar list.
     let body = lines[1..].join("\n");
     assert!(
@@ -1389,5 +1389,66 @@ fn switching_sections_blanks_rows_that_have_not_arrived_yet() {
     assert_ne!(
         settled, opening,
         "rows should arrive in sequence when a section opens"
+    );
+}
+
+// --- Now Playing screen --------------------------------------------------
+
+#[test]
+fn now_playing_shows_the_track_at_every_terminal_size() {
+    // The screen degrades through three layouts; none of them may lose the
+    // track identity or panic.
+    for (width, height) in [(120u16, 40u16), (90, 24), (60, 15)] {
+        let mut app = playing_app();
+        app.section = Section::Tocando;
+        let screen = text(&render(&mut app, width, height));
+        assert!(
+            screen.contains("Yellow"),
+            "{width}x{height} lost the title:\n{screen}"
+        );
+        assert!(
+            screen.contains("Coldplay"),
+            "{width}x{height} lost the artist:\n{screen}"
+        );
+    }
+}
+
+#[test]
+fn now_playing_without_a_track_explains_itself() {
+    let mut app = App::new_for_tests();
+    app.section = Section::Tocando;
+    let screen = text(&render(&mut app, 100, 30));
+    assert!(
+        screen.contains("Nothing playing"),
+        "empty state should say so:\n{screen}"
+    );
+}
+
+#[test]
+fn now_playing_renders_a_progress_bar() {
+    let mut app = playing_app();
+    app.section = Section::Tocando;
+    let screen = text(&render(&mut app, 120, 40));
+    assert!(
+        screen.contains('●') && screen.contains('━'),
+        "progress bar should be drawn:\n{screen}"
+    );
+}
+
+#[test]
+fn w_opens_now_playing_and_moves_the_sidebar_with_it() {
+    let mut app = App::new_for_tests();
+    crate::event::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    assert_eq!(app.section, Section::Tocando);
+    assert_eq!(
+        app.sidebar_index,
+        Section::Tocando.index(),
+        "a later j/k must walk from the right base"
     );
 }

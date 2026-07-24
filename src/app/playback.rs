@@ -373,6 +373,7 @@ mod tests {
             "stale cover must not outlive playback"
         );
     }
+
     #[test]
     fn resize_rebuilds_artwork_from_the_stored_cover() {
         let mut app = App::new_for_tests();
@@ -395,6 +396,7 @@ mod tests {
         idle.rebuild_artwork();
         assert!(idle.artwork.is_none());
     }
+
     #[test]
     fn stop_clears_the_now_playing_state_but_keeps_the_queue() {
         let mut app = App::new_for_tests();

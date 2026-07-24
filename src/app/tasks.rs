@@ -433,6 +433,7 @@ mod tests {
         app.drain_messages();
         assert!(!app.is_loading());
     }
+
     #[test]
     fn stray_errors_never_underflow_the_busy_counter() {
         let mut app = App::new_for_tests();
@@ -446,6 +447,7 @@ mod tests {
         app.begin_task();
         assert!(app.is_loading());
     }
+
     #[test]
     fn background_library_refresh_does_not_clobber_the_status_bar() {
         let mut app = App::new_for_tests();
@@ -468,6 +470,7 @@ mod tests {
             "periodic refresh must not overwrite what the user is reading"
         );
     }
+
     #[test]
     fn session_expiry_maps_to_the_dedicated_message() {
         let message = client_error_message("Could not load library", ProviderError::SessionExpired);

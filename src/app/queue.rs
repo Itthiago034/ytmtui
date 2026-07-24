@@ -254,6 +254,7 @@ mod tests {
             app.status
         );
     }
+
     #[test]
     fn enqueueing_a_recent_home_track_does_not_interrupt_playback() {
         let playing = Track {
@@ -290,6 +291,7 @@ mod tests {
         );
         assert!(app.status.contains("adicionada à fila"));
     }
+
     #[test]
     fn removing_a_track_before_the_current_one_shifts_the_playing_index() {
         let mut app = queue_app();
@@ -299,6 +301,7 @@ mod tests {
         assert_eq!(app.queue_index, Some(0), "current track followed its move");
         assert_eq!(app.queue[0].video_id, "b");
     }
+
     #[test]
     fn the_playing_track_cannot_be_removed_from_the_queue() {
         let mut app = queue_app();
@@ -307,6 +310,7 @@ mod tests {
         assert_eq!(app.queue.len(), 4, "queue unchanged");
         assert_eq!(app.queue_index, Some(1));
     }
+
     #[test]
     fn removing_after_the_current_track_keeps_the_playing_index() {
         let mut app = queue_app();
@@ -317,6 +321,7 @@ mod tests {
         // Selection clamps to the new last row instead of dangling.
         assert_eq!(app.list_state.selected(), Some(2));
     }
+
     #[test]
     fn moving_a_track_follows_selection_and_repoints_the_playing_index() {
         let mut app = queue_app();
@@ -336,6 +341,7 @@ mod tests {
         app.queue_move_selected(-1);
         assert_eq!(app.queue[0].video_id, "a");
     }
+
     #[test]
     fn clearing_the_queue_keeps_only_the_playing_track() {
         let mut app = queue_app();
@@ -351,6 +357,7 @@ mod tests {
         assert!(stopped.queue.is_empty());
         assert_eq!(stopped.queue_index, None);
     }
+
     #[test]
     fn shuffle_visits_every_track_once_then_ends_when_repeat_is_off() {
         let mut app = App::new_for_tests();
@@ -374,6 +381,7 @@ mod tests {
         }
         assert_eq!(visited.len(), 4, "every track played exactly once");
     }
+
     #[test]
     fn shuffle_starts_a_new_cycle_when_repeat_all_wraps() {
         let mut app = App::new_for_tests();

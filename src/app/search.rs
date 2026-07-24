@@ -209,6 +209,7 @@ mod tests {
         assert_eq!(app.section, Section::Buscar);
         assert_eq!(app.sidebar_index, Section::Buscar.index());
     }
+
     #[test]
     fn search_hit_at_resolves_groups_in_display_order() {
         let app = mixed_search_app();
@@ -224,6 +225,7 @@ mod tests {
         );
         assert!(app.search_hit_at(5).is_none());
     }
+
     #[test]
     fn entering_a_song_in_mixed_results_seeds_a_radio_queue() {
         let mut app = mixed_search_app();
@@ -240,6 +242,7 @@ mod tests {
         assert_eq!(app.queue_index, Some(0));
         assert_eq!(app.pending_radio_seed.as_deref(), Some("s2"));
     }
+
     #[test]
     fn related_tracks_append_behind_the_playing_seed_without_duplicates() {
         let seed = Track {

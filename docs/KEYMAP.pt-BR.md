@@ -13,6 +13,7 @@ movimentos familiares de terminal e comandos de uma tecla.
 | `←` / `→` ou `h` / `l` | Alterna entre barra lateral e lista |
 | `Tab` | Alterna foco |
 | `Enter` | Toca uma música, abre artista, carrega álbum ou carrega playlist |
+| `1`…`9`, `0` | Vai direto para uma seção |
 | `?` | Abre ajuda |
 | `q` ou `Ctrl+C` | Sai |
 
@@ -33,6 +34,7 @@ movimentos familiares de terminal e comandos de uma tecla.
 | `p` | Faixa anterior |
 | `[` / `]` | Retrocede/avança 5 segundos |
 | `s` | Para |
+| `w` | Abre Now Playing (capa grande, progresso, espectro, linha da letra) |
 | `+` / `=` | Aumenta volume |
 | `-` / `_` | Diminui volume |
 
@@ -58,11 +60,17 @@ movimentos familiares de terminal e comandos de uma tecla.
 
 | Tecla | Ação |
 |---|---|
+| `,` | Abre os Ajustes |
+| `↑` / `↓` | Escolhe um ajuste (dentro dos Ajustes) |
+| `←` / `→` | Muda o ajuste selecionado (aplica na hora, salvo automaticamente) |
 | `t` | Troca o tema de cores e salva |
 
 ## Letras
 
 | Tecla | Ação |
 |---|---|
-| `j` / `k` | Rola letras simples manualmente |
 | posição da música | Avança letras sincronizadas automaticamente |
+| `↑` / `↓` ou `k` / `j` | Navega pelas linhas; pausa o auto-follow por 4 segundos |
+| `Enter` | Pula a reprodução para a linha sob o cursor |
+| `Home` | Volta a acompanhar a música |
+| `<` / `>` | Ajusta a sincronia da letra em 0,25s (salvo entre sessões) |

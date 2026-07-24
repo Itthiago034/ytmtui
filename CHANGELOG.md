@@ -4,6 +4,54 @@ Todas as mudanças relevantes deste projeto são documentadas aqui.
 
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 
+## [0.3.0] - 2026-07-23
+
+### Adicionado
+- **Tela Now Playing** (`w`): capa grande ao lado dos metadados em terminais
+  largos, empilhada em telas estreitas, e só texto quando não há espaço ou
+  capa. A capa é mantida quadrada em *células* do terminal (que são cerca de
+  duas vezes mais altas que largas), então não sai esticada.
+- **Tela de Ajustes** (`,`): tema, capa, densidade da Início, visualizador,
+  velocidade das animações, reduzir movimento, animação de entrada, intervalo
+  de sync e sincronia da letra — todos editáveis em tempo real, com a
+  interface por trás do painel servindo de preview. Cinco desses ajustes
+  existiam no `config.json` sem nenhuma forma de mudá-los sem editar o
+  arquivo à mão.
+- **Animação de entrada**: o wordmark se monta coluna a coluna, a tagline
+  aparece e o logo viaja até a barra lateral enquanto a interface real surge
+  por baixo. Qualquer tecla cancela (e ainda faz o que ela normalmente faria).
+  Desligável nos Ajustes e ignorada sob "reduzir movimento".
+- **Revelação escalonada** das linhas ao trocar de seção.
+- **Letras navegáveis**: `↑`/`↓` percorrem as linhas e pausam o auto-follow
+  por 4s, `Home` volta a acompanhar, `Enter` pula a reprodução para a linha
+  sob o cursor, e `<`/`>` ajustam a sincronia em 0,25s (salvo entre sessões e
+  exibido no título do painel). Letras sincronizadas antes não rolavam.
+- **Temas do usuário** em `~/.config/ytmtui/themes/*.toml`: só `name` e
+  `accent` são obrigatórios; o resto é derivado pela mesma escala de neutros
+  tingidos dos temas embutidos, e qualquer cor pode ser sobrescrita. Um
+  arquivo quebrado é ignorado e reportado na barra de status, nunca impede o
+  app de abrir.
+- **Cinco temas novos**: Catppuccin Mocha, Gruvbox, Nord, Dracula e Tokyo
+  Night.
+- **Cache de capas em disco** (`~/.cache/ytmtui/artwork`), podado no início da
+  sessão: repeat, `p` e revisitar um álbum não rebaixam mais a mesma imagem.
+
+### Corrigido
+- Resultados de busca que chegavam enquanto o usuário navegava em outra seção
+  eram aplicados ao estado mas ficavam invisíveis. Agora a seção **e** o
+  cursor da barra lateral vão para Buscar.
+
+### Alterado
+- **Arquitetura**: `app.rs` (3287 linhas) foi dividido em `src/app/` por
+  assunto — fila, playback, busca, Início, navegação, tarefas, preferências —
+  e o estado de apresentação (offsets de rolagem, geometria da grade, tempo de
+  animação) saiu do domínio para `ui::state`. Um único `AnimationClock` passa
+  a ser a fonte de verdade do tempo das animações, que antes era reimplementado
+  em cada ponto de uso.
+- A miniatura da capa na barra lateral caiu de 9 para 5 linhas: com dez seções
+  o menu quase preenche um terminal de 24 linhas, e a capa grande tem tela
+  própria agora.
+
 ## [0.2.0] - 2026-07-07
 
 ### Adicionado

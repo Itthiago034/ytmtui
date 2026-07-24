@@ -1,6 +1,6 @@
 [package]
 name = "ytmtui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Cliente TUI para YouTube Music escrito em Rust com Ratatui"

@@ -31,8 +31,8 @@ ytmtui is a Rust terminal client for YouTube Music. It uses:
                          ▲ reads state                  │ mutates
                          │                              ▼
                  ┌───────┴───────────────────────────────────────┐
-                 │                    app.rs                       │
-                 │ central state, queue, sections, tasks, messages │
+                 │                    app/                         │
+                 │ central state, split by concern (see below)     │
                  └───┬───────────────┬───────────────┬────────────┘
                      │ spawn         │ spawn         │ config/theme
                      ▼               ▼               ▼
@@ -50,11 +50,21 @@ ytmtui is a Rust terminal client for YouTube Music. It uses:
 |---|---|
 | `src/main.rs` | Terminal setup, panic hook, image-protocol detection, initial app load, main loop. |
 | `src/lib.rs` | Public module wiring for tests and examples. |
-| `src/app.rs` | Central application state, async task coordination, queue, sections, playback orchestration, recent history. |
-| `src/app/authentication.rs` | Browser-cookie discovery/import through `yt-dlp --cookies-from-browser`. |
+| `src/app/mod.rs` | The `App` struct, the types the UI reads (`Section`, `Focus`, `RepeatMode`, `Msg`), and the two constructors. |
+| `src/app/tasks.rs` | In-flight task counter, `Msg` drain, MPRIS events, periodic `tick`. |
+| `src/app/queue.rs` | Queue membership and ordering, shuffle cycle, repeat, next track. |
+| `src/app/playback.rs` | Starting and moving between tracks, seeking, the current track's cover. |
+| `src/app/search.rs` | Search, and opening artists/albums/playlists from its results. |
+| `src/app/home.rs` | Recommendation shelves, library, local recently-played history. |
+| `src/app/navigation.rs` | Selection, section and sidebar movement. |
+| `src/app/animation.rs` | Which redraw tier the main loop should use. |
+| `src/app/settings.rs` | Theme set, config persistence, account identity. |
+| `src/app/preferences.rs` | The editable `SettingRow`s behind the Settings section. |
+| `src/app/authentication.rs` | Two-phase sign-in (prepare → activate) through `yt-dlp --cookies-from-browser`. |
+| `src/artwork.rs` | Album-art picker construction and the on-disk cover cache. |
 | `src/doctor.rs` | Read-only runtime, browser, cookie metadata, connectivity, and configured-account diagnostics. |
 | `src/config.rs` | Persistent JSON config: volume, shuffle, repeat, cookies, theme, username, sync interval. |
-| `src/theme.rs` | Accent themes and tinted UI palette helpers. |
+| `src/theme.rs` | Built-in presets, user themes from `~/.config/ytmtui/themes/*.toml`, tinted neutral derivation, color mixing. |
 | `src/event.rs` | Keyboard events mapped to `App` methods. |
 | `src/visualizer.rs` | FFT spectrum analyzer fed by decoded playback samples. |
 | `src/lyrics.rs` | UI-facing lyrics state and active-line advancement. |
@@ -68,6 +78,10 @@ ytmtui is a Rust terminal client for YouTube Music. It uses:
 | `src/ui/nav.rs` | Sidebar identity, sections, account state, and album art area. |
 | `src/ui/main_panel.rs` | Home, search, lists, queue, lyrics, help, and empty states. |
 | `src/ui/now_playing.rs` | Compact now-playing line and progress display. |
+| `src/ui/now_playing_screen.rs` | The Now Playing section: large cover, metadata, spectrum, current lyric line. |
+| `src/ui/settings.rs` | The Settings section. |
+| `src/ui/splash.rs` | The entry animation and the shared wordmark. |
+| `src/ui/state.rs` | Presentation state: scroll offsets, grid geometry, the animation clock, the lyrics view. |
 
 ## Runtime Model
 
@@ -84,6 +98,19 @@ inside drawing:
 
 The `rodio::OutputStream` is not `Send`, so playback lives on a dedicated audio
 thread controlled by commands such as play, pause, stop, seek, and volume.
+
+## State Ownership
+
+`App` holds the domain: what is playing, what is queued, what the provider
+returned. Everything that only a renderer reads — scroll offsets, the Home
+grid's column count, animation timing, the lyrics view — lives in
+`ui::state::UiState`, reached as `app.ui`.
+
+`AnimationClock` is the single source of truth for animation timing. It hands
+out elapsed time already scaled by `AnimationSpeed::factor`, so every animated
+element measures its progress in the same units and the speed preference means
+the same thing everywhere. Durations that are *set* rather than measured (the
+fast-redraw window) multiply by the same factor instead.
 
 ## Doctor Flow
 

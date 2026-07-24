@@ -13,6 +13,7 @@ terminal movement keys and single-letter commands.
 | `←` / `→` or `h` / `l` | Switch between sidebar and list |
 | `Tab` | Toggle focus |
 | `Enter` | Play a song, open an artist, load an album, or load a playlist |
+| `1`…`9`, `0` | Jump straight to a section |
 | `?` | Open help |
 | `q` or `Ctrl+C` | Quit |
 
@@ -33,6 +34,7 @@ terminal movement keys and single-letter commands.
 | `p` | Previous track |
 | `[` / `]` | Seek backward/forward 5 seconds |
 | `s` | Stop |
+| `w` | Open Now Playing (large cover, progress, spectrum, lyric line) |
 | `+` / `=` | Volume up |
 | `-` / `_` | Volume down |
 
@@ -58,11 +60,17 @@ terminal movement keys and single-letter commands.
 
 | Key | Action |
 |---|---|
+| `,` | Open Settings |
+| `↑` / `↓` | Pick a setting (in Settings) |
+| `←` / `→` | Change the selected setting (applies immediately, saved automatically) |
 | `t` | Cycle color theme and save it |
 
 ## Lyrics
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Scroll plain lyrics manually |
 | playback position | Advances synced lyrics automatically |
+| `↑` / `↓` or `k` / `j` | Browse lines; pauses auto-follow for 4 seconds |
+| `Enter` | Jump playback to the line under the cursor |
+| `Home` | Resume following the song |
+| `<` / `>` | Nudge lyric timing by 0.25s (saved across sessions) |

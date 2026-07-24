@@ -14,8 +14,9 @@ use crate::config::AnimationSpeed;
 #[derive(Debug)]
 pub struct UiState {
     pub anim: AnimationClock,
-    /// Manual scroll offset of the Lyrics panel.
-    pub lyrics_scroll: u16,
+    /// State of the Lyrics panel: scroll, browsing cursor, auto-follow and
+    /// the timing correction.
+    pub lyrics: LyricsView,
     /// Manual scroll offset of the Help panel. Clamped at render time to the
     /// real text height, which only the renderer knows.
     pub help_scroll: u16,
@@ -30,10 +31,15 @@ pub struct UiState {
 }
 
 impl UiState {
-    pub fn new(speed: AnimationSpeed, reduced_motion: bool, splash: bool) -> Self {
+    pub fn new(
+        speed: AnimationSpeed,
+        reduced_motion: bool,
+        splash: bool,
+        lyrics_offset_ms: i64,
+    ) -> Self {
         Self {
             anim: AnimationClock::new(speed, reduced_motion),
-            lyrics_scroll: 0,
+            lyrics: LyricsView::new(lyrics_offset_ms),
             help_scroll: 0,
             home_columns: 1,
             // Reduced motion outranks the preference: it exists to stop
@@ -60,6 +66,116 @@ impl UiState {
     /// user who wants to get straight to work never waits it out.
     pub fn skip_splash(&mut self) {
         self.splash_running = false;
+    }
+}
+
+/// How long auto-follow stays out of the way after a manual scroll.
+///
+/// Long enough to read a verse ahead without the view yanking back, short
+/// enough that a user who scrolled by accident isn't stranded.
+const FOLLOW_SUSPEND: Duration = Duration::from_secs(4);
+
+/// The Lyrics panel's view state.
+#[derive(Debug)]
+pub struct LyricsView {
+    /// Scroll offset for plain (unsynced) lyrics, which have no lines to
+    /// put a cursor on.
+    pub scroll: u16,
+    /// Line the user has browsed to in synced lyrics. `None` while
+    /// auto-follow is driving the view.
+    cursor: Option<usize>,
+    /// When auto-follow resumes; `None` means it is following right now.
+    suspended_until: Option<Instant>,
+    /// When the sung line last changed, for its entry fade.
+    line_changed_at: Option<Instant>,
+    /// Correction applied to every lyric timestamp, in milliseconds.
+    /// Positive means the lyrics were running late and are pulled earlier.
+    /// InnerTube timings routinely drift a beat either way.
+    offset_ms: i64,
+}
+
+impl LyricsView {
+    fn new(offset_ms: i64) -> Self {
+        Self {
+            scroll: 0,
+            cursor: None,
+            suspended_until: None,
+            line_changed_at: None,
+            offset_ms,
+        }
+    }
+
+    /// Whether the view is currently tracking playback.
+    pub fn following(&self) -> bool {
+        // `Option::is_none_or` would read better but is newer than this
+        // crate's MSRV (1.75).
+        match self.suspended_until {
+            Some(until) => Instant::now() >= until,
+            None => true,
+        }
+    }
+
+    /// The line the user is looking at: their cursor while browsing, or
+    /// `active` (the line being sung) while following.
+    pub fn focused_line(&self, active: Option<usize>) -> Option<usize> {
+        if self.following() {
+            active
+        } else {
+            self.cursor.or(active)
+        }
+    }
+
+    /// Moves the browsing cursor by `delta`, clamped to `len`, and holds
+    /// auto-follow off while the user reads.
+    pub fn browse(&mut self, delta: isize, len: usize, active: Option<usize>) {
+        if len == 0 {
+            return;
+        }
+        let from = self.focused_line(active).unwrap_or(0) as isize;
+        self.cursor = Some(from.saturating_add(delta).clamp(0, len as isize - 1) as usize);
+        self.suspended_until = Some(Instant::now() + FOLLOW_SUSPEND);
+    }
+
+    /// Returns to following playback immediately.
+    pub fn follow_now(&mut self) {
+        self.cursor = None;
+        self.suspended_until = None;
+    }
+
+    /// Drops a browsing cursor left over from the previous track.
+    pub fn reset(&mut self) {
+        self.scroll = 0;
+        self.follow_now();
+    }
+
+    /// Records that the sung line moved on.
+    pub fn mark_line_changed(&mut self) {
+        self.line_changed_at = Some(Instant::now());
+    }
+
+    /// How far into its entry fade the sung line is, `0.0..=1.0`. Returns
+    /// `1.0` (settled) when no line change has been seen yet.
+    pub fn line_entry_progress(&self, fade_ms: u128) -> f32 {
+        match self.line_changed_at {
+            Some(at) => progress(at.elapsed().as_millis(), fade_ms),
+            None => 1.0,
+        }
+    }
+
+    pub fn offset_ms(&self) -> i64 {
+        self.offset_ms
+    }
+
+    /// Nudges the timing correction, clamped so a stuck key cannot push the
+    /// lyrics somewhere they can never come back from.
+    pub fn adjust_offset(&mut self, delta_ms: i64) {
+        self.offset_ms = (self.offset_ms + delta_ms).clamp(-10_000, 10_000);
+    }
+
+    /// Playback position as the lyrics see it, with the correction applied.
+    /// Saturates at zero: a negative position has no meaning.
+    pub fn corrected_position_ms(&self, position_ms: u64) -> u64 {
+        (position_ms as i64 + self.offset_ms).max(0) as u64
     }
 }
 
@@ -325,6 +441,106 @@ mod tests {
         let clock = AnimationClock::new(AnimationSpeed::Normal, false);
         assert!(!clock.selection_ever_changed());
         assert_eq!(clock.since_selection_ms(), None);
+    }
+
+    // --- lyrics view ---
+
+    fn lyrics() -> LyricsView {
+        LyricsView::new(0)
+    }
+
+    #[test]
+    fn a_fresh_view_follows_the_song() {
+        let view = lyrics();
+        assert!(view.following());
+        assert_eq!(view.focused_line(Some(4)), Some(4), "follows the sung line");
+    }
+
+    #[test]
+    fn browsing_suspends_follow_and_takes_over_the_focus() {
+        let mut view = lyrics();
+        view.browse(1, 10, Some(4));
+        assert!(!view.following(), "manual scrolling must stop the yanking");
+        assert_eq!(view.focused_line(Some(4)), Some(5), "the cursor leads now");
+    }
+
+    #[test]
+    fn browsing_clamps_to_the_ends_of_the_song() {
+        let mut view = lyrics();
+        view.browse(-100, 10, Some(0));
+        assert_eq!(view.focused_line(Some(0)), Some(0));
+        view.browse(100, 10, Some(0));
+        assert_eq!(view.focused_line(Some(0)), Some(9));
+    }
+
+    #[test]
+    fn browsing_an_empty_lyric_is_a_no_op() {
+        let mut view = lyrics();
+        view.browse(1, 0, None);
+        assert!(view.following(), "nothing to browse, nothing to suspend");
+    }
+
+    #[test]
+    fn following_again_hands_the_view_back_to_the_song() {
+        let mut view = lyrics();
+        view.browse(3, 10, Some(0));
+        view.follow_now();
+        assert!(view.following());
+        assert_eq!(view.focused_line(Some(7)), Some(7));
+    }
+
+    #[test]
+    fn a_new_track_drops_a_cursor_left_over_from_the_last_one() {
+        let mut view = lyrics();
+        view.browse(5, 10, Some(0));
+        view.scroll = 12;
+        view.reset();
+        assert!(view.following());
+        assert_eq!(view.scroll, 0);
+    }
+
+    #[test]
+    fn a_line_that_never_changed_is_already_settled() {
+        // Buffer tests that never tick must see the final style, not a
+        // line frozen mid-fade.
+        assert_eq!(lyrics().line_entry_progress(180), 1.0);
+    }
+
+    #[test]
+    fn a_just_changed_line_starts_its_entry_fade() {
+        let mut view = lyrics();
+        view.mark_line_changed();
+        assert!(view.line_entry_progress(10_000) < 1.0);
+    }
+
+    #[test]
+    fn the_offset_shifts_the_position_in_both_directions() {
+        let mut view = lyrics();
+        assert_eq!(view.corrected_position_ms(1000), 1000);
+        view.adjust_offset(250);
+        assert_eq!(view.corrected_position_ms(1000), 1250);
+        view.adjust_offset(-500);
+        assert_eq!(view.corrected_position_ms(1000), 750);
+    }
+
+    #[test]
+    fn a_negative_offset_never_produces_a_negative_position() {
+        let mut view = lyrics();
+        view.adjust_offset(-5000);
+        assert_eq!(view.corrected_position_ms(100), 0);
+    }
+
+    #[test]
+    fn the_offset_is_bounded_so_a_stuck_key_cannot_strand_the_lyrics() {
+        let mut view = lyrics();
+        for _ in 0..200 {
+            view.adjust_offset(250);
+        }
+        assert_eq!(view.offset_ms(), 10_000);
+        for _ in 0..400 {
+            view.adjust_offset(-250);
+        }
+        assert_eq!(view.offset_ms(), -10_000);
     }
 
     #[test]

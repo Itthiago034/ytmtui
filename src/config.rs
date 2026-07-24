@@ -62,6 +62,9 @@ pub struct Config {
     /// Exibe a animação de entrada (wordmark montando) ao abrir o app.
     /// Ignorada quando `reduced_motion` está ligado.
     pub splash: bool,
+    /// Correção global de sincronia das letras, em milissegundos. Positivo
+    /// adianta as linhas (a letra estava atrasada). Ajustável com `<`/`>`.
+    pub lyrics_offset_ms: i64,
 }
 
 impl Default for Config {
@@ -81,6 +84,7 @@ impl Default for Config {
             animation_speed: "normal".to_string(),
             reduced_motion: false,
             splash: true,
+            lyrics_offset_ms: 0,
         }
     }
 }
@@ -314,6 +318,7 @@ mod tests {
         assert_eq!(config.animation_speed, "normal");
         assert!(!config.reduced_motion);
         assert!(config.splash, "the entry animation is on by default");
+        assert_eq!(config.lyrics_offset_ms, 0);
         // Campos antigos continuam lidos normalmente.
         assert_eq!(config.volume, 0.5);
         assert_eq!(config.theme, "Oceano");

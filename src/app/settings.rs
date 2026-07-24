@@ -82,6 +82,7 @@ impl App {
             animation_speed: saved.animation_speed,
             reduced_motion: saved.reduced_motion,
             splash: saved.splash,
+            lyrics_offset_ms: self.ui.lyrics.offset_ms(),
         }
         .save();
     }

@@ -140,6 +140,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.sidebar_index = Section::Tocando.index();
             app.focus = Focus::Main;
         }
+        // Ajuste fino da sincronia da letra.
+        KeyCode::Char('<') | KeyCode::Char(',') if app.section == Section::Letra => {
+            app.adjust_lyrics_offset(-250)
+        }
+        KeyCode::Char('>') | KeyCode::Char('.') if app.section == Section::Letra => {
+            app.adjust_lyrics_offset(250)
+        }
         // Curte / descurte a faixa atual.
         KeyCode::Char('f') => app.like_current(),
         // Alterna o tema de cores.
@@ -185,7 +192,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::PageUp => page(app, -PAGE_JUMP),
         KeyCode::Home => {
             if app.focus == Focus::Main {
-                app.select_first();
+                // In Lyrics, "go to the start" means go back to the line
+                // being sung rather than to the top of the song.
+                if app.section == Section::Letra {
+                    app.ui.lyrics.follow_now();
+                } else {
+                    app.select_first();
+                }
             }
         }
         KeyCode::End => {
@@ -239,12 +252,22 @@ fn scroll_help(app: &mut App, delta: isize) {
 /// Rola a letra em texto plano; letras sincronizadas seguem a reprodução e
 /// ignoram rolagem manual.
 fn scroll_lyrics(app: &mut App, delta: isize) {
-    if matches!(app.lyrics, crate::lyrics::LyricsState::Plain(_)) {
-        if delta > 0 {
-            app.ui.lyrics_scroll = app.ui.lyrics_scroll.saturating_add(delta as u16);
-        } else {
-            app.ui.lyrics_scroll = app.ui.lyrics_scroll.saturating_sub((-delta) as u16);
+    match &app.lyrics {
+        // Plain text has no lines to put a cursor on, so it scrolls raw.
+        crate::lyrics::LyricsState::Plain(_) => {
+            if delta > 0 {
+                app.ui.lyrics.scroll = app.ui.lyrics.scroll.saturating_add(delta as u16);
+            } else {
+                app.ui.lyrics.scroll = app.ui.lyrics.scroll.saturating_sub((-delta) as u16);
+            }
         }
+        // Synced lyrics move a cursor instead, which also holds auto-follow
+        // off so the view stops yanking back to the line being sung.
+        crate::lyrics::LyricsState::Synced { lines, active } => {
+            let (len, active) = (lines.len(), *active);
+            app.ui.lyrics.browse(delta, len, active);
+        }
+        _ => {}
     }
 }
 
@@ -278,6 +301,8 @@ fn activate(app: &mut App) {
             Section::Playlists => app.open_selected_playlist(),
             Section::Biblioteca => app.open_selected_library_playlist(),
             Section::Artistas => app.open_selected_artist(),
+            // Jump playback to the lyric line under the cursor.
+            Section::Letra => app.seek_to_focused_lyric(),
             _ => {}
         },
     }

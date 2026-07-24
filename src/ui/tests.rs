@@ -1282,7 +1282,7 @@ fn marquee_slides_one_column_per_step_and_wraps_with_a_gap() {
 /// An app with the entry animation running, as if it had just started.
 fn splash_app() -> App {
     let mut app = App::new_for_tests();
-    app.ui = crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, false, true);
+    app.ui = crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, false, true, 0);
     app
 }
 
@@ -1344,13 +1344,15 @@ fn a_key_press_dismisses_the_entry_animation() {
 fn reduced_motion_skips_the_entry_animation_entirely() {
     // Reduced motion outranks the preference: asking for the animation and
     // for reduced motion at the same time must not animate.
-    let state = crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, true, true);
+    let state =
+        crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, true, true, 0);
     assert!(state.splash_phase().is_none());
 }
 
 #[test]
 fn turning_the_entry_animation_off_skips_it() {
-    let state = crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, false, false);
+    let state =
+        crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, false, false, 0);
     assert!(state.splash_phase().is_none());
 }
 
@@ -1451,4 +1453,108 @@ fn w_opens_now_playing_and_moves_the_sidebar_with_it() {
         Section::Tocando.index(),
         "a later j/k must walk from the right base"
     );
+}
+
+// --- lyrics --------------------------------------------------------------
+
+/// A playing app with three timed lyric lines.
+fn lyrics_app() -> App {
+    let mut app = playing_app();
+    app.section = Section::Letra;
+    app.lyrics = crate::lyrics::LyricsState::Synced {
+        lines: vec![
+            crate::models::LyricLine {
+                text: "First line".into(),
+                start_ms: 0,
+                end_ms: 2000,
+            },
+            crate::models::LyricLine {
+                text: "Second line".into(),
+                start_ms: 2000,
+                end_ms: 4000,
+            },
+            crate::models::LyricLine {
+                text: "Third line".into(),
+                start_ms: 4000,
+                end_ms: 6000,
+            },
+        ],
+        active: Some(0),
+    };
+    app
+}
+
+#[test]
+fn browsing_lyrics_shows_that_auto_follow_is_paused() {
+    let mut app = lyrics_app();
+    assert!(
+        !text(&render(&mut app, 100, 20)).contains("browsing"),
+        "a following panel should not claim to be browsing"
+    );
+
+    app.ui.lyrics.browse(1, 3, Some(0));
+
+    let screen = text(&render(&mut app, 100, 20));
+    assert!(
+        screen.contains("browsing"),
+        "the panel must say why it stopped tracking the song:\n{screen}"
+    );
+    assert!(
+        screen.contains("Home"),
+        "and how to get back to following:\n{screen}"
+    );
+}
+
+#[test]
+fn a_non_zero_lyric_offset_is_visible_in_the_panel_title() {
+    let mut app = lyrics_app();
+    app.ui.lyrics.adjust_offset(500);
+    let screen = text(&render(&mut app, 100, 20));
+    assert!(
+        screen.contains("+0.50s"),
+        "a correction the user applied must be visible:\n{screen}"
+    );
+}
+
+#[test]
+fn enter_on_a_browsed_lyric_seeks_playback_to_it() {
+    let mut app = lyrics_app();
+    app.ui.lyrics.browse(2, 3, Some(0)); // cursor on "Third line"
+
+    app.seek_to_focused_lyric();
+
+    assert!(
+        app.status.contains("Third line"),
+        "status should name the line jumped to: {}",
+        app.status
+    );
+    assert!(
+        app.ui.lyrics.following(),
+        "picking a line ends browsing — it is about to be the sung line"
+    );
+}
+
+#[test]
+fn seeking_to_a_lyric_undoes_the_sync_correction() {
+    // The correction describes how far the lyrics drift from the audio, so
+    // seeking must remove it to land where the line actually plays.
+    let mut app = lyrics_app();
+    app.ui.lyrics.adjust_offset(1000);
+    app.ui.lyrics.browse(2, 3, Some(0)); // "Third line", start_ms 4000
+
+    app.seek_to_focused_lyric();
+
+    // 4000 - 1000 = 3000ms into the audio.
+    assert_eq!(app.player.position().as_millis(), 3000);
+}
+
+#[test]
+fn seeking_a_lyric_without_synced_timings_is_a_no_op() {
+    let mut app = playing_app();
+    app.lyrics = crate::lyrics::LyricsState::Plain("no timestamps here".into());
+    let before = app.player.position();
+
+    app.seek_to_focused_lyric();
+
+    assert_eq!(app.player.position(), before);
 }

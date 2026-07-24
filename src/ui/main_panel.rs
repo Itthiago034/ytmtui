@@ -27,14 +27,24 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Artistas => "Artists".to_string(),
         Section::Fila => "Queue".to_string(),
         Section::Tocando => "Now Playing".to_string(),
-        // The Lyrics panel names the track it's showing lyrics for.
-        Section::Letra => match &app.current {
-            Some(t) => crate::ui::truncate_chars(
-                &format!("Lyrics — {}", t.title),
-                (area.width as usize).saturating_sub(12),
-            ),
-            None => "Lyrics".to_string(),
-        },
+        // The Lyrics panel names the track it's showing lyrics for, plus
+        // any non-default sync correction and whether auto-follow is
+        // currently paused — both are modes the user needs to see to
+        // understand what the panel is doing.
+        Section::Letra => {
+            let mut title = match &app.current {
+                Some(t) => format!("Lyrics — {}", t.title),
+                None => "Lyrics".to_string(),
+            };
+            let offset = app.ui.lyrics.offset_ms();
+            if offset != 0 {
+                title.push_str(&format!("  [{:+.2}s]", offset as f64 / 1000.0));
+            }
+            if !app.ui.lyrics.following() {
+                title.push_str("  [browsing · Home to follow]");
+            }
+            crate::ui::truncate_chars(&title, (area.width as usize).saturating_sub(12))
+        }
         Section::Ajuda => "Help".to_string(),
     };
 
@@ -1127,14 +1137,14 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
 }
 
 /// Plain-text lyrics (Musixmatch fallback, no timestamps): manual scroll via
-/// `app.ui.lyrics_scroll`, exactly as before this section supported synced
+/// `app.ui.lyrics.scroll`, exactly as before this section supported synced
 /// lyrics.
 fn draw_plain_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block, text: &str) {
     let p = Paragraph::new(text.to_string())
         .style(Style::default().fg(app.theme().subtext))
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((app.ui.lyrics_scroll, 0));
+        .scroll((app.ui.lyrics.scroll, 0));
     f.render_widget(p, area);
 }
 
@@ -1142,9 +1152,11 @@ fn draw_plain_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block, text: &
 /// a per-character wipe (sung part in accent, rest bright) driven by the
 /// playback position within the line's [start_ms, end_ms] window, and the
 /// surrounding lines fade with distance — a spotlight around the moment.
-/// The view auto-scrolls to keep the active line roughly centered
-/// (approximate — a single logical line that wraps to 2+ terminal rows will
-/// throw off exact centering, which is an acceptable tradeoff).
+///
+/// The view centers on whichever line has focus: the one being sung while
+/// auto-follow is on, or the user's cursor while they browse. Centering is
+/// approximate — a logical line that wraps to 2+ terminal rows throws it
+/// off, which is an acceptable tradeoff.
 fn draw_synced_lyrics(
     f: &mut Frame,
     app: &App,
@@ -1154,30 +1166,56 @@ fn draw_synced_lyrics(
     active: Option<usize>,
 ) {
     let theme = app.theme();
-    let position_ms = app.player.position().as_millis() as u64;
+    let position_ms = app
+        .ui
+        .lyrics
+        .corrected_position_ms(app.player.position().as_millis() as u64);
+    let focused = app.ui.lyrics.focused_line(active);
+    let browsing = !app.ui.lyrics.following();
+
     let rendered: Vec<Line> = lines
         .iter()
         .enumerate()
-        .map(|(i, l)| match active {
-            Some(a) if i == a => karaoke_line(l, position_ms, theme, app.ui.anim.reduced_motion()),
-            Some(a) => {
-                let color = match a.abs_diff(i) {
-                    1 => theme.subtext,
-                    2 => theme.muted,
-                    _ => theme.border,
-                };
-                Line::from(Span::styled(l.text.clone(), Style::default().fg(color)))
+        .map(|(i, l)| {
+            // While browsing, the cursor gets the highlight instead of the
+            // line being sung: the user is reading ahead, so the spotlight
+            // follows their eye, not the audio.
+            if browsing && focused == Some(i) {
+                return Line::from(Span::styled(
+                    l.text.clone(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                ));
             }
-            // Before the first line starts, everything waits at equal volume.
-            None => Line::from(Span::styled(
-                l.text.clone(),
-                Style::default().fg(theme.subtext),
-            )),
+            match active {
+                Some(a) if i == a => karaoke_line_entering(
+                    l,
+                    position_ms,
+                    theme,
+                    app.ui.anim.reduced_motion(),
+                    app.ui.lyrics.line_entry_progress(LINE_ENTRY_MS),
+                ),
+                Some(a) => {
+                    let color = match a.abs_diff(i) {
+                        1 => theme.subtext,
+                        2 => theme.muted,
+                        _ => theme.border,
+                    };
+                    Line::from(Span::styled(l.text.clone(), Style::default().fg(color)))
+                }
+                // Before the first line starts, everything waits at equal
+                // volume.
+                None => Line::from(Span::styled(
+                    l.text.clone(),
+                    Style::default().fg(theme.subtext),
+                )),
+            }
         })
         .collect();
 
     let visible_rows = area.height.saturating_sub(2) as usize;
-    let scroll = active
+    let scroll = focused
         .map(|i| {
             let half = visible_rows / 2;
             i.saturating_sub(half)
@@ -1208,6 +1246,26 @@ pub(super) fn karaoke_line(
     theme: &'static Theme,
     reduced_motion: bool,
 ) -> Line<'static> {
+    karaoke_line_entering(l, position_ms, theme, reduced_motion, 1.0)
+}
+
+/// Milliseconds a newly sung line takes to brighten to its full style.
+pub(super) const LINE_ENTRY_MS: u128 = 180;
+
+/// [`karaoke_line`] with control over the entry fade: `entry` is `0.0` the
+/// instant the line becomes the sung one and `1.0` once it has settled.
+///
+/// The fade applies only to the *unsung* half. Fading the sung half too
+/// would fight the wipe, which is already drawing attention across the line
+/// from the left — two animations describing the same moment in different
+/// ways read as a glitch.
+pub(super) fn karaoke_line_entering(
+    l: &crate::models::LyricLine,
+    position_ms: u64,
+    theme: &'static Theme,
+    reduced_motion: bool,
+    entry: f32,
+) -> Line<'static> {
     if reduced_motion {
         return Line::from(Span::styled(
             l.text.clone(),
@@ -1231,7 +1289,9 @@ pub(super) fn karaoke_line(
         ),
         Span::styled(
             rest,
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(crate::theme::mix(theme.subtext, theme.text, entry))
+                .add_modifier(Modifier::BOLD),
         ),
     ])
 }
@@ -1272,6 +1332,12 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ("  z", "toggle shuffle"),
         ("  r", "repeat mode (off/all/one)"),
         ("  f", "like / unlike the current track"),
+        ("", ""),
+        ("Lyrics", ""),
+        ("  ↑/↓", "browse lines (pauses auto-follow)"),
+        ("  Enter", "jump playback to the selected line"),
+        ("  Home", "resume following the song"),
+        ("  < / >", "nudge lyric timing by 0.25s"),
         ("  w", "open Now Playing (big cover, lyric line)"),
         ("", ""),
         ("Appearance", ""),

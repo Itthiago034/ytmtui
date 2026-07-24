@@ -399,7 +399,13 @@ impl App {
         // it mid-song instead of needing one extra tick to catch up.
         if let crate::lyrics::LyricsState::Synced { lines, active } = &mut self.lyrics {
             let position_ms = self.player.position().as_millis() as u64;
-            *active = crate::lyrics::advance_active_line(lines, *active, position_ms);
+            let corrected = self.ui.lyrics.corrected_position_ms(position_ms);
+            let previous = *active;
+            *active = crate::lyrics::advance_active_line(lines, *active, corrected);
+            let moved_on = *active != previous;
+            if moved_on {
+                self.ui.lyrics.mark_line_changed();
+            }
         }
 
         if self.last_synced.elapsed() >= self.sync_interval {

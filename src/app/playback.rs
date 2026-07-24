@@ -53,7 +53,7 @@ impl App {
         self.current = None;
         self.loading_audio = false;
         self.lyrics = crate::lyrics::LyricsState::None;
-        self.ui.lyrics_scroll = 0;
+        self.ui.lyrics.reset();
         self.visualizer.reset();
         if had_track {
             self.clear_artwork();
@@ -62,6 +62,44 @@ impl App {
     }
 
     /// Avança 5s na faixa atual.
+    /// Jumps playback to the start of the lyric line the user is looking
+    /// at, and resumes auto-follow — the line they picked is about to
+    /// become the line being sung, so browsing is over.
+    ///
+    /// A no-op without synced lyrics: plain text has no timestamps to seek
+    /// to.
+    pub fn seek_to_focused_lyric(&mut self) {
+        let crate::lyrics::LyricsState::Synced { lines, active } = &self.lyrics else {
+            return;
+        };
+        let Some(index) = self.ui.lyrics.focused_line(*active) else {
+            return;
+        };
+        let Some(line) = lines.get(index) else {
+            return;
+        };
+        // Seek to the *uncorrected* timestamp: the correction describes how
+        // far the lyrics drift from the audio, so undoing it here lands the
+        // audio where this line actually plays.
+        let target_ms = (line.start_ms as i64 - self.ui.lyrics.offset_ms()).max(0) as u64;
+        self.player
+            .seek_to(std::time::Duration::from_millis(target_ms));
+        self.ui.lyrics.follow_now();
+        self.status = format!("↷ {}", line.text);
+    }
+
+    /// Nudges the lyrics timing correction and reports the new value.
+    pub fn adjust_lyrics_offset(&mut self, delta_ms: i64) {
+        self.ui.lyrics.adjust_offset(delta_ms);
+        let offset = self.ui.lyrics.offset_ms();
+        self.status = if offset == 0 {
+            "Sincronia da letra: original.".to_string()
+        } else {
+            format!("Sincronia da letra: {:+.2}s", offset as f64 / 1000.0)
+        };
+        self.save_config();
+    }
+
     pub fn seek_forward(&mut self) {
         if self.current.is_some() {
             self.player.seek_forward(5);
@@ -190,7 +228,7 @@ impl App {
         }
         self.remember_recent(&track);
         self.lyrics = crate::lyrics::LyricsState::None;
-        self.ui.lyrics_scroll = 0;
+        self.ui.lyrics.reset();
         self.clear_artwork();
         self.visualizer.reset();
         self.loading_audio = true;

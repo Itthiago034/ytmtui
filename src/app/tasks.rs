@@ -57,7 +57,7 @@ impl App {
                     // later `j`/`k` computes its next index from that base,
                     // so leaving it behind jumps to an unrelated section
                     // (same reasoning as the `/` handler in `event.rs`).
-                    self.section = Section::Buscar;
+                    self.set_section(Section::Buscar);
                     self.sidebar_index = Section::Buscar.index();
                     self.status = format!(
                         "{} músicas, {} artistas, {} álbuns, {} playlists.",
@@ -228,7 +228,7 @@ impl App {
                     // Uma lista concreta de faixas substitui a visão mista da
                     // busca; a próxima busca a reativa.
                     self.search_mixed = false;
-                    self.section = Section::Buscar;
+                    self.set_section(Section::Buscar);
                     self.sidebar_index = 0;
                     self.list_state.select(Some(0));
                     self.status = format!("{} faixas carregadas.", self.songs.len());

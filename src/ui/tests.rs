@@ -1353,3 +1353,41 @@ fn turning_the_entry_animation_off_skips_it() {
     let state = crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, false, false);
     assert!(state.splash_phase().is_none());
 }
+
+#[test]
+fn stagger_reveals_rows_in_sequence_then_settles() {
+    use super::main_panel::stagger_rows;
+
+    // A section that never changed is already settled — buffer tests that
+    // never navigate must see complete lists.
+    assert_eq!(stagger_rows(None, false), None);
+    // Just switched: nothing has arrived yet.
+    assert_eq!(stagger_rows(Some(0), false), Some(0));
+    // Rows arrive one at a time...
+    assert!(matches!(stagger_rows(Some(30), false), Some(n) if n > 0));
+    // ...and past the cap the whole list is in place, so a long list never
+    // takes longer to open than a short one.
+    assert_eq!(stagger_rows(Some(10_000), false), None);
+}
+
+#[test]
+fn reduced_motion_skips_the_row_stagger() {
+    use super::main_panel::stagger_rows;
+    assert_eq!(stagger_rows(Some(0), true), None);
+}
+
+#[test]
+fn switching_sections_blanks_rows_that_have_not_arrived_yet() {
+    let mut app = playing_app();
+    app.section = Section::Fila;
+    let settled = text(&render(&mut app, 100, 20));
+
+    // Re-open the section: its rows must not all be there on frame one.
+    app.ui.anim.mark_section_changed();
+    let opening = text(&render(&mut app, 100, 20));
+
+    assert_ne!(
+        settled, opening,
+        "rows should arrive in sequence when a section opens"
+    );
+}

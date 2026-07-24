@@ -78,7 +78,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             // Entra no modo de busca.
             app.input_mode = true;
             app.query.clear();
-            app.section = Section::Buscar;
+            app.set_section(Section::Buscar);
             // Must match Buscar's real position, or a later sidebar move
             // (k/j) computes its next index from the wrong base and jumps
             // to an unrelated section instead of the adjacent one.
@@ -90,7 +90,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.list_state.select(Some(0));
         }
         KeyCode::Char('?') => {
-            app.section = Section::Ajuda;
+            app.set_section(Section::Ajuda);
             app.sidebar_index = Section::Ajuda.index();
         }
         // Controles de reprodução (globais).

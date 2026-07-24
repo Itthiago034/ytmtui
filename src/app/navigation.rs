@@ -7,6 +7,19 @@
 use super::*;
 
 impl App {
+    /// Opens `section`, recording the switch so the new panel's rows can
+    /// reveal in sequence. The single writer of `self.section`: assigning
+    /// the field directly would open the section without the reveal.
+    pub(crate) fn set_section(&mut self, section: Section) {
+        if self.section == section {
+            return;
+        }
+        self.section = section;
+        self.ui.anim.mark_section_changed();
+    }
+}
+
+impl App {
     /// Número de itens na lista principal da seção atual.
     pub fn main_len(&self) -> usize {
         match self.section {
@@ -79,7 +92,7 @@ impl App {
             return;
         }
         self.sidebar_index = index;
-        self.section = Section::ALL[index];
+        self.set_section(Section::ALL[index]);
         self.focus = Focus::Main;
         self.list_state.select(Some(0));
     }
@@ -89,7 +102,7 @@ impl App {
         let len = Section::ALL.len() as isize;
         let next = (self.sidebar_index as isize + delta).rem_euclid(len) as usize;
         self.sidebar_index = next;
-        self.section = Section::ALL[next];
+        self.set_section(Section::ALL[next]);
         // Reposiciona a seleção da lista ao trocar de seção.
         self.list_state.select(Some(0));
     }

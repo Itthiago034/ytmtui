@@ -87,6 +87,9 @@ pub struct AnimationClock {
     track_changed_at: Instant,
     /// When the app started, for the entry animation.
     booted_at: Instant,
+    /// When the open section last changed, for the staggered row reveal.
+    /// `None` before the first switch, which reads as "already settled".
+    section_changed_at: Option<Instant>,
 }
 
 impl AnimationClock {
@@ -99,6 +102,7 @@ impl AnimationClock {
             selection_changed_at: None,
             track_changed_at: now,
             booted_at: now,
+            section_changed_at: None,
         }
     }
 
@@ -161,6 +165,20 @@ impl AnimationClock {
     pub fn mark_track_changed(&mut self) {
         self.track_changed_at = Instant::now();
         self.kick(Duration::from_millis(300));
+    }
+
+    /// Records that the open section changed, and kicks a matching redraw
+    /// window for the staggered row reveal.
+    pub fn mark_section_changed(&mut self) {
+        self.section_changed_at = Some(Instant::now());
+        self.kick(Duration::from_millis(180));
+    }
+
+    /// Animation-time milliseconds since the open section changed, or `None`
+    /// when it never has.
+    pub fn since_section_change_ms(&self) -> Option<u128> {
+        self.section_changed_at
+            .map(|at| self.scale(at.elapsed().as_millis()))
     }
 
     /// Whether any selection reveal has ever started. Buffer tests that never

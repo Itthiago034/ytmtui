@@ -1311,10 +1311,47 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
     f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
 }
 
+/// Milliseconds each row waits behind the one above it when a section opens.
+const STAGGER_STEP_MS: u128 = 14;
+/// Rows past this point appear together. Without a cap, opening a long list
+/// would take visibly longer than opening a short one, which reads as the
+/// app being slow rather than as an animation.
+const STAGGER_MAX_ROWS: usize = 8;
+
+/// How many rows have arrived `elapsed_ms` into a section's reveal.
+///
+/// Pure, so the sequence is testable at exact instants. `None` (the section
+/// never changed) means every row is already in place.
+pub(super) fn stagger_rows(elapsed_ms: Option<u128>, reduced_motion: bool) -> Option<usize> {
+    if reduced_motion {
+        return None;
+    }
+    let elapsed_ms = elapsed_ms?;
+    let arrived = (elapsed_ms / STAGGER_STEP_MS) as usize;
+    (arrived < STAGGER_MAX_ROWS).then_some(arrived)
+}
+
+/// Blanks the rows that have not arrived yet, keeping the vector's length so
+/// the selection index and scrollbar geometry stay exactly as they would be
+/// without the animation — only the content appears progressively.
+fn stagger<'a>(app: &App, items: Vec<ListItem<'a>>) -> Vec<ListItem<'a>> {
+    let Some(arrived) = stagger_rows(
+        app.ui.anim.since_section_change_ms(),
+        app.ui.anim.reduced_motion(),
+    ) else {
+        return items;
+    };
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, item)| if i < arrived { item } else { ListItem::new("") })
+        .collect()
+}
+
 fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<ListItem>) {
     let theme = app.theme();
     let item_count = items.len();
-    let list = List::new(items)
+    let list = List::new(stagger(app, items))
         .block(block)
         .highlight_style(
             Style::default()
@@ -1375,7 +1412,7 @@ fn render_list_borderless(
 ) {
     let theme = app.theme();
     let item_count = items.len();
-    let list = List::new(items)
+    let list = List::new(stagger(app, items))
         .highlight_style(
             Style::default()
                 .bg(theme.highlight_bg)

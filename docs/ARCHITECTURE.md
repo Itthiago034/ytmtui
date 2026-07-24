@@ -31,8 +31,8 @@ ytmtui is a Rust terminal client for YouTube Music. It uses:
                          ▲ reads state                  │ mutates
                          │                              ▼
                  ┌───────┴───────────────────────────────────────┐
-                 │                    app.rs                       │
-                 │ central state, queue, sections, tasks, messages │
+                 │                    app/                         │
+                 │ central state, split by concern (see below)     │
                  └───┬───────────────┬───────────────┬────────────┘
                      │ spawn         │ spawn         │ config/theme
                      ▼               ▼               ▼
@@ -50,10 +50,21 @@ ytmtui is a Rust terminal client for YouTube Music. It uses:
 |---|---|
 | `src/main.rs` | Terminal setup, panic hook, image-protocol detection, initial app load, main loop. |
 | `src/lib.rs` | Public module wiring for tests and examples. |
-| `src/app.rs` | Central application state, async task coordination, queue, sections, playback orchestration, recent history. |
-| `src/app/authentication.rs` | Browser-cookie discovery/import through `yt-dlp --cookies-from-browser`. |
+| `src/app/mod.rs` | The `App` struct, the types the UI reads (`Section`, `Focus`, `RepeatMode`, `Msg`), and the two constructors. |
+| `src/app/tasks.rs` | In-flight task counter, `Msg` drain, MPRIS events, periodic `tick`. |
+| `src/app/queue.rs` | Queue membership and ordering, shuffle cycle, repeat, next track. |
+| `src/app/playback.rs` | Starting and moving between tracks, seeking, the current track's cover. |
+| `src/app/search.rs` | Search, and opening artists/albums/playlists from its results. |
+| `src/app/home.rs` | Recommendation shelves, library, local recently-played history. |
+| `src/app/navigation.rs` | Selection, section and sidebar movement. |
+| `src/app/animation.rs` | Which redraw tier the main loop should use. |
+| `src/app/settings.rs` | Theme set, config persistence, account identity. |
+| `src/app/preferences.rs` | The editable `SettingRow`s behind the Settings section. |
+| `src/app/authentication.rs` | Two-phase sign-in (prepare → activate) through `yt-dlp --cookies-from-browser`. |
+| `src/artwork.rs` | Album-art picker construction and the on-disk cover cache. |
+| `src/doctor.rs` | Read-only runtime, browser, cookie metadata, connectivity, and configured-account diagnostics. |
 | `src/config.rs` | Persistent JSON config: volume, shuffle, repeat, cookies, theme, username, sync interval. |
-| `src/theme.rs` | Accent themes and tinted UI palette helpers. |
+| `src/theme.rs` | Built-in presets, user themes from `~/.config/ytmtui/themes/*.toml`, tinted neutral derivation, color mixing. |
 | `src/event.rs` | Keyboard events mapped to `App` methods. |
 | `src/visualizer.rs` | FFT spectrum analyzer fed by decoded playback samples. |
 | `src/lyrics.rs` | UI-facing lyrics state and active-line advancement. |
@@ -67,6 +78,10 @@ ytmtui is a Rust terminal client for YouTube Music. It uses:
 | `src/ui/nav.rs` | Sidebar identity, sections, account state, and album art area. |
 | `src/ui/main_panel.rs` | Home, search, lists, queue, lyrics, help, and empty states. |
 | `src/ui/now_playing.rs` | Compact now-playing line and progress display. |
+| `src/ui/now_playing_screen.rs` | The Now Playing section: large cover, metadata, spectrum, current lyric line. |
+| `src/ui/settings.rs` | The Settings section. |
+| `src/ui/splash.rs` | The entry animation and the shared wordmark. |
+| `src/ui/state.rs` | Presentation state: scroll offsets, grid geometry, the animation clock, the lyrics view. |
 
 ## Runtime Model
 
@@ -83,6 +98,33 @@ inside drawing:
 
 The `rodio::OutputStream` is not `Send`, so playback lives on a dedicated audio
 thread controlled by commands such as play, pause, stop, seek, and volume.
+
+## State Ownership
+
+`App` holds the domain: what is playing, what is queued, what the provider
+returned. Everything that only a renderer reads — scroll offsets, the Home
+grid's column count, animation timing, the lyrics view — lives in
+`ui::state::UiState`, reached as `app.ui`.
+
+`AnimationClock` is the single source of truth for animation timing. It hands
+out elapsed time already scaled by `AnimationSpeed::factor`, so every animated
+element measures its progress in the same units and the speed preference means
+the same thing everywhere. Durations that are *set* rather than measured (the
+fast-redraw window) multiply by the same factor instead.
+
+## Doctor Flow
+
+`ytmtui doctor` is dispatched in `main.rs` before terminal raw mode, the
+alternate screen, audio, artwork, or MPRIS are initialized. `src/doctor.rs`
+checks runtime tools, supported browser candidates, cookie-file permissions and
+validity, connectivity, and the configured account, then renders the `Runtime`,
+`Authentication`, `Connectivity`, and `Summary:` sections as plain text.
+
+The command is read-only: it never imports, refreshes, replaces, or uploads
+cookies. Rendered diagnostics redact credential markers, home paths, and
+external process details, but users should still review output before sharing
+it. Exit code `0` means no required check failed, even when optional warnings
+remain; exit code `1` means at least one required check failed.
 
 ## Search Flow
 
@@ -124,8 +166,27 @@ Cookie sources are resolved in this order:
 3. `~/.config/ytmtui/cookies.txt`.
 
 Pressing `g` triggers in-app sign-in through `src/app/authentication.rs`, which
-uses `yt-dlp --cookies-from-browser` to import browser cookies and write the
-default cookie file. The client reconnects without requiring a full restart.
+coordinates a two-phase provider workflow:
+
+1. Browser candidates are detected in a fixed Firefox, Brave, Chrome,
+   Chromium, Edge, Vivaldi, Opera order. A later candidate is attempted only
+   when export or account validation for the earlier one fails.
+2. `src/ytmusic/signin.rs` exports each candidate through
+   `yt-dlp --cookies-from-browser` into a private prepared file and enumerates
+   its YouTube accounts. The active cookie file, client, and account data stay
+   unchanged.
+3. The UI previews the browser/profile and account list. `Enter` activates the
+   selected account; `Esc` discards the prepared file and preserves the active
+   session.
+4. Activation atomically installs `~/.config/ytmtui/cookies.txt`, rebuilds the
+   client with the selected account index, and persists the cookie path,
+   browser, profile, and account index. If persistence fails, the previous
+   cookie file is restored.
+
+On startup, the persisted non-zero account index selects the matching
+`X-Goog-AuthUser`. Persisted browser/profile fields do not reorder the global
+Firefox-first candidate list. The client reconnects after successful activation
+without requiring a full restart.
 
 Authenticated requests add `Cookie`, `Authorization: SAPISIDHASH ...`,
 `X-Goog-AuthUser`, and `X-Origin` headers. Authenticated `401`/`403` responses
@@ -176,14 +237,21 @@ Config file shape:
   "shuffle": false,
   "repeat": "off",
   "cookies": null,
+  "authentication": {
+    "browser": null,
+    "profile": null,
+    "auth_user": 0
+  },
   "theme": "Roxo",
   "username": null,
   "sync_interval_secs": 300
 }
 ```
 
-The config writer preserves meaningful existing `cookies` and `username`
-values instead of overwriting them with empty values.
+Legacy configs default to account index `0` with no browser/profile preference.
+Confirmed authentication writes all three preference fields atomically with
+the cookie path. The config writer also preserves meaningful existing
+`cookies` and `username` values instead of overwriting them with empty values.
 
 ## Development Checks
 

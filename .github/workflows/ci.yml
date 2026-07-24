@@ -44,3 +44,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
+      - name: Doctor command starts without a TTY
+        run: |
+          output="$(cargo run --quiet -- doctor || true)"
+          grep -q '^Runtime' <<<"$output"
+          grep -q '^Authentication' <<<"$output"
+          grep -q '^Connectivity' <<<"$output"
+          grep -q '^Summary:' <<<"$output"
+          ! grep -Eq 'SAPISID=|SAPISIDHASH|Cookie:|__Secure-[A-Za-z0-9_-]+' <<<"$output"

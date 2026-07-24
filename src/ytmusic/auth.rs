@@ -10,7 +10,7 @@ use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Origem usada no cálculo do SAPISIDHASH.
 pub const ORIGIN: &str = "https://music.youtube.com";
@@ -82,13 +82,23 @@ fn is_allowed_domain(domain: &str) -> bool {
 }
 
 impl Auth {
+    /// Validates a Netscape cookie file without exposing parsed credentials.
+    pub fn validate_cookie_file(path: &Path) -> Result<(), AuthError> {
+        let content = std::fs::read_to_string(path).map_err(|source| AuthError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::from_cookie_text(&content).map(|_| ())
+    }
+
     /// Lê e interpreta um arquivo de cookies (formato Netscape).
     ///
     /// Retorna `None` se o arquivo não puder ser lido ou não contiver os
     /// cookies necessários (em especial o SAPISID).
     pub fn from_cookie_file(path: &str) -> Result<Auth, AuthError> {
+        let path = Path::new(path);
         let content = std::fs::read_to_string(path).map_err(|source| AuthError::ReadFile {
-            path: PathBuf::from(path),
+            path: path.to_path_buf(),
             source,
         })?;
         Self::from_cookie_text(&content)

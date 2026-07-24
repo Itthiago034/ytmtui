@@ -72,3 +72,33 @@ library data, recommendations, and like/unlike actions.
 
 The app follows familiar terminal movement: `h/j/k/l`, arrows, `/` for search,
 `?` for help, and `q` to quit. The full map is in [Keymap](KEYMAP.md).
+
+## Custom themes
+
+ytmtui ships eleven themes (`t` cycles them). To add your own, drop a `.toml`
+file into `~/.config/ytmtui/themes/`:
+
+```toml
+name = "My theme"
+accent = "#89b4fa"
+
+# Everything below is optional. Omitted colors are derived from the accent,
+# following the same tinted neutral scale the built-in themes use.
+secondary     = "#94e2d5"   # artists, subtitles
+accent_fg     = "#1e1e2e"   # text on the selected row
+player        = "#89b4fa"   # progress bar and player border
+highlight_bg  = "#313244"   # selected row background
+selected_card = "#313244"   # selected Home card background
+provider_badge = "#94e2d5"
+text          = "#cdd6f4"
+subtext       = "#a6adc8"
+muted         = "#6c7086"
+border        = "#45475a"
+```
+
+Only `name` and `accent` are required. Colors are `#rrggbb` (the leading `#`
+is optional). A malformed color falls back to the derived value; a file
+without a usable `accent` is skipped and reported in the status bar at
+startup, so one broken file never stops the app from opening.
+
+User themes are listed after the built-in ones, sorted by filename.

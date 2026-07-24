@@ -72,6 +72,12 @@ likes, and personalized library data need cookies.
 Press `g` inside the app to import cookies from a supported browser. Sign in to
 [music.youtube.com](https://music.youtube.com) in that browser first.
 
+Discovery tries Firefox first and moves to another supported browser only when
+export or account validation fails. Review the browser account preview, choose
+an account, and press `Enter` to activate it. Press `Esc` to cancel without
+changing the current session. The confirmed browser/profile and account index
+are saved for the next launch.
+
 If you prefer a script:
 
 ```bash
@@ -98,6 +104,13 @@ anti-bot playback fixes.
 See the full [Keymap](KEYMAP.md).
 
 ## If Something Breaks
+
+Run `ytmtui doctor` outside the TUI first. It checks runtime tools, supported
+browsers, cookie-file permissions and validity, connectivity, and the
+configured YouTube account without refreshing or replacing cookies. Exit code
+`0` means no required check failed, even if optional warnings remain; `1`
+means at least one required check failed. Sensitive details are redacted, but
+review the output before sharing it.
 
 Start with [Troubleshooting](TROUBLESHOOTING.md). The most common issues are
 missing `yt-dlp`/`ffmpeg`, expired cookies, blocked datacenter IPs, and audio

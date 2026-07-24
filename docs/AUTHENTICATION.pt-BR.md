@@ -24,12 +24,44 @@ da biblioteca, recomendações personalizadas e curtir/descurtir.
    suportado.
 2. Abra o ytmtui.
 3. Pressione `g`.
-4. Escolha ou deixe o ytmtui detectar uma sessão de navegador.
-5. O ytmtui importa cookies via `yt-dlp --cookies-from-browser`, salva em
+4. O ytmtui tenta primeiro o Firefox. Ele tenta Brave, Chrome, Chromium, Edge,
+   Vivaldi ou Opera, nessa ordem, somente quando a exportação ou validação do
+   candidato anterior falha.
+5. Revise o navegador/perfil detectado e a lista de contas do YouTube. O
+   perfil escolhido é passado diretamente ao `yt-dlp`, então Firefox ou Brave
+   usam o mesmo perfil em que você fez login. Navegue
+   com `Cima`/`Baixo` ou `k`/`j` e pressione `Enter` para confirmar a conta
+   selecionada.
+6. O ytmtui instala os cookies preparados em
    `~/.config/ytmtui/cookies.txt` e reconecta sem exigir reiniciar o app.
+
+A preparação e a confirmação são separadas. A prévia da conta aparece antes
+que o arquivo de cookies ativo ou o cliente atual seja substituído. Pressionar
+`Esc` na prévia cancela o login preparado e preserva os cookies, a conta, a
+biblioteca e a sessão atuais.
+
+Antes de substituir os cookies ativos, o ytmtui confere novamente a conta
+selecionada. Se a sessão do navegador expirou ou mudou de conta nesse
+intervalo, a sessão ativa continua intacta.
+
+Após a confirmação, o ytmtui salva o navegador/perfil bem-sucedido e o índice
+da conta do YouTube selecionada em `~/.config/ytmtui/config.json`. Ao reiniciar,
+um índice de conta diferente de zero é reutilizado. A preferência de
+navegador/perfil persiste sem colocar esse navegador à frente do Firefox na
+ordem de detecção.
 
 Se o navegador não tiver uma sessão válida do YouTube Music, faça login nele e
 pressione `g` de novo.
+
+## Diagnóstico Sem Alterar Cookies
+
+Execute `ytmtui doctor` fora da TUI para verificar ferramentas de execução,
+navegadores suportados, permissões e validade do arquivo de cookies,
+conectividade e a conta do YouTube configurada. O comando nunca renova nem
+substitui cookies. O código de saída `0` significa que nenhuma verificação
+obrigatória falhou, mesmo que restem avisos opcionais; `1` significa que ao
+menos uma verificação obrigatória falhou. Detalhes sensíveis são ocultados, mas
+revise a saída antes de compartilhá-la.
 
 ## Renovação por Script
 
@@ -75,6 +107,6 @@ Em uma conexão residencial pessoal, isso geralmente não é necessário.
 
 - O ytmtui nunca pede nem armazena sua senha.
 - Arquivos de cookies ficam locais na sua máquina.
-- O arquivo padrão é escrito com permissões restritivas.
+- Arquivos de cookies preparados e instalados usam modo `0600` no Unix.
 - Trate cookies como credenciais da conta: não commite, cole em issues ou
   compartilhe.

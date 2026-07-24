@@ -12,6 +12,16 @@ Docs úteis junto deste guia:
 - [Autenticação](AUTHENTICATION.pt-BR.md)
 - [Mapa de Teclas](KEYMAP.pt-BR.md)
 
+## Comece pelo Doctor
+
+Execute `ytmtui doctor` fora da TUI. Ele verifica ferramentas de execução,
+navegadores suportados, permissões e validade do arquivo de cookies,
+conectividade e a conta do YouTube configurada. Ele nunca renova nem substitui
+cookies. O código de saída `0` significa que nenhuma verificação obrigatória
+falhou, mesmo que restem avisos opcionais; `1` significa que ao menos uma
+verificação obrigatória falhou. Detalhes sensíveis são ocultados, mas revise a
+saída antes de compartilhá-la.
+
 ## Dependências Ausentes ao Iniciar
 
 O ytmtui checa `yt-dlp`, `ffmpeg` e `deno` ao abrir. A reprodução precisa de
@@ -45,6 +55,13 @@ Ou pelo shell:
 Confirme que o navegador está logado em
 [music.youtube.com](https://music.youtube.com). Busca pública, navegação pública
 e letras continuam funcionando enquanto dados de conta ficam limpos.
+
+O fluxo dentro do app sempre verifica primeiro o Firefox. Outro navegador
+suportado só é tentado depois que a exportação ou validação da conta falha.
+Quando a prévia da conta abrir, confirme a conta desejada com `Enter`; `Esc`
+cancela sem substituir os cookies ou a sessão atuais. O navegador/perfil e o
+índice de conta confirmados são salvos, inclusive índices diferentes de zero
+usados após reiniciar.
 
 ## YouTube Mostra "Sign in to confirm you're not a bot"
 

@@ -1,7 +1,7 @@
 //! UI-facing lyrics state: what the Lyrics section renders, plus the logic
 //! for tracking which synced line is currently active as playback advances.
 
-use crate::ytmusic::LyricLine;
+use crate::models::LyricLine;
 
 /// What the Lyrics section currently has to show.
 #[derive(Debug, Clone, Default)]

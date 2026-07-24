@@ -11,9 +11,14 @@
 //! - short terminals: the playback and status rows are dropped first so the
 //!   content always keeps the remaining space and nothing panics.
 
+mod authentication;
 mod main_panel;
 mod nav;
 mod now_playing;
+mod now_playing_screen;
+mod settings;
+pub mod splash;
+pub mod state;
 
 #[cfg(test)]
 mod tests;
@@ -40,10 +45,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    if area.width < NARROW_WIDTH {
-        draw_narrow(f, app, area);
-    } else {
-        draw_wide(f, app, area);
+    // The entry animation owns the whole frame until its last phase, which
+    // hands over by letting the real UI draw underneath it.
+    let splash_phase = app.ui.splash_phase();
+    if splash_phase.map(splash::shows_app_underneath) != Some(false) {
+        if area.width < NARROW_WIDTH {
+            draw_narrow(f, app, area);
+        } else {
+            draw_wide(f, app, area);
+        }
+        // Modal layers are always drawn last so the underlying screen cannot
+        // overwrite account choices or controls.
+        authentication::draw(f, app, area);
+    }
+    if let Some(phase) = splash_phase {
+        splash::draw(f, area, phase, app.theme());
     }
 }
 
@@ -246,10 +262,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 /// Renders a "key desc · key desc" shortcut string as styled spans: keys
 /// pop slightly, descriptions and separators recede. Purely presentational —
 /// the visible text (and thus its width) is exactly the input string.
-fn shortcut_spans(
-    shortcuts: &'static str,
-    theme: &'static crate::theme::Theme,
-) -> Vec<Span<'static>> {
+fn shortcut_spans(shortcuts: &'static str, theme: crate::theme::ThemeColors) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (i, entry) in shortcuts.split(" · ").enumerate() {
         if i > 0 {
@@ -281,10 +294,13 @@ fn contextual_shortcuts(app: &App) -> &'static str {
         return "↑↓ section · Enter open · / search · q quit";
     }
     match app.section {
-        Section::Buscar | Section::Fila => "Enter play · a queue · Space pause · / search · ? help",
+        Section::Fila => "Enter play · d remove · J/K move · c clear · ? help",
+        Section::Buscar => "Enter play · a queue · Space pause · / search · ? help",
         Section::Biblioteca => "g sign in · Enter open · / search · ? help · q quit",
+        Section::Tocando => "Space pause · n next · f like · ¶ lyrics · ? help",
+        Section::Ajustes => "↑↓ pick · ←→ change · saved automatically",
         Section::Letra => "↑↓ scroll · / search · ? help · q quit",
-        Section::Ajuda => "/ search · q quit",
+        Section::Ajuda => "↑↓ scroll · / search · q quit",
         _ => "Enter open · / search · ? help · q quit",
     }
 }
@@ -340,6 +356,93 @@ pub(crate) fn take_width(s: &str, max: usize) -> String {
         out.push(c);
     }
     out
+}
+
+/// Marquee: recorta uma janela de `width` colunas sobre os trechos
+/// estilizados de `parts`, deslizando uma coluna por unidade de `step` e
+/// recomeçando após um respiro de 3 colunas — o clássico título rolante de
+/// players de música. O chamador só usa quando o texto não cabe e deriva
+/// `step` do relógio de reprodução, então o texto desliza enquanto toca e
+/// congela em pausa. Caracteres largos (CJK/emoji) nunca são cortados ao
+/// meio: a coluna órfã na borda vira um espaço.
+pub(crate) fn marquee_spans(
+    parts: &[(&str, Style)],
+    width: usize,
+    step: usize,
+) -> Vec<Span<'static>> {
+    const GAP: usize = 3;
+    let cells: Vec<(char, Style)> = parts
+        .iter()
+        .flat_map(|(text, style)| text.chars().map(move |c| (c, *style)))
+        .chain((0..GAP).map(|_| (' ', Style::default())))
+        .collect();
+    let total: usize = cells
+        .iter()
+        .map(|(c, _)| UnicodeWidthChar::width(*c).unwrap_or(0))
+        .sum();
+    if total == 0 || width == 0 {
+        return Vec::new();
+    }
+
+    // Localiza a célula que cobre a coluna `offset`; se o offset cair no
+    // meio de um caractere largo, começa na célula seguinte e compensa a
+    // coluna órfã com um espaço à esquerda.
+    let offset = step % total;
+    let mut col = 0usize;
+    let mut start = cells.len();
+    for (i, (c, _)) in cells.iter().enumerate() {
+        if col >= offset {
+            start = i;
+            break;
+        }
+        col += UnicodeWidthChar::width(*c).unwrap_or(0);
+    }
+    let mut out: Vec<(char, Style)> = Vec::new();
+    let mut used = 0usize;
+    for _ in 0..col.saturating_sub(offset).min(width) {
+        out.push((' ', Style::default()));
+        used += 1;
+    }
+    let mut i = start;
+    while used < width {
+        let (c, style) = cells[i % cells.len()];
+        i += 1;
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if w == 0 {
+            continue;
+        }
+        if used + w > width {
+            break;
+        }
+        out.push((c, style));
+        used += w;
+    }
+
+    // Mescla caracteres consecutivos de mesmo estilo em um span só.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (c, style) in out {
+        match spans.last_mut() {
+            Some(last) if last.style == style => last.content.to_mut().push(c),
+            _ => spans.push(Span::styled(c.to_string(), style)),
+        }
+    }
+    spans
+}
+
+/// Milliseconds of playback time the marquee (see [`marquee_spans`]) holds
+/// each column before sliding to the next one, for a given
+/// [`crate::config::AnimationSpeed`]. A pure lookup rather than deriving
+/// this from `AnimationSpeed::factor` (which scales *durations that pass*,
+/// like `App::kick_animation`'s window): here a *faster* speed must slide
+/// the marquee quicker, i.e. a *shorter* interval, so the mapping goes the
+/// other way and reads clearer written out directly.
+pub(crate) fn marquee_interval(speed: crate::config::AnimationSpeed) -> u128 {
+    use crate::config::AnimationSpeed;
+    match speed {
+        AnimationSpeed::Fast => 250,
+        AnimationSpeed::Normal => 350,
+        AnimationSpeed::Slow => 500,
+    }
 }
 
 /// Keeps the last `max` display columns of `s` (used so the search cursor

@@ -1,0 +1,109 @@
+//! Preferences, theme, and account identity.
+//!
+//! `save_config` is the single writer of `config.json`; it re-reads the file
+//! first so fields the running app does not own are preserved rather than
+//! clobbered with empty values.
+
+use super::*;
+
+impl App {
+    pub fn is_authenticated(&self) -> bool {
+        self.authentication.is_authenticated()
+    }
+
+    /// Carrega (em background) o nome da conta, se autenticado e sem nome
+    /// personalizado já definido na config.
+    pub fn load_account(&mut self) {
+        if !self.is_authenticated() {
+            return;
+        }
+        self.begin_task();
+        let provider = Arc::clone(&self.provider);
+        let tx = self.tx.clone();
+        let session_generation = self.session_generation;
+        tokio::spawn(async move {
+            match provider.account_name().await {
+                // `None` também é enviado: toda tarefa contada precisa
+                // terminar em exatamente uma mensagem (ver `begin_task`).
+                Ok(name) => {
+                    let _ = tx.send(Msg::AccountNameForSession {
+                        session_generation,
+                        name,
+                    });
+                }
+                Err(ProviderError::SessionExpired) => {
+                    let _ = tx.send(Msg::SessionExpiredForSession { session_generation });
+                }
+                Err(error) => {
+                    let _ = tx.send(Msg::Error(format!("Could not load account: {error}")));
+                }
+            }
+        });
+    }
+
+    /// Paleta do tema ativo. Retorna por valor (`ThemeColors` é `Copy`),
+    /// então quem desenha não fica com o `App` emprestado.
+    pub fn theme(&self) -> crate::theme::ThemeColors {
+        self.themes.get(self.theme_index).colors
+    }
+
+    /// Nome do tema ativo, para exibição e para a config.
+    pub fn theme_name(&self) -> &str {
+        &self.themes.get(self.theme_index).name
+    }
+
+    /// Todos os temas disponíveis (presets embutidos + os do usuário).
+    pub fn themes(&self) -> &crate::theme::ThemeSet {
+        &self.themes
+    }
+
+    /// Alterna para o próximo tema de cores e salva a preferência.
+    pub fn cycle_theme(&mut self) {
+        self.theme_index = (self.theme_index + 1) % self.themes.len();
+        self.status = format!("🎨 Tema: {}", self.theme_name());
+        self.save_config();
+    }
+
+    /// Persiste as preferências atuais em disco.
+    pub fn save_config(&self) {
+        // Estes campos agora são editáveis na seção Ajustes, então o app é
+        // dono deles: o valor em memória vence o que está em disco. Só
+        // `cookies`/`username` continuam preservados do arquivo, porque o
+        // app pode não ter uma versão válida deles.
+        //
+        // Nunca apaga um caminho de cookies válido já salvo: se o app subiu
+        // sem cookies (self.cookies == None), preserva o que estiver em disco.
+        let saved = Config::load();
+        let cookies = self.cookies.clone().or(saved.cookies);
+        // Só persiste um username se for personalizado (mantém o que já existia
+        // em vez de gravar o nome obtido da API automaticamente).
+        let username = saved.username;
+        let result = Config {
+            volume: self.player.volume(),
+            shuffle: self.shuffle,
+            repeat: self.repeat.as_config().to_string(),
+            cookies,
+            authentication: saved.authentication,
+            theme: self.theme_name().to_string(),
+            username,
+            sync_interval_secs: self.sync_interval.as_secs(),
+            artwork_mode: self.artwork_mode.as_config().to_string(),
+            home_density: self.home_density.as_config().to_string(),
+            visualizer: self.visualizer_style.as_config().to_string(),
+            animation_speed: self.ui.anim.speed().as_config().to_string(),
+            reduced_motion: self.ui.anim.reduced_motion(),
+            splash: self.splash_enabled,
+            lyrics_offset_ms: self.ui.lyrics.offset_ms(),
+        }
+        .try_save();
+        // Falha ao gravar não pode ser silenciosa: o usuário mexeu num ajuste
+        // e precisa saber que ele não persistiu (disco cheio, permissão, etc.).
+        // Mesmo padrão de `load_account`: reporta via canal, já que
+        // `save_config` é `&self` e não pode tocar `self.status`.
+        if let Err(error) = result {
+            let _ = self.tx.send(Msg::Error(format!(
+                "Não foi possível salvar a configuração: {error}"
+            )));
+        }
+    }
+}

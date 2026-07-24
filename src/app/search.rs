@@ -185,3 +185,95 @@ impl App {
         added
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::app::testing::*;
+
+    // Results arriving while the user browses elsewhere must pull both the
+    // section *and* the sidebar cursor to Search, or the next `j`/`k` walks
+    // from a stale base into an unrelated section.
+    #[test]
+    fn arriving_search_results_move_the_section_and_the_sidebar_together() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Fila;
+        app.sidebar_index = Section::Fila.index();
+
+        app.tx
+            .send(Msg::SearchResults(crate::models::SearchResults::default()))
+            .expect("channel open");
+        app.drain_messages();
+
+        assert_eq!(app.section, Section::Buscar);
+        assert_eq!(app.sidebar_index, Section::Buscar.index());
+    }
+    #[test]
+    fn search_hit_at_resolves_groups_in_display_order() {
+        let app = mixed_search_app();
+        assert_eq!(app.search_item_count(), 5);
+        assert!(matches!(app.search_hit_at(0), Some(SearchHit::Song(0))));
+        assert!(matches!(app.search_hit_at(1), Some(SearchHit::Song(1))));
+        assert!(matches!(app.search_hit_at(2), Some(SearchHit::Artist(a)) if a.browse_id == "UC1"));
+        assert!(
+            matches!(app.search_hit_at(3), Some(SearchHit::Album(p)) if p.browse_id == "MPRE1")
+        );
+        assert!(
+            matches!(app.search_hit_at(4), Some(SearchHit::Playlist(p)) if p.browse_id == "VLPL1")
+        );
+        assert!(app.search_hit_at(5).is_none());
+    }
+    #[test]
+    fn entering_a_song_in_mixed_results_seeds_a_radio_queue() {
+        let mut app = mixed_search_app();
+        app.section = Section::Buscar;
+        app.list_state.select(Some(1)); // "Song two"
+        assert!(
+            app.prepare_selection_for_playback(),
+            "songs start playback directly"
+        );
+        // Like YT Music: the queue starts with just the chosen song, and a
+        // radio of similar tracks is scheduled to fill it.
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].video_id, "s2");
+        assert_eq!(app.queue_index, Some(0));
+        assert_eq!(app.pending_radio_seed.as_deref(), Some("s2"));
+    }
+    #[test]
+    fn related_tracks_append_behind_the_playing_seed_without_duplicates() {
+        let seed = Track {
+            video_id: "s2".to_string(),
+            title: "Song two".to_string(),
+            ..Default::default()
+        };
+        let mut app = App::new_for_tests();
+        app.queue = vec![seed.clone()];
+        app.queue_index = Some(0);
+        app.current = Some(seed.clone());
+
+        let radio = vec![
+            seed.clone(), // radios echo the seed back — must not duplicate
+            Track {
+                video_id: "r1".to_string(),
+                ..Default::default()
+            },
+            Track {
+                video_id: "r2".to_string(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(app.append_related("s2", radio.clone()), 2);
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_index, Some(0), "playback position untouched");
+        assert_eq!(app.next_index, Some(1), "next track recomputed");
+
+        // A late radio for a track the user already skipped is discarded.
+        app.current = Some(Track {
+            video_id: "other".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(app.append_related("s2", radio), 0);
+        assert_eq!(app.queue.len(), 3);
+    }
+}

@@ -343,3 +343,85 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::app::testing::*;
+
+    #[test]
+    fn finishing_the_queue_clears_the_album_art() {
+        let mut app = App::new_for_tests();
+        let mut picker = ratatui_image::picker::Picker::from_fontsize((8, 16));
+        let cover = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([1, 2, 3]),
+        ));
+        app.artwork = Some(picker.new_resize_protocol(cover));
+        app.current = Some(Track::default());
+        app.queue = vec![Track::default()];
+        app.queue_index = Some(0);
+
+        // An empty radio batch ends playback; the cover must not linger.
+        app.tx.send(Msg::RadioTracks(Vec::new())).unwrap();
+        app.drain_messages();
+
+        assert!(app.current.is_none(), "playback ended");
+        assert!(
+            app.artwork.is_none(),
+            "stale cover must not outlive playback"
+        );
+    }
+    #[test]
+    fn resize_rebuilds_artwork_from_the_stored_cover() {
+        let mut app = App::new_for_tests();
+        app.picker = Some(ratatui_image::picker::Picker::from_fontsize((8, 16)));
+        app.artwork_source = Some(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            32,
+            32,
+            image::Rgb([10, 20, 30]),
+        )));
+        app.artwork = None;
+        app.clear_screen = false;
+
+        app.rebuild_artwork();
+        assert!(app.artwork.is_some(), "protocol re-created from the source");
+        assert!(app.clear_screen, "full clear requested after resize");
+
+        // Without a stored cover (nothing playing) it must not fabricate art.
+        let mut idle = App::new_for_tests();
+        idle.picker = Some(ratatui_image::picker::Picker::from_fontsize((8, 16)));
+        idle.rebuild_artwork();
+        assert!(idle.artwork.is_none());
+    }
+    #[test]
+    fn stop_clears_the_now_playing_state_but_keeps_the_queue() {
+        let mut app = App::new_for_tests();
+        app.current = Some(Track::default());
+        app.loading_audio = true;
+        app.lyrics = crate::lyrics::LyricsState::Plain("la la".to_string());
+        app.artwork_source = Some(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([1, 2, 3]),
+        )));
+        app.queue = vec![Track::default(), Track::default()];
+        app.queue_index = Some(1);
+
+        app.stop_playback();
+
+        assert!(app.current.is_none(), "no track shown as playing");
+        assert!(!app.loading_audio);
+        assert!(app.artwork_source.is_none(), "cover cleared");
+        assert!(app.clear_screen, "graphics leftovers get erased");
+        assert!(matches!(app.lyrics, crate::lyrics::LyricsState::None));
+        assert_eq!(app.queue.len(), 2, "queue survives for a later resume");
+
+        // Stopping when idle must not request a screen clear (no flicker).
+        let mut idle = App::new_for_tests();
+        idle.stop_playback();
+        assert!(!idle.clear_screen);
+    }
+}

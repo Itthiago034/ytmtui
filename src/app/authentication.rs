@@ -286,3 +286,165 @@ impl App {
         self.status = format!("⚠ {message}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // This module imports from `super` by name rather than glob, so the
+    // model types the fixtures build are not already in scope here.
+    #[allow(unused_imports)]
+    use crate::app::testing::*;
+    use crate::models::Playlist;
+
+    #[test]
+    fn test_preview_helper_installs_the_first_account_selection() {
+        let mut app = App::new_for_tests();
+        app.set_sign_in_preview_for_test(SignInPreview {
+            id: 7,
+            method: "mock".to_string(),
+            profile_label: None,
+            accounts: vec![crate::provider::SignInAccount {
+                index: 3,
+                name: "Preview Account".to_string(),
+                handle: None,
+            }],
+            current_account_name: None,
+        });
+
+        let (preview, selected) = app.sign_in_preview().expect("preview installed");
+        assert_eq!(preview.id, 7);
+        assert_eq!(selected, 0);
+    }
+    #[test]
+    fn stale_sign_in_messages_cannot_publish_or_cancel_another_operation() {
+        let mut app = App::new_for_tests();
+        app.authentication = AuthState::Authenticated;
+        app.account_name = Some("Existing Account".to_string());
+        app.authentication_flow = AuthenticationFlow::Activating {
+            operation_id: 4,
+            preview_id: 7,
+        };
+
+        app.tx
+            .send(Msg::SignedIn {
+                operation_id: 99,
+                preview_id: 7,
+                method: "firefox".to_string(),
+                credentials_path: Some("wrong-cookies.txt".to_string()),
+                account_name: "Wrong Account".to_string(),
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SignInFailed {
+                operation_id: 99,
+                message: "stale failure".to_string(),
+                preview_id: Some(7),
+            })
+            .unwrap();
+        app.drain_messages();
+
+        assert!(matches!(
+            app.authentication_flow,
+            AuthenticationFlow::Activating {
+                operation_id: 4,
+                preview_id: 7
+            }
+        ));
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("Existing Account"));
+        assert_ne!(app.cookies.as_deref(), Some("wrong-cookies.txt"));
+    }
+    #[test]
+    fn stale_session_payloads_cannot_overwrite_a_newly_activated_account() {
+        let mut app = App::new_for_tests();
+        app.session_generation = 2;
+        app.authentication = AuthState::Authenticated;
+        app.account_name = Some("New Account".to_string());
+        app.home = vec![crate::models::HomeSection {
+            title: "New home".to_string(),
+            items: vec![],
+        }];
+        app.library = vec![Playlist {
+            title: "New library".to_string(),
+            ..Default::default()
+        }];
+
+        app.tx
+            .send(Msg::HomeSectionsForSession {
+                session_generation: 1,
+                sections: vec![],
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::LibraryPlaylistsForSession {
+                session_generation: 1,
+                playlists: vec![],
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::AccountNameForSession {
+                session_generation: 1,
+                name: Some("Old Account".to_string()),
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SessionExpiredForSession {
+                session_generation: 1,
+            })
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("New Account"));
+        assert_eq!(app.home[0].title, "New home");
+        assert_eq!(app.library[0].title, "New library");
+    }
+    #[tokio::test]
+    async fn a_session_expiry_queued_before_sign_in_cannot_expire_the_new_account() {
+        let mut app = App::new_for_tests();
+        // `confirm_sign_in` advances this before the provider can commit.
+        app.session_generation = 1;
+        app.authentication_flow = AuthenticationFlow::Activating {
+            operation_id: 4,
+            preview_id: 7,
+        };
+        app.tx
+            .send(Msg::SessionExpiredForSession {
+                session_generation: 0,
+            })
+            .unwrap();
+        app.tx
+            .send(Msg::SignedIn {
+                operation_id: 4,
+                preview_id: 7,
+                method: "firefox".to_string(),
+                credentials_path: None,
+                account_name: "New Account".to_string(),
+            })
+            .unwrap();
+
+        app.drain_messages();
+
+        assert_eq!(app.authentication, AuthState::Authenticated);
+        assert_eq!(app.account_name.as_deref(), Some("New Account"));
+    }
+    #[tokio::test]
+    async fn confirming_sign_in_retires_the_previous_session_before_activation_runs() {
+        let mut app = App::new_for_tests();
+        app.set_sign_in_preview_for_test(SignInPreview {
+            id: 7,
+            method: "firefox".to_string(),
+            profile_label: None,
+            accounts: vec![crate::provider::SignInAccount {
+                index: 0,
+                name: "New Account".to_string(),
+                handle: None,
+            }],
+            current_account_name: None,
+        });
+
+        app.confirm_sign_in();
+
+        assert_eq!(app.session_generation, 1);
+    }
+}

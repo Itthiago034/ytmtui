@@ -231,3 +231,164 @@ impl App {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::app::testing::*;
+
+    #[test]
+    fn enqueue_in_mixed_results_rejects_non_song_rows() {
+        let mut app = mixed_search_app();
+        app.section = Section::Buscar;
+        app.list_state.select(Some(3)); // the album row
+        app.enqueue_selected();
+        assert!(
+            app.queue.is_empty(),
+            "albums must not be enqueued as tracks"
+        );
+        assert!(
+            app.status.contains("músicas"),
+            "explains why: {}",
+            app.status
+        );
+    }
+    #[test]
+    fn enqueueing_a_recent_home_track_does_not_interrupt_playback() {
+        let playing = Track {
+            video_id: "playing".into(),
+            title: "Playing".into(),
+            ..Default::default()
+        };
+        let recent = Track {
+            video_id: "recent".into(),
+            title: "Recent".into(),
+            ..Default::default()
+        };
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.recent = vec![recent];
+        app.queue = vec![playing.clone()];
+        app.queue_index = Some(0);
+        app.current = Some(playing);
+        app.list_state.select(Some(0));
+
+        app.enqueue_selected();
+
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|track| track.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["playing", "recent"]
+        );
+        assert_eq!(app.queue_index, Some(0));
+        assert_eq!(
+            app.current.as_ref().map(|track| track.video_id.as_str()),
+            Some("playing")
+        );
+        assert!(app.status.contains("adicionada à fila"));
+    }
+    #[test]
+    fn removing_a_track_before_the_current_one_shifts_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(0));
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_index, Some(0), "current track followed its move");
+        assert_eq!(app.queue[0].video_id, "b");
+    }
+    #[test]
+    fn the_playing_track_cannot_be_removed_from_the_queue() {
+        let mut app = queue_app();
+        app.list_state.select(Some(1)); // the playing track
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 4, "queue unchanged");
+        assert_eq!(app.queue_index, Some(1));
+    }
+    #[test]
+    fn removing_after_the_current_track_keeps_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(3));
+        app.queue_remove_selected();
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_index, Some(1));
+        // Selection clamps to the new last row instead of dangling.
+        assert_eq!(app.list_state.selected(), Some(2));
+    }
+    #[test]
+    fn moving_a_track_follows_selection_and_repoints_the_playing_index() {
+        let mut app = queue_app();
+        app.list_state.select(Some(2)); // "c"
+        app.queue_move_selected(-1); // swaps with "b" (the playing track)
+        assert_eq!(app.queue[1].video_id, "c");
+        assert_eq!(app.queue[2].video_id, "b");
+        assert_eq!(app.queue_index, Some(2), "playing track followed the swap");
+        assert_eq!(
+            app.list_state.selected(),
+            Some(1),
+            "selection followed the move"
+        );
+
+        // Edges saturate: can't move the first row further up.
+        app.list_state.select(Some(0));
+        app.queue_move_selected(-1);
+        assert_eq!(app.queue[0].video_id, "a");
+    }
+    #[test]
+    fn clearing_the_queue_keeps_only_the_playing_track() {
+        let mut app = queue_app();
+        app.queue_clear();
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].video_id, "b");
+        assert_eq!(app.queue_index, Some(0));
+
+        // With nothing playing, the queue empties entirely.
+        let mut stopped = queue_app();
+        stopped.current = None;
+        stopped.queue_clear();
+        assert!(stopped.queue.is_empty());
+        assert_eq!(stopped.queue_index, None);
+    }
+    #[test]
+    fn shuffle_visits_every_track_once_then_ends_when_repeat_is_off() {
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a"), track("b"), track("c"), track("d")];
+        app.shuffle = true;
+        // Simulates `start_current` for the first track.
+        app.queue_index = Some(0);
+        app.shuffle_played.insert("a".to_string());
+
+        let mut visited = vec!["a".to_string()];
+        let mut idx = 0;
+        while let Some(next) = app.compute_next(idx, false) {
+            let id = app.queue[next].video_id.clone();
+            assert!(
+                !visited.contains(&id),
+                "shuffle must not repeat a track within a cycle"
+            );
+            visited.push(id.clone());
+            app.shuffle_played.insert(id);
+            idx = next;
+        }
+        assert_eq!(visited.len(), 4, "every track played exactly once");
+    }
+    #[test]
+    fn shuffle_starts_a_new_cycle_when_repeat_all_wraps() {
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a"), track("b"), track("c")];
+        app.shuffle = true;
+        // Cycle exhausted: everything already played.
+        for id in ["a", "b", "c"] {
+            app.shuffle_played.insert(id.to_string());
+        }
+        let next = app.compute_next(1, true);
+        assert!(next.is_some(), "repeat all recycles the queue");
+        assert_ne!(
+            next,
+            Some(1),
+            "never repeats the current track back-to-back"
+        );
+    }
+}

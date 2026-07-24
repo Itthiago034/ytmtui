@@ -182,3 +182,281 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::app::testing::*;
+
+    #[test]
+    fn background_home_refresh_preserves_selection_by_browse_id() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.home = vec![crate::models::HomeSection {
+            title: "Quick picks".to_string(),
+            items: vec![
+                Playlist {
+                    browse_id: "VL1".to_string(),
+                    ..Default::default()
+                },
+                Playlist {
+                    browse_id: "VL2".to_string(),
+                    ..Default::default()
+                },
+            ],
+        }];
+        // Selects "VL2" (flattened index 1).
+        app.list_state.select(Some(1));
+
+        // A background refresh reorders VL2 ahead of VL1.
+        app.tx
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
+                title: "Quick picks".to_string(),
+                items: vec![
+                    Playlist {
+                        browse_id: "VL2".to_string(),
+                        ..Default::default()
+                    },
+                    Playlist {
+                        browse_id: "VL1".to_string(),
+                        ..Default::default()
+                    },
+                ],
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "selection follows VL2 to its new position"
+        );
+    }
+    #[test]
+    fn background_home_refresh_clamps_when_the_selected_item_is_gone() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.home = vec![crate::models::HomeSection {
+            title: "Quick picks".to_string(),
+            items: vec![
+                Playlist {
+                    browse_id: "VL1".to_string(),
+                    ..Default::default()
+                },
+                Playlist {
+                    browse_id: "VL2".to_string(),
+                    ..Default::default()
+                },
+            ],
+        }];
+        app.list_state.select(Some(1)); // VL2
+
+        // VL2 is gone from the refreshed data.
+        app.tx
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
+                title: "Quick picks".to_string(),
+                items: vec![Playlist {
+                    browse_id: "VL1".to_string(),
+                    ..Default::default()
+                }],
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "clamps to the nearest valid index instead of resetting to the top"
+        );
+    }
+    #[test]
+    fn background_library_refresh_preserves_selection_by_browse_id() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Biblioteca;
+        app.library = vec![
+            Playlist {
+                browse_id: "L1".to_string(),
+                ..Default::default()
+            },
+            Playlist {
+                browse_id: "L2".to_string(),
+                ..Default::default()
+            },
+        ];
+        app.list_state.select(Some(1)); // L2
+
+        app.tx
+            .send(Msg::LibraryPlaylists(vec![
+                Playlist {
+                    browse_id: "L2".to_string(),
+                    ..Default::default()
+                },
+                Playlist {
+                    browse_id: "L1".to_string(),
+                    ..Default::default()
+                },
+            ]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "selection follows L2 to its new position"
+        );
+    }
+    #[test]
+    fn first_home_load_still_selects_the_top_item() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        assert!(app.home.is_empty());
+
+        app.tx
+            .send(Msg::HomeSections(vec![crate::models::HomeSection {
+                title: "Quick picks".to_string(),
+                items: vec![Playlist {
+                    browse_id: "VL1".to_string(),
+                    ..Default::default()
+                }],
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "the very first load still selects the top item"
+        );
+    }
+    #[tokio::test]
+    async fn entering_a_recent_home_card_preserves_history_order_and_selected_index() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.recent = (1..=3)
+            .map(|i| Track {
+                video_id: format!("r{i}"),
+                title: format!("Recent {i}"),
+                ..Default::default()
+            })
+            .collect();
+        app.list_state.select(Some(1));
+
+        app.open_selected_home();
+
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|track| track.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r1", "r2", "r3"]
+        );
+        assert_eq!(app.queue_index, Some(1));
+        assert_eq!(
+            app.current.as_ref().map(|track| track.video_id.as_str()),
+            Some("r2")
+        );
+    }
+    #[test]
+    fn home_item_count_sums_across_sections_excluding_headers() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        assert_eq!(app.home_item_count(), 3);
+    }
+    #[test]
+    fn home_total_count_puts_recent_tracks_before_recommendations() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        app.recent = vec![
+            Track {
+                video_id: "r1".to_string(),
+                ..Default::default()
+            },
+            Track {
+                video_id: "r2".to_string(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(app.home_total_count(), 5);
+        // Recommendation lookups skip past the recent group.
+        assert_eq!(
+            app.home_item_at(5 - app.recent.len() - 1)
+                .map(|p| p.browse_id.as_str()),
+            Some("VL3")
+        );
+    }
+    #[test]
+    fn home_item_at_flattens_across_section_boundaries() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        assert_eq!(
+            app.home_item_at(0).map(|p| p.browse_id.as_str()),
+            Some("VL1")
+        );
+        assert_eq!(
+            app.home_item_at(1).map(|p| p.browse_id.as_str()),
+            Some("VL2")
+        );
+        assert_eq!(
+            app.home_item_at(2).map(|p| p.browse_id.as_str()),
+            Some("VL3")
+        );
+        assert!(app.home_item_at(3).is_none());
+    }
+    #[test]
+    fn home_flat_index_of_finds_items_regardless_of_section() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        assert_eq!(app.home_flat_index_of("VL1"), Some(0));
+        assert_eq!(app.home_flat_index_of("VL3"), Some(2));
+        assert_eq!(app.home_flat_index_of("missing"), None);
+    }
+    #[test]
+    fn home_failed_preserves_cached_shelves_and_clears_the_spinner() {
+        let mut app = App::new_for_tests();
+        app.home = home_sections();
+        app.begin_task();
+
+        app.tx.send(Msg::HomeFailed("boom".to_string())).unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.home.len(),
+            2,
+            "cached shelves survive a failed background refresh"
+        );
+        assert_eq!(app.home_error.as_deref(), Some("boom"));
+        assert!(!app.is_loading(), "the spinner is released on failure");
+        assert!(
+            app.status.contains('R'),
+            "status hints at the retry key: {}",
+            app.status
+        );
+    }
+    #[test]
+    fn home_sections_success_clears_a_previous_error() {
+        let mut app = App::new_for_tests();
+        app.home_error = Some("boom".to_string());
+
+        app.tx.send(Msg::HomeSections(Vec::new())).unwrap();
+        app.drain_messages();
+
+        assert!(
+            app.home_error.is_none(),
+            "a successful load clears the stale error"
+        );
+    }
+    #[test]
+    fn load_home_without_the_home_capability_creates_no_task() {
+        let mut mock = crate::provider::mock::MockProvider::default();
+        mock.capabilities.home = false;
+        let mut app = App::with_provider(std::sync::Arc::new(mock));
+
+        app.load_home();
+
+        assert!(
+            !app.is_loading(),
+            "no capability means no task, hence no spinner"
+        );
+    }
+}

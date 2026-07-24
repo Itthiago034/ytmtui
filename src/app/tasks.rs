@@ -408,3 +408,69 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::app::testing::*;
+
+    #[test]
+    fn concurrent_loads_keep_the_spinner_until_the_last_one_finishes() {
+        let mut app = App::new_for_tests();
+        // Simulates `sync_home_and_library`: two counted tasks in flight.
+        app.begin_task();
+        app.begin_task();
+
+        app.tx.send(Msg::HomeSections(Vec::new())).unwrap();
+        app.drain_messages();
+        assert!(
+            app.is_loading(),
+            "first response must not hide the spinner while the second load is in flight"
+        );
+
+        app.tx.send(Msg::LibraryPlaylists(Vec::new())).unwrap();
+        app.drain_messages();
+        assert!(!app.is_loading());
+    }
+    #[test]
+    fn stray_errors_never_underflow_the_busy_counter() {
+        let mut app = App::new_for_tests();
+        // An uncounted task (audio download, like) reporting an error while
+        // nothing counted is in flight must saturate at zero...
+        app.tx.send(Msg::Error("boom".to_string())).unwrap();
+        app.drain_messages();
+        assert!(!app.is_loading());
+
+        // ...so a counted task started right after still shows its spinner.
+        app.begin_task();
+        assert!(app.is_loading());
+    }
+    #[test]
+    fn background_library_refresh_does_not_clobber_the_status_bar() {
+        let mut app = App::new_for_tests();
+        app.library = vec![Playlist {
+            browse_id: "L1".to_string(),
+            ..Default::default()
+        }];
+        app.status = "▶ Tocando: Song — Artist".to_string();
+
+        app.tx
+            .send(Msg::LibraryPlaylists(vec![Playlist {
+                browse_id: "L1".to_string(),
+                ..Default::default()
+            }]))
+            .unwrap();
+        app.drain_messages();
+
+        assert_eq!(
+            app.status, "▶ Tocando: Song — Artist",
+            "periodic refresh must not overwrite what the user is reading"
+        );
+    }
+    #[test]
+    fn session_expiry_maps_to_the_dedicated_message() {
+        let message = client_error_message("Could not load library", ProviderError::SessionExpired);
+        assert!(matches!(message, Msg::SessionExpired));
+    }
+}

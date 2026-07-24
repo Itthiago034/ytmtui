@@ -85,3 +85,132 @@ impl App {
         std::mem::take(&mut self.clear_screen)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::app::testing::*;
+
+    #[test]
+    fn animation_is_only_needed_while_loading_or_playing() {
+        let mut app = App::new_for_tests();
+        assert!(!app.needs_animation(), "idle app needs no animation");
+
+        app.begin_task();
+        assert!(app.needs_animation(), "loading shows the spinner");
+        app.finish_task();
+
+        app.current = Some(crate::models::Track::default());
+        assert!(app.needs_animation(), "playback progress animates");
+    }
+    #[test]
+    fn kick_animation_is_a_no_op_under_reduced_motion() {
+        let mut app = App::new_for_tests();
+        app.reduced_motion = true;
+        app.kick_animation(std::time::Duration::from_millis(500));
+        assert!(
+            !app.animating(),
+            "reduced motion must never hold the fast redraw tier open"
+        );
+    }
+    #[test]
+    fn kick_animation_scales_the_window_by_animation_speed() {
+        // Same base duration, three speeds: the resulting deadline must
+        // order Slow > Normal > Fast, matching `AnimationSpeed::factor`.
+        let base = std::time::Duration::from_millis(200);
+        let deadline_for = |speed: AnimationSpeed| {
+            let mut app = App::new_for_tests();
+            app.animation_speed = speed;
+            let before = std::time::Instant::now();
+            app.kick_animation(base);
+            app.animate_until.expect("kick sets a deadline") - before
+        };
+        let fast = deadline_for(AnimationSpeed::Fast);
+        let normal = deadline_for(AnimationSpeed::Normal);
+        let slow = deadline_for(AnimationSpeed::Slow);
+        assert!(
+            fast < normal,
+            "fast ({fast:?}) must be shorter than normal ({normal:?})"
+        );
+        assert!(
+            normal < slow,
+            "normal ({normal:?}) must be shorter than slow ({slow:?})"
+        );
+    }
+    #[test]
+    fn animating_expires_after_the_kicked_window_elapses() {
+        let mut app = App::new_for_tests();
+        // A 1ms kick is effectively already expired by the time the assert
+        // below runs — no sleep needed in the test.
+        app.kick_animation(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(!app.animating(), "the animation window must expire");
+    }
+    #[test]
+    fn needs_fast_animation_is_true_while_animating_even_with_nothing_playing() {
+        let mut app = App::new_for_tests();
+        assert!(!app.needs_fast_animation(), "idle app needs no animation");
+        app.kick_animation(std::time::Duration::from_millis(500));
+        assert!(
+            app.needs_fast_animation(),
+            "a kicked-off transition holds the fast tier even without playback"
+        );
+    }
+    #[test]
+    fn reduced_motion_drops_the_fast_tier_even_while_the_visualizer_would_animate() {
+        let mut app = App::new_for_tests();
+        app.reduced_motion = true;
+        app.section = Section::Inicio;
+        app.current = Some(Track::default());
+        // Not paused: without `reduced_motion` this would need the fast tier
+        // (Home visualizer). Under `reduced_motion`, it must not.
+        assert!(!app.player.is_paused());
+        assert!(
+            !app.needs_fast_animation(),
+            "reduced motion falls back to the 200ms tier for continuous drivers"
+        );
+        assert!(
+            app.needs_animation(),
+            "playback progress still animates at the economy tier"
+        );
+    }
+    #[test]
+    fn moving_the_home_selection_marks_the_change_and_kicks_the_fast_tier() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Inicio;
+        app.home = home_sections();
+        app.list_state.select(Some(0));
+        assert!(app.selection_changed_at.is_none());
+
+        app.move_home(HomeDirection::Down);
+
+        assert!(
+            app.selection_changed_at.is_some(),
+            "move_home marks the selection as just-changed"
+        );
+        assert!(
+            app.needs_fast_animation(),
+            "the selection-change kick holds the fast tier"
+        );
+    }
+    #[tokio::test]
+    async fn starting_a_track_marks_track_changed_at_and_kicks_the_fast_tier() {
+        // `start_current` spawns background tasks (audio resolution, lyrics,
+        // artwork), so this needs a real Tokio runtime, like
+        // `entering_a_recent_home_card_preserves_history_order_and_selected_index`
+        // above.
+        let mut app = App::new_for_tests();
+        app.queue = vec![track("a")];
+        app.queue_index = Some(0);
+        let before = std::time::Instant::now();
+
+        app.start_current();
+
+        assert!(app.track_changed_at >= before);
+        assert!(
+            app.needs_fast_animation(),
+            "starting a track kicks the fast tier for the metadata fade-in"
+        );
+    }
+}

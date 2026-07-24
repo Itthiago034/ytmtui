@@ -373,8 +373,11 @@ pub struct App {
     /// Índice do tema de cores ativo (ver `crate::theme`).
     pub theme_index: usize,
     pub list_state: ListState,
-    /// Number of Home card columns available in the current layout.
-    pub home_columns: usize,
+
+    /// Presentation state: scroll offsets, grid geometry and animation
+    /// timing. Lives in `ui` because only renderers read it — see
+    /// [`crate::ui::state::UiState`].
+    pub ui: crate::ui::state::UiState,
 
     // Reprodução.
     pub queue: Vec<Track>,
@@ -396,10 +399,6 @@ pub struct App {
 
     // Extras.
     pub lyrics: crate::lyrics::LyricsState,
-    pub lyrics_scroll: u16,
-    /// Rolagem manual da tela de Ajuda (a lista de atalhos é maior que
-    /// terminais baixos). Clampada na renderização ao tamanho real do texto.
-    pub help_scroll: u16,
     /// Terminal image support detected at startup (Kitty/Sixel/iTerm2, with
     /// a Unicode half-block fallback). `None` until the main loop sets it.
     pub picker: Option<Picker>,
@@ -444,32 +443,6 @@ pub struct App {
     /// Estilo do visualizador de espectro do player. Chamado `visualizer_style`
     /// (e não `visualizer`) para não colidir com o analisador FFT acima.
     pub visualizer_style: VisualizerStyle,
-    /// Velocidade das animações: escala a janela de [`Self::kick_animation`]
-    /// e os estágios de revelação/fade-in lidos por `ui::main_panel` e
-    /// `ui::now_playing`.
-    pub animation_speed: AnimationSpeed,
-    /// Reduz/desativa animações não essenciais: [`Self::kick_animation`]
-    /// vira no-op, o marquee de títulos longos volta a truncar com '…', o
-    /// wipe do karaokê mostra a linha ativa já inteira "cantada", e a
-    /// revelação em estágios do card selecionado/metadados do now-playing
-    /// pula direto para o estado final.
-    pub reduced_motion: bool,
-    /// Instante até quando uma animação de transição (seleção da Home,
-    /// troca de faixa) ainda está em curso; `None` quando nenhuma está
-    /// ativa. Enquanto `animating()` é verdadeiro, [`Self::needs_fast_animation`]
-    /// segura o tier de redraw de 60ms só pela duração da transição, em vez
-    /// de indefinidamente — ver [`Self::kick_animation`].
-    animate_until: Option<std::time::Instant>,
-    /// Instante da última mudança de seleção na grade Início; consumido por
-    /// `ui::main_panel::draw_card` para a revelação em estágios do card
-    /// selecionado (fundo → título accent → badge). `None` antes de
-    /// qualquer navegação, o que já corresponde ao estado final completo.
-    pub(crate) selection_changed_at: Option<std::time::Instant>,
-    /// Instante em que a faixa atual mudou pela última vez (setado em
-    /// [`Self::start_current`]); consumido por `ui::now_playing` para o
-    /// fade-in de duas etapas do título. Nunca `None`: antes da primeira
-    /// faixa o valor é irrelevante, pois `current` ainda é `None`.
-    pub(crate) track_changed_at: std::time::Instant,
 }
 
 impl App {
@@ -554,7 +527,10 @@ impl App {
             account_name,
             theme_index,
             list_state,
-            home_columns: 1,
+            ui: crate::ui::state::UiState::new(
+                AnimationSpeed::from_config(&config.animation_speed),
+                config.reduced_motion,
+            ),
             queue: Vec::new(),
             queue_index: None,
             current: None,
@@ -564,8 +540,6 @@ impl App {
             rng_state: seed,
             shuffle_played: std::collections::HashSet::new(),
             lyrics: crate::lyrics::LyricsState::None,
-            lyrics_scroll: 0,
-            help_scroll: 0,
             picker: None,
             artwork: None,
             artwork_source: None,
@@ -582,11 +556,6 @@ impl App {
             artwork_mode: ArtworkMode::from_config(&config.artwork_mode),
             home_density: HomeDensity::from_config(&config.home_density),
             visualizer_style: VisualizerStyle::from_config(&config.visualizer),
-            animation_speed: AnimationSpeed::from_config(&config.animation_speed),
-            reduced_motion: config.reduced_motion,
-            animate_until: None,
-            selection_changed_at: None,
-            track_changed_at: std::time::Instant::now(),
         })
     }
 }
@@ -641,7 +610,7 @@ impl App {
             account_name: None,
             theme_index: 0,
             list_state,
-            home_columns: 1,
+            ui: crate::ui::state::UiState::new(AnimationSpeed::Normal, false),
             queue: Vec::new(),
             queue_index: None,
             current: None,
@@ -651,8 +620,6 @@ impl App {
             rng_state: 0x9E3779B97F4A7C15,
             shuffle_played: std::collections::HashSet::new(),
             lyrics: crate::lyrics::LyricsState::None,
-            lyrics_scroll: 0,
-            help_scroll: 0,
             picker: None,
             artwork: None,
             artwork_source: None,
@@ -667,11 +634,6 @@ impl App {
             artwork_mode: ArtworkMode::Auto,
             home_density: HomeDensity::Comfortable,
             visualizer_style: VisualizerStyle::Gradient,
-            animation_speed: AnimationSpeed::Normal,
-            reduced_motion: false,
-            animate_until: None,
-            selection_changed_at: None,
-            track_changed_at: std::time::Instant::now(),
         }
     }
 }

@@ -452,7 +452,7 @@ fn draw_home_sections(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     if app.home.is_empty() && app.recent.is_empty() {
         // Nothing to page through either way; keep the list-mode default.
-        app.home_columns = 1;
+        app.ui.home_columns = 1;
         draw_home_empty_state(f, app, area, theme);
         return;
     }
@@ -476,7 +476,7 @@ fn draw_home_sections(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     if list_area.width < GRID_MIN_WIDTH {
-        app.home_columns = 1;
+        app.ui.home_columns = 1;
         draw_home_list(f, app, list_area, theme);
         return;
     }
@@ -598,11 +598,11 @@ fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Them
     // The caller only takes this path once `area.width >= GRID_MIN_WIDTH`,
     // but a zero height is still possible on very short terminals.
     if area.width == 0 || area.height == 0 {
-        app.home_columns = 1;
+        app.ui.home_columns = 1;
         return;
     }
     let columns = (area.width / CARD_WIDTH).max(1) as usize;
-    app.home_columns = columns;
+    app.ui.home_columns = columns;
     let density = app.home_density;
     let shelf_h = shelf_height(density);
     // Only one card in the whole grid can be selected, so the reveal stage
@@ -761,7 +761,7 @@ fn draw_shelf_cards(
 }
 
 /// Stage of the selected card's staged reveal, driven by the elapsed time
-/// since `App::selection_changed_at` (see [`reveal_stage`]). Non-selected
+/// since the selection last moved (see [`reveal_stage`]). Non-selected
 /// cards never consult this — they always render the plain, un-accented
 /// look regardless of stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -773,9 +773,9 @@ pub(super) enum RevealStage {
     /// absent.
     Title,
     /// Past 160ms, under `reduced_motion`, or with no transition in
-    /// progress at all (`selection_changed_at` is `None`): the complete
+    /// progress at all (the selection never moved): the complete
     /// final look, including the provider badge. This is the only stage
-    /// buffer tests without an explicit `selection_changed_at` ever
+    /// buffer tests that never navigate the Home grid ever
     /// observe, so it must stay identical to the pre-Etapa-6 unconditional
     /// rendering.
     Full,
@@ -799,21 +799,13 @@ pub(super) fn reveal_stage(elapsed_ms: u128, reduced_motion: bool) -> RevealStag
     }
 }
 
-/// Resolves the current [`RevealStage`] from live `App` state: elapsed time
-/// since `selection_changed_at` (or "forever ago" when `None`, which always
-/// resolves to `Full`), scaled by [`crate::config::AnimationSpeed::factor`]
-/// the same way [`crate::app::App::kick_animation`] scales its window.
+/// Resolves the current [`RevealStage`] from live `App` state. A selection
+/// that never moved has no reveal to play, so it resolves to `Full`.
 fn current_reveal_stage(app: &App) -> RevealStage {
-    let Some(changed_at) = app.selection_changed_at else {
+    let Some(elapsed_ms) = app.ui.anim.since_selection_ms() else {
         return RevealStage::Full;
     };
-    let elapsed_ms = changed_at.elapsed().as_millis();
-    // Dividing (rather than multiplying) the elapsed time by the speed
-    // factor makes a `Slow` transition take longer to reach each stage —
-    // matching `kick_animation`, which multiplies the *window* by the same
-    // factor to make it last longer.
-    let scaled_ms = (elapsed_ms as f64 / app.animation_speed.factor()) as u128;
-    reveal_stage(scaled_ms, app.reduced_motion)
+    reveal_stage(elapsed_ms, app.ui.anim.reduced_motion())
 }
 
 /// One rounded card: title (bold), an optional subtitle (dropped in
@@ -1138,14 +1130,14 @@ fn draw_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block) {
 }
 
 /// Plain-text lyrics (Musixmatch fallback, no timestamps): manual scroll via
-/// `app.lyrics_scroll`, exactly as before this section supported synced
+/// `app.ui.lyrics_scroll`, exactly as before this section supported synced
 /// lyrics.
 fn draw_plain_lyrics(f: &mut Frame, app: &App, area: Rect, block: Block, text: &str) {
     let p = Paragraph::new(text.to_string())
         .style(Style::default().fg(app.theme().subtext))
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((app.lyrics_scroll, 0));
+        .scroll((app.ui.lyrics_scroll, 0));
     f.render_widget(p, area);
 }
 
@@ -1170,7 +1162,7 @@ fn draw_synced_lyrics(
         .iter()
         .enumerate()
         .map(|(i, l)| match active {
-            Some(a) if i == a => karaoke_line(l, position_ms, theme, app.reduced_motion),
+            Some(a) if i == a => karaoke_line(l, position_ms, theme, app.ui.anim.reduced_motion()),
             Some(a) => {
                 let color = match a.abs_diff(i) {
                     1 => theme.subtext,
@@ -1320,7 +1312,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
     // parar na última linha em vez de sumir com o texto.
     let visible = area.height.saturating_sub(2); // bordas do block
     let max_scroll = (lines.len() as u16).saturating_sub(visible);
-    let scroll = app.help_scroll.min(max_scroll);
+    let scroll = app.ui.help_scroll.min(max_scroll);
     f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
 }
 

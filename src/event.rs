@@ -219,9 +219,9 @@ fn page(app: &mut App, delta: isize) {
 /// conhece a altura real do painel).
 fn scroll_help(app: &mut App, delta: isize) {
     if delta > 0 {
-        app.help_scroll = app.help_scroll.saturating_add(delta as u16);
+        app.ui.help_scroll = app.ui.help_scroll.saturating_add(delta as u16);
     } else {
-        app.help_scroll = app.help_scroll.saturating_sub((-delta) as u16);
+        app.ui.help_scroll = app.ui.help_scroll.saturating_sub((-delta) as u16);
     }
 }
 
@@ -230,9 +230,9 @@ fn scroll_help(app: &mut App, delta: isize) {
 fn scroll_lyrics(app: &mut App, delta: isize) {
     if matches!(app.lyrics, crate::lyrics::LyricsState::Plain(_)) {
         if delta > 0 {
-            app.lyrics_scroll = app.lyrics_scroll.saturating_add(delta as u16);
+            app.ui.lyrics_scroll = app.ui.lyrics_scroll.saturating_add(delta as u16);
         } else {
-            app.lyrics_scroll = app.lyrics_scroll.saturating_sub((-delta) as u16);
+            app.ui.lyrics_scroll = app.ui.lyrics_scroll.saturating_sub((-delta) as u16);
         }
     }
 }
@@ -430,7 +430,7 @@ mod tests {
         let mut home = App::new_for_tests();
         home.section = Section::Inicio;
         home.focus = Focus::Main;
-        home.home_columns = 3;
+        home.ui.home_columns = 3;
         home.recent = (1..=3)
             .map(|i| crate::models::Track {
                 video_id: format!("t{i}"),
@@ -469,7 +469,7 @@ mod tests {
         let mut app = App::new_for_tests();
         app.section = Section::Inicio;
         app.focus = Focus::Main;
-        app.home_columns = 3;
+        app.ui.home_columns = 3;
         app.recent = (1..=3)
             .map(|i| crate::models::Track {
                 video_id: format!("t{i}"),

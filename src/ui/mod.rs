@@ -15,6 +15,7 @@ mod authentication;
 mod main_panel;
 mod nav;
 mod now_playing;
+pub mod state;
 
 #[cfg(test)]
 mod tests;

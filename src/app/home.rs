@@ -127,10 +127,10 @@ impl App {
         let current = self.list_state.selected().unwrap_or(0);
         let next = self
             .home_view()
-            .move_index(current, direction, self.home_columns);
+            .move_index(current, direction, self.ui.home_columns);
         self.list_state
             .select((self.home_total_count() > 0).then_some(next));
-        self.mark_selection_changed();
+        self.ui.anim.mark_selection_changed();
     }
 
     /// Registra uma faixa no histórico local (topo da lista, sem duplicatas,

@@ -31,7 +31,7 @@ impl App {
         let next = (cur + delta).rem_euclid(len as isize) as usize;
         self.list_state.select(Some(next));
         if self.section == Section::Inicio {
-            self.mark_selection_changed();
+            self.ui.anim.mark_selection_changed();
         }
     }
 
@@ -47,7 +47,7 @@ impl App {
         let next = (cur + delta).clamp(0, len as isize - 1) as usize;
         self.list_state.select(Some(next));
         if self.section == Section::Inicio {
-            self.mark_selection_changed();
+            self.ui.anim.mark_selection_changed();
         }
     }
 
@@ -56,7 +56,7 @@ impl App {
         if self.main_len() > 0 {
             self.list_state.select(Some(0));
             if self.section == Section::Inicio {
-                self.mark_selection_changed();
+                self.ui.anim.mark_selection_changed();
             }
         }
     }
@@ -67,7 +67,7 @@ impl App {
         if len > 0 {
             self.list_state.select(Some(len - 1));
             if self.section == Section::Inicio {
-                self.mark_selection_changed();
+                self.ui.anim.mark_selection_changed();
             }
         }
     }
@@ -130,7 +130,7 @@ mod tests {
         app.queue = vec![track("a"), track("b")];
         app.move_selection(1);
         assert!(
-            app.selection_changed_at.is_none(),
+            !app.ui.anim.selection_ever_changed(),
             "the queue section has no card-reveal transition to drive"
         );
     }

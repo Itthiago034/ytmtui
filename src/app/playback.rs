@@ -53,7 +53,7 @@ impl App {
         self.current = None;
         self.loading_audio = false;
         self.lyrics = crate::lyrics::LyricsState::None;
-        self.lyrics_scroll = 0;
+        self.ui.lyrics_scroll = 0;
         self.visualizer.reset();
         if had_track {
             self.clear_artwork();
@@ -184,14 +184,13 @@ impl App {
             return;
         };
         self.current = Some(track.clone());
-        self.track_changed_at = std::time::Instant::now();
-        self.kick_animation(std::time::Duration::from_millis(300));
+        self.ui.anim.mark_track_changed();
         if self.shuffle {
             self.shuffle_played.insert(track.video_id.clone());
         }
         self.remember_recent(&track);
         self.lyrics = crate::lyrics::LyricsState::None;
-        self.lyrics_scroll = 0;
+        self.ui.lyrics_scroll = 0;
         self.clear_artwork();
         self.visualizer.reset();
         self.loading_audio = true;

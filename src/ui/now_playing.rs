@@ -14,7 +14,7 @@ fn fmt(secs: u64) -> String {
 }
 
 /// Stage of the now-playing title's metadata fade-in after a track change,
-/// driven by elapsed time since `App::track_changed_at`. Two stages only
+/// driven by elapsed time since the current track started. Two stages only
 /// (unlike the Home card's three-stage [`super::main_panel::RevealStage`]):
 /// there's just the one style property (color) fading in here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,9 +81,8 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
         // color instead of snapping straight to its final style — the
         // "metadata reveal" for the now-playing summary. `reduced_motion`
         // skips this via `metadata_stage`.
-        let elapsed_ms = app.track_changed_at.elapsed().as_millis();
-        let scaled_ms = (elapsed_ms as f64 / app.animation_speed.factor()) as u128;
-        let fg = match metadata_stage(scaled_ms, app.reduced_motion) {
+        let elapsed_ms = app.ui.anim.since_track_change_ms();
+        let fg = match metadata_stage(elapsed_ms, app.ui.anim.reduced_motion()) {
             MetadataStage::Fading => theme.subtext,
             MetadataStage::Final => theme.text,
         };
@@ -124,31 +123,31 @@ fn draw_track_line(f: &mut Frame, app: &App, area: Rect) {
     // (e congelando em pausa); com espaço de sobra, texto estático normal.
     // `reduced_motion` desativa esse deslizamento (volta ao truncamento com
     // '…' abaixo); `animation_speed` ajusta o passo via `marquee_interval`.
-    let mut middle = if needed > avail && avail >= 8 && app.current.is_some() && !app.reduced_motion
-    {
-        let interval = crate::ui::marquee_interval(app.animation_speed);
-        let step = (app.player.position().as_millis() / interval) as usize;
-        crate::ui::marquee_spans(
-            &[
-                (title.as_str(), title_style),
-                (subtitle.as_str(), subtitle_style),
-            ],
-            avail,
-            step,
-        )
-    } else {
-        let title_shown = crate::ui::truncate_chars(&title, avail);
-        let remaining = avail.saturating_sub(crate::ui::display_width(&title_shown));
-        let subtitle_shown = if remaining >= 4 {
-            crate::ui::truncate_chars(&subtitle, remaining)
+    let mut middle =
+        if needed > avail && avail >= 8 && app.current.is_some() && !app.ui.anim.reduced_motion() {
+            let interval = crate::ui::marquee_interval(app.ui.anim.speed());
+            let step = (app.player.position().as_millis() / interval) as usize;
+            crate::ui::marquee_spans(
+                &[
+                    (title.as_str(), title_style),
+                    (subtitle.as_str(), subtitle_style),
+                ],
+                avail,
+                step,
+            )
         } else {
-            String::new()
+            let title_shown = crate::ui::truncate_chars(&title, avail);
+            let remaining = avail.saturating_sub(crate::ui::display_width(&title_shown));
+            let subtitle_shown = if remaining >= 4 {
+                crate::ui::truncate_chars(&subtitle, remaining)
+            } else {
+                String::new()
+            };
+            vec![
+                Span::styled(title_shown, title_style),
+                Span::styled(subtitle_shown, subtitle_style),
+            ]
         };
-        vec![
-            Span::styled(title_shown, title_style),
-            Span::styled(subtitle_shown, subtitle_style),
-        ]
-    };
     let used: usize = middle
         .iter()
         .map(|s| crate::ui::display_width(&s.content))

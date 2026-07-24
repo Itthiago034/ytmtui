@@ -356,7 +356,7 @@ fn reduced_motion_disables_the_marquee_and_falls_back_to_ellipsis_truncation() {
     if let Some(t) = app.current.as_mut() {
         t.title = long_title;
     }
-    app.reduced_motion = true;
+    app.ui.anim.set_reduced_motion(true);
 
     app.player.seek_to(std::time::Duration::from_secs(0));
     let row_at_0 = track_row(&mut app, 80, 24);
@@ -416,7 +416,7 @@ fn track_title_fades_in_from_subtext_right_after_a_track_change() {
     let theme = app.theme();
 
     // `App::new_for_tests` (called inside `playing_app`) just set
-    // `track_changed_at` to "now" — well within the fade-in window.
+    // the track change to "now" — well within the fade-in window.
     let (x, y) = find_cell(&buffer, "Yellow");
     assert_eq!(
         buffer[(x, y)].fg,
@@ -432,7 +432,9 @@ fn track_title_settles_to_its_final_style_once_the_fade_finishes() {
     // Backdate the track change well past the ~150ms fade-in window —
     // `Instant` can't be mocked, so this is the only way to exercise the
     // "fade finished" branch in a buffer test without sleeping.
-    app.track_changed_at = std::time::Instant::now() - std::time::Duration::from_millis(500);
+    app.ui
+        .anim
+        .backdate_track_change(std::time::Duration::from_millis(500));
     let buffer = render(&mut app, 100, 30);
     let theme = app.theme();
 
@@ -711,9 +713,9 @@ fn home_grid_shows_two_shelves_with_cards_side_by_side_in_wide_terminals() {
     );
 
     assert!(
-        app.home_columns > 1,
+        app.ui.home_columns > 1,
         "grid mode computes columns > 1 for a wide panel, got {}",
-        app.home_columns
+        app.ui.home_columns
     );
 }
 
@@ -851,7 +853,9 @@ fn freshly_changed_home_selection_shows_the_background_before_the_badge() {
     // at the `Background` stage — background shown, but no accent title
     // and no provider badge yet. No sleep: the assertions below run well
     // inside that 80ms window.
-    app.selection_changed_at = Some(std::time::Instant::now());
+    app.ui
+        .anim
+        .backdate_selection_change(std::time::Duration::ZERO);
 
     let buffer = render(&mut app, 100, 30);
     let theme = app.theme();
@@ -879,11 +883,13 @@ fn freshly_changed_home_selection_shows_the_background_before_the_badge() {
 #[test]
 fn reduced_motion_skips_the_reveal_stages_and_shows_the_badge_immediately() {
     let mut app = grid_home_app();
-    app.reduced_motion = true;
+    app.ui.anim.set_reduced_motion(true);
     app.list_state.select(Some(0));
     // Same "just changed" instant as the previous test, but this time
     // `reduced_motion` must skip straight to the final state.
-    app.selection_changed_at = Some(std::time::Instant::now());
+    app.ui
+        .anim
+        .backdate_selection_change(std::time::Duration::ZERO);
 
     let buffer = render(&mut app, 100, 30);
     let content = text(&buffer);
@@ -919,7 +925,7 @@ fn narrow_home_keeps_the_flat_list_and_a_single_column_even_with_many_cards() {
         "narrow Home never puts two items on the same row:\n{content}"
     );
     assert_eq!(
-        app.home_columns, 1,
+        app.ui.home_columns, 1,
         "narrow Home reports a single column for move_home's benefit"
     );
 }
@@ -942,7 +948,7 @@ fn home_error_banner_coexists_with_the_grid() {
         "cached shelves still render as a grid underneath the banner:\n{content}"
     );
     assert!(
-        app.home_columns > 1,
+        app.ui.home_columns > 1,
         "the banner doesn't force a fallback to list mode"
     );
 }

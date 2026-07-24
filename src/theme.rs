@@ -144,6 +144,26 @@ pub const THEMES: &[Theme] = &[
     },
 ];
 
+/// Interpola de `from` a `to`, com `t` saturado em `0.0..=1.0`.
+///
+/// Só mistura de fato quando ambos os lados são [`Color::Rgb`] — o caso de
+/// todos os presets. Com qualquer outra variante (`Reset`, cores indexadas do
+/// terminal) não há canal para interpolar, então a função corta na metade:
+/// devolve `from` na primeira metade e `to` na segunda. Isso degrada um fade
+/// contínuo para um único passo, em vez de escolher um RGB arbitrário que
+/// ignoraria a paleta do terminal do usuário.
+pub fn mix(from: Color, to: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    match (from, to) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+            Color::Rgb(lerp(r1, r2), lerp(g1, g2), lerp(b1, b2))
+        }
+        _ if t < 0.5 => from,
+        _ => to,
+    }
+}
+
 /// Índice do tema pelo nome (case-insensitive); 0 (padrão) se não encontrado.
 pub fn index_by_name(name: &str) -> usize {
     THEMES
@@ -175,6 +195,38 @@ mod tests {
                 theme.name
             );
         }
+    }
+
+    #[test]
+    fn mix_returns_the_endpoints_exactly() {
+        let a = Color::Rgb(0, 0, 0);
+        let b = Color::Rgb(255, 128, 64);
+        assert_eq!(mix(a, b, 0.0), a);
+        assert_eq!(mix(a, b, 1.0), b);
+    }
+
+    #[test]
+    fn mix_interpolates_each_channel_independently() {
+        let a = Color::Rgb(0, 100, 200);
+        let b = Color::Rgb(100, 200, 0);
+        assert_eq!(mix(a, b, 0.5), Color::Rgb(50, 150, 100));
+    }
+
+    #[test]
+    fn mix_saturates_out_of_range_fractions() {
+        let a = Color::Rgb(10, 10, 10);
+        let b = Color::Rgb(20, 20, 20);
+        assert_eq!(mix(a, b, -3.0), a);
+        assert_eq!(mix(a, b, 7.5), b);
+    }
+
+    #[test]
+    fn mix_degrades_to_a_single_step_for_non_rgb_colors() {
+        // `Reset` has no channels to interpolate, so the fade becomes one
+        // switch at the midpoint rather than an invented RGB value.
+        let rgb = Color::Rgb(255, 255, 255);
+        assert_eq!(mix(Color::Reset, rgb, 0.25), Color::Reset);
+        assert_eq!(mix(Color::Reset, rgb, 0.75), rgb);
     }
 
     #[test]

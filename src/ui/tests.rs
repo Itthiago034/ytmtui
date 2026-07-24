@@ -1276,3 +1276,80 @@ fn marquee_slides_one_column_per_step_and_wraps_with_a_gap() {
     assert_eq!(at(0), "A漢");
     assert_eq!(at(2), " B ", "half of a wide char becomes a space");
 }
+
+// --- entry animation -----------------------------------------------------
+
+/// An app with the entry animation running, as if it had just started.
+fn splash_app() -> App {
+    let mut app = App::new_for_tests();
+    app.ui = crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, false, true);
+    app
+}
+
+#[test]
+fn the_entry_animation_covers_the_interface_until_it_hands_over() {
+    let mut app = splash_app();
+    let buffer = render(&mut app, 100, 30);
+    let screen = text(&buffer);
+
+    // The wordmark is up...
+    assert!(
+        screen.contains('█'),
+        "the wordmark should be on screen:\n{screen}"
+    );
+    // ...and the interface it will hand over to is not, yet.
+    assert!(
+        !screen.contains("Home"),
+        "the sidebar must stay hidden during the wipe:\n{screen}"
+    );
+}
+
+#[test]
+fn the_handoff_phase_draws_the_interface_underneath() {
+    let mut app = splash_app();
+    // Jump to the handoff by backdating the boot clock past the earlier
+    // phases, rather than sleeping through them.
+    app.ui
+        .anim
+        .backdate_boot(std::time::Duration::from_millis(1000));
+
+    let buffer = render(&mut app, 100, 30);
+    let screen = text(&buffer);
+    assert!(
+        screen.contains("Home"),
+        "the real interface must be drawn under the handoff:\n{screen}"
+    );
+}
+
+#[test]
+fn a_key_press_dismisses_the_entry_animation() {
+    let mut app = splash_app();
+    assert!(app.ui.splash_phase().is_some());
+
+    crate::event::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+
+    assert!(
+        app.ui.splash_phase().is_none(),
+        "any key must get the user straight to the app"
+    );
+}
+
+#[test]
+fn reduced_motion_skips_the_entry_animation_entirely() {
+    // Reduced motion outranks the preference: asking for the animation and
+    // for reduced motion at the same time must not animate.
+    let state = crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, true, true);
+    assert!(state.splash_phase().is_none());
+}
+
+#[test]
+fn turning_the_entry_animation_off_skips_it() {
+    let state = crate::ui::state::UiState::new(crate::config::AnimationSpeed::Normal, false, false);
+    assert!(state.splash_phase().is_none());
+}

@@ -15,6 +15,7 @@ mod authentication;
 mod main_panel;
 mod nav;
 mod now_playing;
+pub mod splash;
 pub mod state;
 
 #[cfg(test)]
@@ -42,14 +43,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    if area.width < NARROW_WIDTH {
-        draw_narrow(f, app, area);
-    } else {
-        draw_wide(f, app, area);
+    // The entry animation owns the whole frame until its last phase, which
+    // hands over by letting the real UI draw underneath it.
+    let splash_phase = app.ui.splash_phase();
+    if splash_phase.map(splash::shows_app_underneath) != Some(false) {
+        if area.width < NARROW_WIDTH {
+            draw_narrow(f, app, area);
+        } else {
+            draw_wide(f, app, area);
+        }
+        // Modal layers are always drawn last so the underlying screen cannot
+        // overwrite account choices or controls.
+        authentication::draw(f, app, area);
     }
-    // Modal layers are always drawn last so the underlying screen cannot
-    // overwrite account choices or controls.
-    authentication::draw(f, app, area);
+    if let Some(phase) = splash_phase {
+        splash::draw(f, area, phase, app.theme());
+    }
 }
 
 /// Wide layout: navigation + content columns above playback and status rows.

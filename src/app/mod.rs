@@ -530,6 +530,7 @@ impl App {
             ui: crate::ui::state::UiState::new(
                 AnimationSpeed::from_config(&config.animation_speed),
                 config.reduced_motion,
+                config.splash,
             ),
             queue: Vec::new(),
             queue_index: None,
@@ -610,7 +611,8 @@ impl App {
             account_name: None,
             theme_index: 0,
             list_state,
-            ui: crate::ui::state::UiState::new(AnimationSpeed::Normal, false),
+            // Tests never want the entry animation covering the frame.
+            ui: crate::ui::state::UiState::new(AnimationSpeed::Normal, false, false),
             queue: Vec::new(),
             queue_index: None,
             current: None,

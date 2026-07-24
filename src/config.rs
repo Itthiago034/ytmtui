@@ -59,6 +59,9 @@ pub struct Config {
     /// já inteira "cantada"), e a revelação em estágios do card
     /// selecionado/metadados do now-playing (pula direto ao estado final).
     pub reduced_motion: bool,
+    /// Exibe a animação de entrada (wordmark montando) ao abrir o app.
+    /// Ignorada quando `reduced_motion` está ligado.
+    pub splash: bool,
 }
 
 impl Default for Config {
@@ -77,6 +80,7 @@ impl Default for Config {
             visualizer: "gradient".to_string(),
             animation_speed: "normal".to_string(),
             reduced_motion: false,
+            splash: true,
         }
     }
 }
@@ -309,6 +313,7 @@ mod tests {
         assert_eq!(config.visualizer, "gradient");
         assert_eq!(config.animation_speed, "normal");
         assert!(!config.reduced_motion);
+        assert!(config.splash, "the entry animation is on by default");
         // Campos antigos continuam lidos normalmente.
         assert_eq!(config.volume, 0.5);
         assert_eq!(config.theme, "Oceano");

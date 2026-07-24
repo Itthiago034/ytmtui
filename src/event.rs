@@ -7,6 +7,11 @@ use crate::home::HomeDirection;
 
 /// Processa uma tecla pressionada, atualizando o estado da aplicação.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    // Any key dismisses the entry animation. The key still does its normal
+    // job below — skipping the animation is a side effect of getting to
+    // work, not a keystroke the user has to spend.
+    app.ui.skip_splash();
+
     // The account picker is modal: while it is visible, every key is
     // consumed here so playback, navigation, search, and quit shortcuts
     // cannot leak through to the underlying interface.

@@ -402,14 +402,9 @@ fn draw_greeting(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Block-glyph wordmark shown on the empty Home screen. 23 columns wide,
-/// built only from full/half blocks so it renders on any monospace font.
-const LOGO: [&str; 3] = [
-    "█ █ ▀█▀ █▀▄▀█ ▀█▀ █ █ █",
-    "▀█▀  █  █   █  █  █ █ █",
-    " ▀   ▀  ▀   ▀  ▀  ▀▀▀ ▀",
-];
-const TAGLINE: &str = "YouTube Music in your terminal";
+// The empty Home screen and the entry animation show the same wordmark, so
+// it is defined once, next to the animation that assembles it.
+use super::splash::{LOGO, TAGLINE};
 
 /// The recommendations area (or its empty/loading message), without a
 /// border of its own — the border now belongs to the whole Home area. Wide

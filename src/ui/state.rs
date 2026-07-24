@@ -23,16 +23,43 @@ pub struct UiState {
     /// renderer (it measures the area), read by `App::move_home` so spatial
     /// navigation matches what is actually on screen.
     pub home_columns: usize,
+    /// Whether the entry animation is still running. Cleared when it
+    /// finishes or when the user presses any key; `false` from the start
+    /// when the animation is turned off or reduced motion is on.
+    splash_running: bool,
 }
 
 impl UiState {
-    pub fn new(speed: AnimationSpeed, reduced_motion: bool) -> Self {
+    pub fn new(speed: AnimationSpeed, reduced_motion: bool, splash: bool) -> Self {
         Self {
             anim: AnimationClock::new(speed, reduced_motion),
             lyrics_scroll: 0,
             help_scroll: 0,
             home_columns: 1,
+            // Reduced motion outranks the preference: it exists to stop
+            // exactly this kind of decorative motion.
+            splash_running: splash && !reduced_motion,
         }
+    }
+
+    /// The entry animation's current phase, or `None` once it is over.
+    ///
+    /// Resolving this from the boot clock (rather than storing a phase)
+    /// keeps the animation correct across a speed change mid-flight.
+    pub fn splash_phase(&self) -> Option<crate::ui::splash::Phase> {
+        if !self.splash_running {
+            return None;
+        }
+        match crate::ui::splash::phase_at(self.anim.since_boot_ms()) {
+            crate::ui::splash::Phase::Done => None,
+            phase => Some(phase),
+        }
+    }
+
+    /// Cancels the entry animation. Called on the first key press, so a
+    /// user who wants to get straight to work never waits it out.
+    pub fn skip_splash(&mut self) {
+        self.splash_running = false;
     }
 }
 
@@ -175,6 +202,13 @@ impl AnimationClock {
     #[cfg(test)]
     pub(crate) fn backdate_selection_change(&mut self, ago: Duration) {
         self.selection_changed_at = Some(Instant::now() - ago);
+    }
+
+    /// Backdates the boot instant so a test can observe a chosen phase of
+    /// the entry animation without sleeping through the earlier ones.
+    #[cfg(test)]
+    pub(crate) fn backdate_boot(&mut self, ago: Duration) {
+        self.booted_at = Instant::now() - ago;
     }
 
     /// When the current track started, for tests asserting the mark landed.

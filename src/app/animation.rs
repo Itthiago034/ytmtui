@@ -29,6 +29,11 @@ impl App {
     /// under `reduced_motion` either, since [`AnimationClock::kick`] is a
     /// no-op there, so `animating()` is always false in that mode.
     pub fn needs_fast_animation(&self) -> bool {
+        // The entry animation is continuous motion covering the whole
+        // frame; nothing else on screen matters while it runs.
+        if self.ui.splash_phase().is_some() {
+            return true;
+        }
         if self.ui.anim.animating() {
             return true;
         }

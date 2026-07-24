@@ -73,7 +73,7 @@ impl App {
             // Not editable at runtime yet; preserve whatever's on disk
             // rather than overwriting it with the in-memory Duration.
             sync_interval_secs: saved.sync_interval_secs,
-            // Same story as `sync_interval_secs` above: these five have no
+            // Same story as `sync_interval_secs` above: these six have no
             // in-app editor yet, so whatever's on disk wins over the
             // in-memory value loaded at startup.
             artwork_mode: saved.artwork_mode,
@@ -81,6 +81,7 @@ impl App {
             visualizer: saved.visualizer,
             animation_speed: saved.animation_speed,
             reduced_motion: saved.reduced_motion,
+            splash: saved.splash,
         }
         .save();
     }

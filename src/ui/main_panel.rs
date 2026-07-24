@@ -348,11 +348,17 @@ fn draw_playlists(f: &mut Frame, app: &App, area: Rect, block: Block) {
 /// Height of the player panel above the recommendations list: 1 title row +
 /// 5 bar rows + 1 blank spacer row.
 const PLAYER_PANEL_HEIGHT: u16 = 7;
+/// Rows the recommendations area needs at minimum, whether or not the
+/// "Up Next" preview is shown above it.
+const MIN_BODY_HEIGHT: u16 = 1;
+/// Upcoming queue tracks shown in the "Up Next" preview.
+const UP_NEXT_TRACKS: usize = 3;
 
 /// Home renders the outer border once around the whole area, then — when
-/// there's enough height — splits the inside into a player panel (track
-/// title + spectrum bars) above the usual recommendations list. Short
-/// terminals degrade to just the list/message, exactly like before.
+/// there's enough height — splits the inside into a greeting row, a player
+/// panel (track title + spectrum bars), an optional "Up Next" preview of the
+/// coming queue, and the usual recommendations list. Short terminals degrade
+/// to just the list/message, exactly like before.
 fn draw_home(f: &mut Frame, app: &mut App, area: Rect, block: Block) {
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -364,17 +370,93 @@ fn draw_home(f: &mut Frame, app: &mut App, area: Rect, block: Block) {
         draw_home_sections(f, app, inner);
         return;
     }
+
+    // Materialize the preview lines as owned strings up front: the borrow of
+    // `app.queue` must not outlive this, because `draw_home_sections` below
+    // takes `&mut App`.
+    let upcoming = upcoming_titles(app);
+    let theme = app.theme();
+    let spare = inner
+        .height
+        .saturating_sub(1 + PLAYER_PANEL_HEIGHT + MIN_BODY_HEIGHT);
+    let up_next_height = if upcoming.is_empty() {
+        0
+    } else {
+        (1 + upcoming.len() as u16).min(spare)
+    };
+
+    let mut constraints = vec![
+        Constraint::Length(1),
+        Constraint::Length(PLAYER_PANEL_HEIGHT),
+    ];
+    if up_next_height > 0 {
+        constraints.push(Constraint::Length(up_next_height));
+    }
+    constraints.push(Constraint::Min(1));
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(PLAYER_PANEL_HEIGHT),
-            Constraint::Min(1),
-        ])
+        .constraints(constraints)
         .split(inner);
+
     draw_greeting(f, app, rows[0]);
     draw_player_panel(f, app, rows[1]);
-    draw_home_sections(f, app, rows[2]);
+    if up_next_height > 0 {
+        draw_up_next(f, theme, rows[2], &upcoming);
+        draw_home_sections(f, app, rows[3]);
+    } else {
+        draw_home_sections(f, app, rows[2]);
+    }
+}
+
+/// Pre-formatted "title — artist" lines for up to [`UP_NEXT_TRACKS`] tracks
+/// queued after the one currently playing. Empty when nothing is playing or
+/// the current track is the last one queued — the queue only grows past that
+/// point once a radio (autoplay) batch arrives.
+fn upcoming_titles(app: &App) -> Vec<String> {
+    let Some(idx) = app.queue_index else {
+        return Vec::new();
+    };
+    app.queue
+        .iter()
+        .skip(idx + 1)
+        .take(UP_NEXT_TRACKS)
+        .map(|t| {
+            if t.artist.is_empty() {
+                t.title.clone()
+            } else {
+                format!("{} — {}", t.title, t.artist)
+            }
+        })
+        .collect()
+}
+
+/// "Up Next" preview: a header line plus the upcoming queue tracks,
+/// borderless like the recommendations list below it.
+fn draw_up_next(f: &mut Frame, theme: ThemeColors, area: Rect, upcoming: &[String]) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "Up Next",
+            Style::default()
+                .fg(theme.secondary)
+                .add_modifier(Modifier::BOLD),
+        )),
+        rows[0],
+    );
+    let width = rows[1].width as usize;
+    let lines: Vec<Line> = upcoming
+        .iter()
+        .map(|text| {
+            Line::from(Span::styled(
+                crate::ui::truncate_chars(text, width),
+                Style::default().fg(theme.subtext),
+            ))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), rows[1]);
 }
 
 /// Time-of-day greeting with the signed-in name on the left and the current

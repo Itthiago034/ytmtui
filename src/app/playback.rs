@@ -318,9 +318,16 @@ impl App {
             return;
         }
         let idx = self.queue_index.unwrap_or(0);
-        let next = self.compute_next(idx, true).unwrap_or(0);
-        self.queue_index = Some(next);
-        self.start_current();
+        // Ao chegar ao fim sem repetição, o pulo manual segue o mesmo caminho
+        // do auto-avanço: inicia uma rádio (como no YT Music) em vez de voltar
+        // silenciosamente para o início da fila.
+        match self.compute_next(idx, self.repeat != RepeatMode::Off) {
+            Some(next) => {
+                self.queue_index = Some(next);
+                self.start_current();
+            }
+            None => self.end_of_queue(),
+        }
     }
 
     /// Volta para a faixa anterior da fila.
@@ -362,39 +369,42 @@ impl App {
                 self.queue_index = Some(n);
                 self.start_current();
             }
-            None => {
-                // Fim da fila: tenta continuar com uma rádio (autoplay).
-                if self.autoplay && self.provider.capabilities().radio {
-                    if let Some(seed) = self.current.as_ref().map(|t| t.video_id.clone()) {
-                        if !seed.is_empty() {
-                            self.status = "📻 Fila concluída — carregando rádio...".to_string();
-                            let provider = Arc::clone(&self.provider);
-                            let tx = self.tx.clone();
-                            tokio::spawn(async move {
-                                match provider.radio(&seed).await {
-                                    Ok(tracks) => {
-                                        let _ = tx.send(Msg::RadioTracks(tracks));
-                                    }
-                                    Err(error) => {
-                                        let _ = tx.send(client_error_message(
-                                            "Could not load radio",
-                                            error,
-                                        ));
-                                    }
-                                }
-                            });
-                            return;
+            None => self.end_of_queue(),
+        }
+    }
+
+    /// Fim da fila (chegou ao último item sem repetição, por auto-avanço ou
+    /// pulo manual): continua com uma rádio baseada na última faixa quando o
+    /// autoplay está ligado e o provedor a suporta, ou encerra a reprodução.
+    pub(super) fn end_of_queue(&mut self) {
+        // Tenta continuar com uma rádio (autoplay).
+        if self.autoplay && self.provider.capabilities().radio {
+            if let Some(seed) = self.current.as_ref().map(|t| t.video_id.clone()) {
+                if !seed.is_empty() {
+                    self.status = "📻 Fila concluída — carregando rádio...".to_string();
+                    let provider = Arc::clone(&self.provider);
+                    let tx = self.tx.clone();
+                    tokio::spawn(async move {
+                        match provider.radio(&seed).await {
+                            Ok(tracks) => {
+                                let _ = tx.send(Msg::RadioTracks(tracks));
+                            }
+                            Err(error) => {
+                                let _ =
+                                    tx.send(client_error_message("Could not load radio", error));
+                            }
                         }
-                    }
+                    });
+                    return;
                 }
-                // Sem autoplay/semente: encerra a reprodução.
-                self.player.stop();
-                self.current = None;
-                self.clear_artwork();
-                self.loading_audio = false;
-                self.status = "Fila concluída.".to_string();
             }
         }
+        // Sem autoplay/semente: encerra a reprodução.
+        self.player.stop();
+        self.current = None;
+        self.clear_artwork();
+        self.loading_audio = false;
+        self.status = "Fila concluída.".to_string();
     }
 }
 
@@ -403,6 +413,25 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use crate::app::testing::*;
+
+    #[test]
+    fn next_track_at_the_end_stops_instead_of_wrapping_when_autoplay_is_off() {
+        let mut app = App::new_for_tests();
+        app.autoplay = false;
+        app.repeat = RepeatMode::Off;
+        app.queue = vec![Track::default(), Track::default()];
+        app.queue_index = Some(1);
+        app.current = Some(Track::default());
+
+        // Antes isto voltava incondicionalmente ao índice 0; agora deve seguir
+        // o mesmo caminho de fim-de-fila do auto-avanço.
+        app.next_track();
+
+        assert!(
+            app.current.is_none(),
+            "chegar ao fim da fila deve encerrar, não voltar ao início"
+        );
+    }
 
     #[test]
     fn finishing_the_queue_clears_the_album_art() {

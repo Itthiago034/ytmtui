@@ -78,7 +78,7 @@ impl App {
         // Só persiste um username se for personalizado (mantém o que já existia
         // em vez de gravar o nome obtido da API automaticamente).
         let username = saved.username;
-        Config {
+        let result = Config {
             volume: self.player.volume(),
             shuffle: self.shuffle,
             repeat: self.repeat.as_config().to_string(),
@@ -95,6 +95,15 @@ impl App {
             splash: self.splash_enabled,
             lyrics_offset_ms: self.ui.lyrics.offset_ms(),
         }
-        .save();
+        .try_save();
+        // Falha ao gravar não pode ser silenciosa: o usuário mexeu num ajuste
+        // e precisa saber que ele não persistiu (disco cheio, permissão, etc.).
+        // Mesmo padrão de `load_account`: reporta via canal, já que
+        // `save_config` é `&self` e não pode tocar `self.status`.
+        if let Err(error) = result {
+            let _ = self.tx.send(Msg::Error(format!(
+                "Não foi possível salvar a configuração: {error}"
+            )));
+        }
     }
 }

@@ -38,7 +38,7 @@ rodio = { version = "0.20", features = ["symphonia-all"] }
 # Utilidades
 anyhow = "1"
 tempfile = "3"
-dirs = "5"
+dirs = "6"
 
 # Hash SHA-1 para o cabeçalho de autenticação (SAPISIDHASH) do YouTube Music
 sha1 = "0.10"

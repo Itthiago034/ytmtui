@@ -80,6 +80,17 @@ pub struct SharedState {
     pub active: bool,
 }
 
+/// Trava o estado compartilhado recuperando o guard mesmo se o mutex estiver
+/// *poisoned*. Um pânico de um dos lados segurando o lock não deve derrubar
+/// app + áudio em cascata: os campos de `SharedState` são valores simples
+/// (posição e flags), e prosseguir com um valor possivelmente defasado é
+/// estritamente melhor que propagar o pânico por todo `lock()` restante.
+fn lock_state(state: &Mutex<SharedState>) -> std::sync::MutexGuard<'_, SharedState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Handle público do player usado pela aplicação.
 pub struct AudioPlayer {
     tx: Sender<Cmd>,
@@ -129,7 +140,7 @@ impl AudioPlayer {
     pub fn play_file(&mut self, path: PathBuf) {
         self.paused = false;
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock_state(&self.state);
             s.finished = false;
             s.active = true;
             s.position = Duration::ZERO;
@@ -157,7 +168,7 @@ impl AudioPlayer {
     pub fn stop(&mut self) {
         self.paused = false;
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock_state(&self.state);
             s.active = false;
             s.finished = false;
             s.position = Duration::ZERO;
@@ -196,7 +207,7 @@ impl AudioPlayer {
     /// Salta para uma posição absoluta na faixa atual (seek do MPRIS).
     pub fn seek_to(&mut self, target: Duration) {
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = lock_state(&self.state);
             s.position = target;
         }
         let _ = self.tx.send(Cmd::Seek(target));
@@ -212,12 +223,12 @@ impl AudioPlayer {
 
     /// Posição atual da faixa.
     pub fn position(&self) -> Duration {
-        self.state.lock().unwrap().position
+        lock_state(&self.state).position
     }
 
     /// Retorna `true` se a faixa terminou (e reseta a flag).
     pub fn take_finished(&self) -> bool {
-        let mut s = self.state.lock().unwrap();
+        let mut s = lock_state(&self.state);
         if s.finished {
             s.finished = false;
             true
@@ -275,7 +286,7 @@ fn audio_thread(
                         // mark the track as finished so the app advances or
                         // surfaces an error instead of appearing stuck on
                         // "playing" forever.
-                        let mut s = state.lock().unwrap();
+                        let mut s = lock_state(&state);
                         s.active = false;
                         s.finished = true;
                     }
@@ -306,7 +317,7 @@ fn audio_thread(
                 if let Some(s) = &sink {
                     // `try_seek` pode falhar para alguns formatos; ignoramos o erro.
                     if s.try_seek(pos).is_ok() {
-                        let mut st = state.lock().unwrap();
+                        let mut st = lock_state(&state);
                         st.position = pos;
                     }
                 }
@@ -317,7 +328,7 @@ fn audio_thread(
 
         // Atualiza posição e detecta fim da faixa.
         if let Some(s) = &sink {
-            let mut st = state.lock().unwrap();
+            let mut st = lock_state(&state);
             st.position = s.get_pos();
             if st.active && s.empty() {
                 st.finished = true;
@@ -462,4 +473,106 @@ pub(crate) fn prepare_for_playback(src: PathBuf) -> PathBuf {
 
 fn file_is_non_empty(p: &std::path::Path) -> bool {
     std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn lock_state_recovers_from_a_poisoned_mutex() {
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let poisoner = Arc::clone(&state);
+        // Um pânico segurando o lock envenena o mutex — exatamente o cenário
+        // em que `lock().unwrap()` derrubaria todos os outros acessos.
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("envenena o mutex de propósito");
+        })
+        .join();
+        assert!(state.lock().is_err(), "o mutex deve estar poisoned agora");
+
+        // `lock_state` recupera o guard em vez de propagar o pânico.
+        let mut guard = lock_state(&state);
+        guard.position = Duration::from_secs(5);
+        guard.finished = true;
+        assert_eq!(guard.position, Duration::from_secs(5));
+        assert!(guard.finished);
+    }
+
+    #[test]
+    fn volume_is_clamped_to_the_unit_range() {
+        let mut player = AudioPlayer::new().expect("cria o player");
+        player.set_volume(2.5);
+        assert_eq!(player.volume(), 1.0, "acima de 1.0 satura em 1.0");
+        player.set_volume(-1.0);
+        assert_eq!(player.volume(), 0.0, "abaixo de 0.0 satura em 0.0");
+        player.volume_up();
+        assert!((player.volume() - 0.05).abs() < 1e-6);
+        player.volume_down();
+        assert_eq!(player.volume(), 0.0, "não desce abaixo de 0.0");
+    }
+
+    #[test]
+    fn playable_and_partial_extensions_are_classified() {
+        for ext in ["aac", "mp3", "ogg", "oga", "flac", "wav"] {
+            assert!(is_playable_ext(ext), "{ext} deveria ser reproduzível");
+        }
+        for ext in ["m4a", "mp4", "webm", "opus", "part"] {
+            assert!(!is_playable_ext(ext), "{ext} não é reproduzível direto");
+        }
+        assert!(is_partial(std::path::Path::new("x.part")));
+        assert!(is_partial(std::path::Path::new("x.ytdl")));
+        assert!(!is_partial(std::path::Path::new("x.mp3")));
+    }
+
+    #[test]
+    fn find_cached_matches_by_video_id_and_skips_unplayable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("abc123.mp3"), b"x").unwrap();
+        fs::write(dir.path().join("other.mp3"), b"x").unwrap();
+        // Mesmo id, mas container que o symphonia recusa: não deve casar.
+        fs::write(dir.path().join("zzz.m4a"), b"x").unwrap();
+
+        let hit = find_cached(dir.path(), "abc123").expect("acha o mp3");
+        assert_eq!(hit.file_name().unwrap(), "abc123.mp3");
+        assert!(find_cached(dir.path(), "zzz").is_none(), "m4a não conta");
+        assert!(find_cached(dir.path(), "missing").is_none());
+    }
+
+    #[test]
+    fn evict_cache_prunes_to_the_limit_and_keeps_the_current_track() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Cria MAX+5 arquivos; `keep` é a faixa recém-resolvida.
+        let total = MAX_CACHED_TRACKS + 5;
+        let mut paths = Vec::new();
+        for i in 0..total {
+            let p = dir.path().join(format!("track{i:03}.mp3"));
+            fs::write(&p, b"x").unwrap();
+            paths.push(p);
+        }
+        let keep = paths.last().unwrap().clone();
+        evict_cache(dir.path(), &keep);
+
+        // Não asseguramos *qual* saiu (depende de mtime, que não controlamos
+        // de forma portátil aqui): o invariante é o tamanho e a preservação
+        // da faixa atual.
+        let left = fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(left, MAX_CACHED_TRACKS, "cache podado até o limite");
+        assert!(keep.exists(), "a faixa atual nunca é removida");
+    }
+
+    #[test]
+    fn evict_cache_never_deletes_partial_downloads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Um download em andamento (.part) mais lixo suficiente para exceder.
+        let partial = dir.path().join("downloading.part");
+        fs::write(&partial, b"x").unwrap();
+        for i in 0..(MAX_CACHED_TRACKS + 3) {
+            fs::write(dir.path().join(format!("t{i:03}.mp3")), b"x").unwrap();
+        }
+        evict_cache(dir.path(), std::path::Path::new("/nonexistent"));
+        assert!(partial.exists(), "downloads parciais nunca são removidos");
+    }
 }

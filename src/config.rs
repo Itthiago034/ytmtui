@@ -263,11 +263,6 @@ impl Config {
         }
         Ok(())
     }
-
-    /// Salva a configuração no disco (falhas são ignoradas silenciosamente).
-    pub fn save(&self) {
-        let _ = self.try_save();
-    }
 }
 
 #[cfg(test)]

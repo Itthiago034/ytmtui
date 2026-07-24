@@ -36,6 +36,11 @@ pub struct Bootstrap {
     pub missing_requested_path: Option<String>,
     /// Caminho de cookies em uso (persistido na config).
     pub cookies: Option<String>,
+    /// Quando a sessão existe mas não pôde ser carregada
+    /// (`InvalidCredentials`), a causa concreta — cookies expirados, arquivo
+    /// malformado, conta inexistente. Descartar isso deixava o `doctor` e a
+    /// UI só com "conta inválida", sem o *porquê* que orienta a correção.
+    pub auth_error: Option<String>,
 }
 
 struct State {
@@ -85,14 +90,18 @@ impl YtMusic {
             configured_cookies,
             default,
         );
-        let (client, auth) = match resolution.path.as_deref() {
+        let (client, auth, auth_error) = match resolution.path.as_deref() {
             Some(path) => {
                 match YtMusicClient::with_cookies_for_account(path, authentication.auth_user) {
-                    Ok(client) => (client, AuthState::Authenticated),
-                    Err(_) => (YtMusicClient::new(), AuthState::InvalidCredentials),
+                    Ok(client) => (client, AuthState::Authenticated, None),
+                    Err(error) => (
+                        YtMusicClient::new(),
+                        AuthState::InvalidCredentials,
+                        Some(error.to_string()),
+                    ),
                 }
             }
-            None => (YtMusicClient::new(), AuthState::Anonymous),
+            None => (YtMusicClient::new(), AuthState::Anonymous, None),
         };
         let provider = Self {
             state: RwLock::new(State {
@@ -106,6 +115,7 @@ impl YtMusic {
             auth,
             missing_requested_path: resolution.missing_requested_path,
             cookies: resolution.path,
+            auth_error,
         };
         (provider, bootstrap)
     }
@@ -450,6 +460,31 @@ mod tests {
             }],
             failures: Vec::new(),
         }
+    }
+
+    #[test]
+    fn invalid_cookie_file_yields_a_descriptive_cause_for_bootstrap() {
+        // A causa que `from_environment` guarda em `Bootstrap::auth_error`
+        // vem do `Err` de `with_cookies_for_account`. Um arquivo sem SAPISID
+        // precisa produzir uma mensagem não-vazia e específica — descartá-la
+        // (o antigo `Err(_)`) deixava doctor/UI só com "conta inválida".
+        let temp = tempfile::tempdir().unwrap();
+        let cookies = temp.path().join("cookies.txt");
+        std::fs::write(
+            &cookies,
+            ".youtube.com\tTRUE\t/\tTRUE\t9999999999\tSID\tno_sapisid\n",
+        )
+        .unwrap();
+
+        let cause = match YtMusicClient::with_cookies_for_account(cookies.to_str().unwrap(), 0) {
+            Ok(_) => panic!("cookie sem SAPISID deve falhar"),
+            Err(error) => error.to_string(),
+        };
+        assert!(!cause.trim().is_empty(), "a causa não pode ser vazia");
+        assert!(
+            cause.to_lowercase().contains("sapisid"),
+            "a causa deve explicar o que faltou: {cause}"
+        );
     }
 
     #[test]

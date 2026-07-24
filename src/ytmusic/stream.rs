@@ -14,6 +14,18 @@ fn watch_url(video_id: &str) -> String {
     format!("https://music.youtube.com/watch?v={video_id}")
 }
 
+/// O caminho final impresso pelo yt-dlp (`--print after_move:filepath`): a
+/// última linha não-vazia do stdout, já sem espaços nas pontas. Isolado do
+/// `download_audio` para poder testar o parsing sem executar o yt-dlp — se o
+/// formato da saída mudar, o teste pega antes de virar "faixa não encontrada".
+fn printed_path(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
 /// Resolve e baixa o áudio de uma faixa para um arquivo temporário, usando
 /// `yt-dlp`. Retorna o caminho do arquivo pronto para tocar.
 ///
@@ -76,8 +88,8 @@ pub fn download_audio(video_id: &str, cookies: Option<&str>) -> Result<PathBuf> 
 
     // O caminho final é impresso na última linha do stdout.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(path) = stdout.lines().rev().find(|l| !l.trim().is_empty()) {
-        let p = PathBuf::from(path.trim());
+    if let Some(path) = printed_path(&stdout) {
+        let p = PathBuf::from(path);
         if p.exists() {
             let ready = prepare_for_playback(p);
             evict_cache(&dir, &ready);
@@ -103,4 +115,31 @@ pub fn download_audio(video_id: &str, cookies: Option<&str>) -> Result<PathBuf> 
         }
     }
     Err(anyhow!("arquivo de áudio não encontrado após o download"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_url_targets_youtube_music() {
+        assert_eq!(
+            watch_url("dQw4w9WgXcQ"),
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn printed_path_takes_the_last_non_empty_trimmed_line() {
+        // O yt-dlp pode imprimir linhas de progresso antes do caminho final,
+        // e uma linha em branco no fim; vale a última com conteúdo.
+        let stdout = "[info] baixando\n/tmp/ytmtui/abc.m4a\n  \n";
+        assert_eq!(printed_path(stdout), Some("/tmp/ytmtui/abc.m4a"));
+    }
+
+    #[test]
+    fn printed_path_is_none_when_nothing_was_printed() {
+        assert_eq!(printed_path(""), None);
+        assert_eq!(printed_path("\n   \n\t\n"), None);
+    }
 }

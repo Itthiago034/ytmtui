@@ -501,9 +501,14 @@ impl App {
             AuthState::Authenticated => {
                 "Signed in. Loading your library... Press / to search or ? for help.".to_string()
             }
-            AuthState::InvalidCredentials => {
-                "Cookie file is invalid. Press g to sign in from your browser.".to_string()
-            }
+            AuthState::InvalidCredentials => match bootstrap.auth_error.as_deref() {
+                Some(cause) => {
+                    format!(
+                        "Cookie file is invalid ({cause}). Press g to sign in from your browser."
+                    )
+                }
+                None => "Cookie file is invalid. Press g to sign in from your browser.".to_string(),
+            },
             AuthState::Anonymous => match bootstrap.missing_requested_path.as_deref() {
                 Some(path) => format!("Configured cookie file does not exist: {path}"),
                 None => "Welcome to ytmtui. Press / to search or ? for help.".to_string(),

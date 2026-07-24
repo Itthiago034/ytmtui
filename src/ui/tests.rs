@@ -723,6 +723,52 @@ fn home_grid_shows_two_shelves_with_cards_side_by_side_in_wide_terminals() {
     );
 }
 
+fn up_next_app() -> App {
+    let mut app = App::new_for_tests();
+    let a = track("Yellow", "Coldplay", "4:27", 267, "vid1");
+    let b = track("Clocks", "Coldplay", "5:07", 307, "vid2");
+    let c = track("Trouble", "Coldplay", "4:30", 270, "vid3");
+    app.queue = vec![a.clone(), b, c];
+    app.queue_index = Some(0);
+    app.current = Some(a);
+    app
+}
+
+#[test]
+fn home_shows_up_next_preview_with_the_coming_queue_tracks() {
+    let mut app = up_next_app();
+    let content = text(&render(&mut app, 100, 30));
+
+    assert!(content.contains("Up Next"), "preview header:\n{content}");
+    // The tracks queued *after* the current one appear; the current track
+    // ("Yellow") shows in the player panel, not the preview.
+    assert!(content.contains("Clocks"), "next track shown:\n{content}");
+    assert!(content.contains("Trouble"), "track after next:\n{content}");
+}
+
+#[test]
+fn home_hides_up_next_when_the_current_track_is_last_in_the_queue() {
+    let mut app = up_next_app();
+    app.queue_index = Some(2); // nothing queued after the current track
+    let content = text(&render(&mut app, 100, 30));
+
+    assert!(
+        !content.contains("Up Next"),
+        "nothing ahead — no preview:\n{content}"
+    );
+}
+
+#[test]
+fn short_home_terminal_degrades_without_the_up_next_preview() {
+    let mut app = up_next_app();
+    // Below PLAYER_PANEL_HEIGHT + 4 the layout drops to just the list.
+    let content = text(&render(&mut app, 100, 9));
+    assert!(
+        !content.contains("Up Next"),
+        "short terminal drops the preview:\n{content}"
+    );
+}
+
 #[test]
 fn home_grid_highlights_the_selected_card_and_reveals_its_provider_badge() {
     let mut app = grid_home_app();

@@ -1754,6 +1754,14 @@ impl App {
                     self.artists = res.artists;
                     self.albums = res.albums;
                     self.search_mixed = true;
+                    // Results always land on the section that can show them,
+                    // even if the user navigated elsewhere while the request
+                    // was in flight. `sidebar_index` must move with it — a
+                    // later `j`/`k` computes its next index from that base,
+                    // so leaving it behind jumps to an unrelated section
+                    // (same reasoning as the `/` handler in `event.rs`).
+                    self.section = Section::Buscar;
+                    self.sidebar_index = Section::Buscar.index();
                     self.status = format!(
                         "{} músicas, {} artistas, {} álbuns, {} playlists.",
                         self.songs.len(),
@@ -2625,6 +2633,24 @@ mod tests {
             ..Default::default()
         }];
         app
+    }
+
+    // Results arriving while the user browses elsewhere must pull both the
+    // section *and* the sidebar cursor to Search, or the next `j`/`k` walks
+    // from a stale base into an unrelated section.
+    #[test]
+    fn arriving_search_results_move_the_section_and_the_sidebar_together() {
+        let mut app = App::new_for_tests();
+        app.section = Section::Fila;
+        app.sidebar_index = Section::Fila.index();
+
+        app.tx
+            .send(Msg::SearchResults(crate::models::SearchResults::default()))
+            .expect("channel open");
+        app.drain_messages();
+
+        assert_eq!(app.section, Section::Buscar);
+        assert_eq!(app.sidebar_index, Section::Buscar.index());
     }
 
     #[test]

@@ -53,6 +53,16 @@ async fn main() -> Result<()> {
     // picker at all when `artwork_mode` is "off".
     app.picker = build_picker(app.artwork_mode);
 
+    // Um tema do usuário ilegível não impede o app de abrir, mas o usuário
+    // precisa saber que o arquivo que ele escreveu não entrou na lista.
+    let rejected = app.themes().rejected().to_vec();
+    if !rejected.is_empty() {
+        app.status = format!(
+            "⚠ Tema(s) ignorado(s) — {} (verifique o campo `accent`).",
+            rejected.join(", ")
+        );
+    }
+
     // Avisa (uma vez) se faltar alguma ferramenta essencial de reprodução.
     let missing = player::missing_dependencies();
     if missing.iter().any(|(_, essential)| *essential) {

@@ -11,7 +11,7 @@ use ratatui::Frame;
 use crate::app::{App, Focus, Section};
 use crate::config::{HomeDensity, VisualizerStyle};
 use crate::home::{HomeCard, HomeCardKind, HomeShelf};
-use crate::theme::Theme;
+use crate::theme::ThemeColors;
 
 /// Desenha o conteúdo do painel principal de acordo com a seção ativa.
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
@@ -105,7 +105,7 @@ fn draw_empty_state(
     block: Block,
     icon: &str,
     message: &str,
-    theme: &'static Theme,
+    theme: ThemeColors,
 ) {
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -141,7 +141,7 @@ fn track_line(
     t: &crate::models::Track,
     width: usize,
     playing: bool,
-    theme: &'static Theme,
+    theme: ThemeColors,
 ) -> Line<'static> {
     let num = format!("{:>2}  ", index + 1);
     let dur = if t.duration.is_empty() {
@@ -175,7 +175,7 @@ fn track_line(
 }
 
 /// One playlist/artist-style row: dim icon, bold title, dim subtitle.
-fn entry_line(icon: &str, title: &str, subtitle: &str, theme: &'static Theme) -> Line<'static> {
+fn entry_line(icon: &str, title: &str, subtitle: &str, theme: ThemeColors) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {icon} "), Style::default().fg(theme.muted)),
         Span::styled(
@@ -493,7 +493,7 @@ fn draw_home_sections(f: &mut Frame, app: &mut App, area: Rect) {
 
 /// Loading/empty/error placeholder shown when there is nothing at all to
 /// list yet — same message and wordmark regardless of grid vs. list mode.
-fn draw_home_empty_state(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme) {
+fn draw_home_empty_state(f: &mut Frame, app: &App, area: Rect, theme: ThemeColors) {
     let text = if app.busy() {
         format!("{} Loading recommendations…", app.spinner())
     } else if let Some(err) = &app.home_error {
@@ -541,7 +541,7 @@ fn draw_home_empty_state(f: &mut Frame, app: &App, area: Rect, theme: &'static T
 /// list (v1 scope: full section contents, no per-section cap/"show more" —
 /// overflow uses the existing scrollbar, exactly like the old flat list
 /// did).
-fn draw_home_list(f: &mut Frame, app: &App, list_area: Rect, theme: &'static Theme) {
+fn draw_home_list(f: &mut Frame, app: &App, list_area: Rect, theme: ThemeColors) {
     let selected = app.list_state.selected();
     let mut items: Vec<ListItem> = Vec::new();
     let mut shadow_selected: Option<usize> = None;
@@ -601,7 +601,7 @@ fn draw_home_list(f: &mut Frame, app: &App, list_area: Rect, theme: &'static The
 /// `columns` cards for every other shelf. Overflow in either direction is
 /// signaled with a `‹`/`›` marker appended to that shelf's header, rather
 /// than a scrollbar — there's no single flat viewport to attach one to.
-fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: &'static Theme) {
+fn draw_home_grid(f: &mut Frame, app: &mut App, area: Rect, theme: ThemeColors) {
     // The caller only takes this path once `area.width >= GRID_MIN_WIDTH`,
     // but a zero height is still possible on very short terminals.
     if area.width == 0 || area.height == 0 {
@@ -740,7 +740,7 @@ fn draw_shelf_cards(
     offset: usize,
     columns: usize,
     selected: Option<usize>,
-    theme: &'static Theme,
+    theme: ThemeColors,
     density: HomeDensity,
     reveal: RevealStage,
 ) {
@@ -826,7 +826,7 @@ fn draw_card(
     area: Rect,
     card: &HomeCard,
     selected: bool,
-    theme: &'static Theme,
+    theme: ThemeColors,
     density: HomeDensity,
     reveal: RevealStage,
 ) {
@@ -924,7 +924,7 @@ fn draw_card(
 
 /// Section header row: accent title followed by a dim rule to the edge,
 /// indented to line up with the item rows below it.
-fn section_header(title: &str, width: usize, theme: &'static Theme) -> Line<'static> {
+fn section_header(title: &str, width: usize, theme: ThemeColors) -> Line<'static> {
     let rule = "─".repeat(width.saturating_sub(crate::ui::display_width(title) + 4));
     Line::from(vec![
         Span::styled(
@@ -969,7 +969,7 @@ fn draw_player_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Compact "▶ Title — Artist" line above the bars.
-fn draw_panel_title(f: &mut Frame, app: &App, area: Rect, theme: &'static Theme) {
+fn draw_panel_title(f: &mut Frame, app: &App, area: Rect, theme: ThemeColors) {
     let Some(track) = &app.current else { return };
     let glyph = if app.player.is_paused() { "⏸" } else { "▶" };
     let text = format!("{glyph} {} — {}", track.title, track.artist);
@@ -1001,7 +1001,7 @@ pub(super) fn draw_bars(
     bars: &[f32],
     peaks: &[f32],
     area: Rect,
-    theme: &'static Theme,
+    theme: ThemeColors,
     style: VisualizerStyle,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -1243,7 +1243,7 @@ fn draw_synced_lyrics(
 pub(super) fn karaoke_line(
     l: &crate::models::LyricLine,
     position_ms: u64,
-    theme: &'static Theme,
+    theme: ThemeColors,
     reduced_motion: bool,
 ) -> Line<'static> {
     karaoke_line_entering(l, position_ms, theme, reduced_motion, 1.0)
@@ -1262,7 +1262,7 @@ pub(super) const LINE_ENTRY_MS: u128 = 180;
 pub(super) fn karaoke_line_entering(
     l: &crate::models::LyricLine,
     position_ms: u64,
-    theme: &'static Theme,
+    theme: ThemeColors,
     reduced_motion: bool,
     entry: f32,
 ) -> Line<'static> {
@@ -1454,7 +1454,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect, block: Block, items: Vec<Li
 
 /// Shared scrollbar look: dim track and arrows, muted thumb, so it recedes
 /// behind the content while staying findable.
-fn scrollbar_widget(theme: &'static Theme) -> ratatui::widgets::Scrollbar<'static> {
+fn scrollbar_widget(theme: ThemeColors) -> ratatui::widgets::Scrollbar<'static> {
     ratatui::widgets::Scrollbar::default()
         .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
         .begin_symbol(Some("▲"))

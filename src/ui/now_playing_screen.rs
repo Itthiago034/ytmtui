@@ -22,7 +22,7 @@ use ratatui_image::StatefulImage;
 
 use crate::app::App;
 use crate::config::VisualizerStyle;
-use crate::theme::Theme;
+use crate::theme::ThemeColors;
 
 /// Narrowest panel that still fits a cover beside the metadata.
 const WIDE_MIN_WIDTH: u16 = 74;
@@ -267,7 +267,7 @@ fn progress_line(
     app: &App,
     track: &crate::models::Track,
     width: usize,
-    theme: &'static Theme,
+    theme: ThemeColors,
 ) -> Line<'static> {
     let position = app.player.position().as_secs();
     let duration = track.duration_secs;
@@ -313,7 +313,7 @@ fn progress_line(
 
 /// The lyric line being sung right now, with the same karaoke wipe the
 /// Lyrics section uses. `None` when there are no synced lyrics.
-fn active_lyric_line(app: &App, theme: &'static Theme) -> Option<Line<'static>> {
+fn active_lyric_line(app: &App, theme: ThemeColors) -> Option<Line<'static>> {
     let crate::lyrics::LyricsState::Synced { lines, active } = &app.lyrics else {
         return None;
     };

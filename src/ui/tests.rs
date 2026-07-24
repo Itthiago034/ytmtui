@@ -1126,7 +1126,7 @@ fn take_width_hard_truncates_by_display_width_without_an_ellipsis() {
 
 #[test]
 fn karaoke_wipe_splits_the_active_line_by_elapsed_time() {
-    let theme = crate::theme::get(0);
+    let theme = crate::theme::ThemeSet::builtin().get(0).colors;
     let line = crate::models::LyricLine {
         text: "abcdefghij".to_string(), // 10 columns
         start_ms: 1000,
@@ -1149,7 +1149,7 @@ fn karaoke_wipe_splits_the_active_line_by_elapsed_time() {
 
 #[test]
 fn karaoke_line_under_reduced_motion_renders_the_whole_line_already_sung() {
-    let theme = crate::theme::get(0);
+    let theme = crate::theme::ThemeSet::builtin().get(0).colors;
     let line = crate::models::LyricLine {
         text: "abcdefghij".to_string(),
         start_ms: 1000,

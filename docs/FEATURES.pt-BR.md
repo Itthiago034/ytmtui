@@ -73,3 +73,34 @@ da biblioteca, recomendações e ações de curtir/descurtir.
 O app segue movimentos familiares de terminal: `h/j/k/l`, setas, `/` para
 buscar, `?` para ajuda e `q` para sair. O mapa completo fica em
 [Mapa de Teclas](KEYMAP.pt-BR.md).
+
+## Temas personalizados
+
+O ytmtui vem com onze temas (`t` alterna entre eles). Para criar o seu, coloque
+um arquivo `.toml` em `~/.config/ytmtui/themes/`:
+
+```toml
+name = "Meu tema"
+accent = "#89b4fa"
+
+# Tudo abaixo é opcional. Cores omitidas são derivadas do destaque, seguindo
+# a mesma escala de neutros tingidos que os temas embutidos usam.
+secondary     = "#94e2d5"   # artistas, subtítulos
+accent_fg     = "#1e1e2e"   # texto sobre a linha selecionada
+player        = "#89b4fa"   # barra de progresso e borda do player
+highlight_bg  = "#313244"   # fundo da linha selecionada
+selected_card = "#313244"   # fundo do card selecionado na tela Início
+provider_badge = "#94e2d5"
+text          = "#cdd6f4"
+subtext       = "#a6adc8"
+muted         = "#6c7086"
+border        = "#45475a"
+```
+
+Só `name` e `accent` são obrigatórios. As cores são `#rrggbb` (o `#` inicial é
+opcional). Uma cor malformada cai no valor derivado; um arquivo sem um
+`accent` válido é ignorado e reportado na barra de status ao abrir — um
+arquivo quebrado nunca impede o app de iniciar.
+
+Os temas do usuário aparecem depois dos embutidos, ordenados pelo nome do
+arquivo.

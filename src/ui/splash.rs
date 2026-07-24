@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::theme::{self, Theme};
+use crate::theme::{self, ThemeColors};
 use crate::ui::state::progress;
 
 /// Block-glyph wordmark. 23 columns wide, built only from full/half blocks
@@ -92,7 +92,7 @@ pub fn shows_app_underneath(phase: Phase) -> bool {
 }
 
 /// Draws the splash for `phase` over `area`.
-pub fn draw(f: &mut Frame, area: Rect, phase: Phase, theme: &Theme) {
+pub fn draw(f: &mut Frame, area: Rect, phase: Phase, theme: ThemeColors) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -129,7 +129,7 @@ pub fn draw(f: &mut Frame, area: Rect, phase: Phase, theme: &Theme) {
 
 /// The wordmark with only its first `columns` columns revealed. Columns that
 /// have not landed yet are blank, so the glyph assembles rather than slides.
-fn wipe_lines(columns: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn wipe_lines(columns: usize, theme: ThemeColors) -> Vec<Line<'static>> {
     LOGO.iter()
         .map(|row| {
             let shown: String = row.chars().take(columns).collect();

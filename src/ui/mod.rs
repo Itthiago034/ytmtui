@@ -261,10 +261,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 /// Renders a "key desc · key desc" shortcut string as styled spans: keys
 /// pop slightly, descriptions and separators recede. Purely presentational —
 /// the visible text (and thus its width) is exactly the input string.
-fn shortcut_spans(
-    shortcuts: &'static str,
-    theme: &'static crate::theme::Theme,
-) -> Vec<Span<'static>> {
+fn shortcut_spans(shortcuts: &'static str, theme: crate::theme::ThemeColors) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (i, entry) in shortcuts.split(" · ").enumerate() {
         if i > 0 {

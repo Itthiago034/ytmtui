@@ -375,6 +375,10 @@ pub struct App {
     /// Nome de exibição da conta (personalizado na config ou vindo da API).
     pub account_name: Option<String>,
     /// Índice do tema de cores ativo (ver `crate::theme`).
+    /// Temas disponíveis: presets embutidos mais os `*.toml` do usuário,
+    /// carregados uma vez na inicialização.
+    pub(crate) themes: crate::theme::ThemeSet,
+    /// Índice do tema ativo dentro de [`Self::themes`].
     pub theme_index: usize,
     pub list_state: ListState,
 
@@ -472,7 +476,8 @@ impl App {
         let cookies = bootstrap.cookies;
 
         // Tema salvo e nome de exibição personalizado (opcional).
-        let theme_index = crate::theme::index_by_name(&config.theme);
+        let themes = crate::theme::ThemeSet::load();
+        let theme_index = themes.index_by_name(&config.theme);
         let account_name = config.username.clone().filter(|s| !s.trim().is_empty());
 
         // Semente do PRNG a partir do relógio (evita dependência externa).
@@ -529,6 +534,7 @@ impl App {
             next_authentication_operation: 1,
             session_generation: 0,
             account_name,
+            themes,
             theme_index,
             list_state,
             ui: crate::ui::state::UiState::new(
@@ -614,6 +620,9 @@ impl App {
             next_authentication_operation: 1,
             session_generation: 0,
             account_name: None,
+            // Never reads the machine's theme directory: tests must not
+            // depend on what the user happens to have installed.
+            themes: crate::theme::ThemeSet::builtin(),
             theme_index: 0,
             list_state,
             // Tests never want the entry animation covering the frame.

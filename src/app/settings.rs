@@ -41,15 +41,26 @@ impl App {
         });
     }
 
-    /// Tema de cores ativo.
-    pub fn theme(&self) -> &'static crate::theme::Theme {
-        crate::theme::get(self.theme_index)
+    /// Paleta do tema ativo. Retorna por valor (`ThemeColors` é `Copy`),
+    /// então quem desenha não fica com o `App` emprestado.
+    pub fn theme(&self) -> crate::theme::ThemeColors {
+        self.themes.get(self.theme_index).colors
+    }
+
+    /// Nome do tema ativo, para exibição e para a config.
+    pub fn theme_name(&self) -> &str {
+        &self.themes.get(self.theme_index).name
+    }
+
+    /// Todos os temas disponíveis (presets embutidos + os do usuário).
+    pub fn themes(&self) -> &crate::theme::ThemeSet {
+        &self.themes
     }
 
     /// Alterna para o próximo tema de cores e salva a preferência.
     pub fn cycle_theme(&mut self) {
-        self.theme_index = (self.theme_index + 1) % crate::theme::THEMES.len();
-        self.status = format!("🎨 Tema: {}", self.theme().name);
+        self.theme_index = (self.theme_index + 1) % self.themes.len();
+        self.status = format!("🎨 Tema: {}", self.theme_name());
         self.save_config();
     }
 
@@ -68,7 +79,7 @@ impl App {
             repeat: self.repeat.as_config().to_string(),
             cookies,
             authentication: saved.authentication,
-            theme: self.theme().name.to_string(),
+            theme: self.theme_name().to_string(),
             username,
             // Not editable at runtime yet; preserve whatever's on disk
             // rather than overwriting it with the in-memory Duration.

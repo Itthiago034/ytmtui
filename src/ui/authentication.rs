@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::provider::SignInPreview;
-use crate::theme::Theme;
+use crate::theme::ThemeColors;
 
 /// Draws the prepared-account picker over the completed normal interface.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
@@ -44,7 +44,7 @@ fn render_account_list(
     popup: Rect,
     preview: &SignInPreview,
     selected: usize,
-    theme: &'static Theme,
+    theme: ThemeColors,
 ) {
     let block = Block::default()
         .title(" Connect an account ")

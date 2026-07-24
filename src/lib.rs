@@ -1,6 +1,7 @@
 //! Biblioteca do ytmtui: expõe os módulos usados pelo binário e por testes.
 
 pub mod app;
+pub mod artwork;
 pub mod config;
 pub mod doctor;
 pub mod event;

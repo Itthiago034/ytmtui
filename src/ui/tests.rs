@@ -190,7 +190,11 @@ fn narrow_layout_uses_a_single_column_with_a_header_row() {
 
     // The first row is a compact navigation header, not a sidebar column.
     assert!(lines[0].contains("Home"), "header row: {:?}", lines[0]);
-    assert!(lines[0].contains("1/9"), "section position: {:?}", lines[0]);
+    assert!(
+        lines[0].contains("1/10"),
+        "section position: {:?}",
+        lines[0]
+    );
     // No wide-mode nav column: "Library" only exists in the sidebar list.
     let body = lines[1..].join("\n");
     assert!(
@@ -1557,4 +1561,116 @@ fn seeking_a_lyric_without_synced_timings_is_a_no_op() {
     app.seek_to_focused_lyric();
 
     assert_eq!(app.player.position(), before);
+}
+
+// --- settings ------------------------------------------------------------
+
+#[test]
+fn settings_lists_every_preference_with_its_value() {
+    let mut app = App::new_for_tests();
+    app.section = Section::Ajustes;
+    let screen = text(&render(&mut app, 100, 30));
+
+    for row in crate::app::SettingRow::ALL {
+        assert!(
+            screen.contains(row.label()),
+            "{} is missing from the panel:\n{screen}",
+            row.label()
+        );
+    }
+    // The default theme's name is the value of the first row.
+    assert!(screen.contains("Roxo"), "theme value:\n{screen}");
+}
+
+#[test]
+fn only_the_selected_setting_offers_its_arrows() {
+    let mut app = App::new_for_tests();
+    app.section = Section::Ajustes;
+    let screen = text(&render(&mut app, 100, 30));
+    assert_eq!(
+        screen.matches('‹').count(),
+        1,
+        "nine rows of arrows would be nine things demanding attention:\n{screen}"
+    );
+}
+
+#[test]
+fn the_selected_setting_explains_what_it_does() {
+    let mut app = App::new_for_tests();
+    app.section = Section::Ajustes;
+    app.ui.settings_cursor = 0;
+    let screen = text(&render(&mut app, 110, 30));
+    assert!(
+        screen.contains("themes"),
+        "the theme row should say where custom themes live:\n{screen}"
+    );
+}
+
+#[test]
+fn arrow_keys_change_the_selected_setting_in_place() {
+    let mut app = App::new_for_tests();
+    app.section = Section::Ajustes;
+    app.focus = crate::app::Focus::Main;
+    // Row 3 is the visualizer, whose values are short and distinctive.
+    app.ui.settings_cursor = 3;
+    let before = app.setting_value(crate::app::SettingRow::Visualizer);
+
+    crate::event::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Right,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+
+    assert_ne!(
+        app.setting_value(crate::app::SettingRow::Visualizer),
+        before
+    );
+    assert_eq!(
+        app.focus,
+        crate::app::Focus::Main,
+        "left/right must edit here, not move focus away from the panel"
+    );
+}
+
+#[test]
+fn the_settings_cursor_stops_at_the_ends_of_the_list() {
+    let mut app = App::new_for_tests();
+    app.section = Section::Ajustes;
+    app.focus = crate::app::Focus::Main;
+    let up = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Up,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    let down = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    crate::event::handle_key(&mut app, up);
+    assert_eq!(app.ui.settings_cursor, 0, "no wrapping off the top");
+
+    for _ in 0..50 {
+        crate::event::handle_key(&mut app, down);
+    }
+    assert_eq!(
+        app.ui.settings_cursor,
+        crate::app::SettingRow::ALL.len() - 1,
+        "no running past the bottom"
+    );
+}
+
+#[test]
+fn comma_opens_settings_and_moves_the_sidebar_with_it() {
+    let mut app = App::new_for_tests();
+    crate::event::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(','),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    assert_eq!(app.section, Section::Ajustes);
+    assert_eq!(app.sidebar_index, Section::Ajustes.index());
 }

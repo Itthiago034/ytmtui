@@ -29,6 +29,7 @@ mod authentication;
 mod home;
 mod navigation;
 mod playback;
+mod preferences;
 mod queue;
 mod search;
 mod settings;
@@ -38,6 +39,7 @@ mod testing;
 
 pub use crate::provider::AuthState;
 pub use authentication::AuthenticationFlow;
+pub use preferences::SettingRow;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,12 +67,13 @@ pub enum Section {
     Tocando,
     Fila,
     Letra,
+    Ajustes,
     Ajuda,
 }
 
 impl Section {
     /// Ordem de exibição na barra lateral.
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::Inicio,
         Section::Buscar,
         Section::Biblioteca,
@@ -79,6 +82,7 @@ impl Section {
         Section::Tocando,
         Section::Fila,
         Section::Letra,
+        Section::Ajustes,
         Section::Ajuda,
     ];
 
@@ -93,6 +97,7 @@ impl Section {
             Section::Tocando => "Now Playing",
             Section::Fila => "Queue",
             Section::Letra => "Lyrics",
+            Section::Ajustes => "Settings",
             Section::Ajuda => "Help",
         }
     }
@@ -110,6 +115,7 @@ impl Section {
             Section::Tocando => "◉",
             Section::Fila => "≡",
             Section::Letra => "¶",
+            Section::Ajustes => "⚙",
             Section::Ajuda => "?",
         }
     }
@@ -446,6 +452,10 @@ pub struct App {
     // que já está em disco, no mesmo padrão de `sync_interval_secs`.
     /// Modo de exibição da capa do álbum (consumido por `main.rs::build_picker`).
     pub artwork_mode: ArtworkMode,
+    /// A preferência de animação de entrada. Distinta do estado em
+    /// `ui`, que diz se ela está *rodando agora*: desligar a preferência no
+    /// meio de uma sessão não deve reiniciar nada, só valer na próxima.
+    pub splash_enabled: bool,
     /// Densidade dos cards da grade da tela Início (consumido por `ui::main_panel`).
     pub home_density: HomeDensity,
     /// Estilo do visualizador de espectro do player. Chamado `visualizer_style`
@@ -566,6 +576,7 @@ impl App {
             sync_interval: std::time::Duration::from_secs(config.sync_interval_secs.max(30)),
             last_synced: std::time::Instant::now(),
             artwork_mode: ArtworkMode::from_config(&config.artwork_mode),
+            splash_enabled: config.splash,
             home_density: HomeDensity::from_config(&config.home_density),
             visualizer_style: VisualizerStyle::from_config(&config.visualizer),
         })
@@ -648,6 +659,7 @@ impl App {
             sync_interval: std::time::Duration::from_secs(300),
             last_synced: std::time::Instant::now(),
             artwork_mode: ArtworkMode::Auto,
+            splash_enabled: false,
             home_density: HomeDensity::Comfortable,
             visualizer_style: VisualizerStyle::Gradient,
         }

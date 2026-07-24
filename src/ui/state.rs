@@ -24,6 +24,8 @@ pub struct UiState {
     /// renderer (it measures the area), read by `App::move_home` so spatial
     /// navigation matches what is actually on screen.
     pub home_columns: usize,
+    /// Row under the cursor in the Settings panel.
+    pub settings_cursor: usize,
     /// Whether the entry animation is still running. Cleared when it
     /// finishes or when the user presses any key; `false` from the start
     /// when the animation is turned off or reduced motion is on.
@@ -42,6 +44,7 @@ impl UiState {
             lyrics: LyricsView::new(lyrics_offset_ms),
             help_scroll: 0,
             home_columns: 1,
+            settings_cursor: 0,
             // Reduced motion outranks the preference: it exists to stop
             // exactly this kind of decorative motion.
             splash_running: splash && !reduced_motion,

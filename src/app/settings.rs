@@ -66,6 +66,11 @@ impl App {
 
     /// Persiste as preferências atuais em disco.
     pub fn save_config(&self) {
+        // Estes campos agora são editáveis na seção Ajustes, então o app é
+        // dono deles: o valor em memória vence o que está em disco. Só
+        // `cookies`/`username` continuam preservados do arquivo, porque o
+        // app pode não ter uma versão válida deles.
+        //
         // Nunca apaga um caminho de cookies válido já salvo: se o app subiu
         // sem cookies (self.cookies == None), preserva o que estiver em disco.
         let saved = Config::load();
@@ -81,18 +86,13 @@ impl App {
             authentication: saved.authentication,
             theme: self.theme_name().to_string(),
             username,
-            // Not editable at runtime yet; preserve whatever's on disk
-            // rather than overwriting it with the in-memory Duration.
-            sync_interval_secs: saved.sync_interval_secs,
-            // Same story as `sync_interval_secs` above: these six have no
-            // in-app editor yet, so whatever's on disk wins over the
-            // in-memory value loaded at startup.
-            artwork_mode: saved.artwork_mode,
-            home_density: saved.home_density,
-            visualizer: saved.visualizer,
-            animation_speed: saved.animation_speed,
-            reduced_motion: saved.reduced_motion,
-            splash: saved.splash,
+            sync_interval_secs: self.sync_interval.as_secs(),
+            artwork_mode: self.artwork_mode.as_config().to_string(),
+            home_density: self.home_density.as_config().to_string(),
+            visualizer: self.visualizer_style.as_config().to_string(),
+            animation_speed: self.ui.anim.speed().as_config().to_string(),
+            reduced_motion: self.ui.anim.reduced_motion(),
+            splash: self.splash_enabled,
             lyrics_offset_ms: self.ui.lyrics.offset_ms(),
         }
         .save();

@@ -89,6 +89,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             // new, possibly shorter, search results list.
             app.list_state.select(Some(0));
         }
+        KeyCode::Char(',') => {
+            app.set_section(Section::Ajustes);
+            app.sidebar_index = Section::Ajustes.index();
+            app.focus = Focus::Main;
+        }
         KeyCode::Char('?') => {
             app.set_section(Section::Ajuda);
             app.sidebar_index = Section::Ajuda.index();
@@ -130,10 +135,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') if app.section == Section::Fila && app.focus == Focus::Main => {
             app.queue_clear()
         }
-        // Salto direto de seção: 1 = Início … 9 = Ajuda.
+        // Salto direto de seção: 1 = Início … 9 = Ajustes, 0 = Ajuda.
         KeyCode::Char(c @ '1'..='9') => {
             app.jump_to_section(c as usize - '1' as usize);
         }
+        KeyCode::Char('0') => app.jump_to_section(Section::ALL.len() - 1),
         // Abre a tela da faixa atual (capa grande, progresso, letra).
         KeyCode::Char('w') => {
             app.set_section(Section::Tocando);
@@ -141,12 +147,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.focus = Focus::Main;
         }
         // Ajuste fino da sincronia da letra.
-        KeyCode::Char('<') | KeyCode::Char(',') if app.section == Section::Letra => {
-            app.adjust_lyrics_offset(-250)
-        }
-        KeyCode::Char('>') | KeyCode::Char('.') if app.section == Section::Letra => {
-            app.adjust_lyrics_offset(250)
-        }
+        KeyCode::Char('<') if app.section == Section::Letra => app.adjust_lyrics_offset(-250),
+        KeyCode::Char('>') if app.section == Section::Letra => app.adjust_lyrics_offset(250),
         // Curte / descurte a faixa atual.
         KeyCode::Char('f') => app.like_current(),
         // Alterna o tema de cores.
@@ -178,6 +180,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             if app.section == Section::Inicio && app.focus == Focus::Main =>
         {
             app.move_home(HomeDirection::Right)
+        }
+        // In Settings, left/right change the value under the cursor —
+        // that is the whole interaction, so it outranks focus switching.
+        KeyCode::Left | KeyCode::Char('h')
+            if app.section == Section::Ajustes && app.focus == Focus::Main =>
+        {
+            step_setting(app, -1)
+        }
+        KeyCode::Right | KeyCode::Char('l')
+            if app.section == Section::Ajustes && app.focus == Focus::Main =>
+        {
+            step_setting(app, 1)
         }
         KeyCode::Left | KeyCode::Char('h') => app.focus = Focus::Sidebar,
         KeyCode::Right | KeyCode::Char('l') => app.focus = Focus::Main,
@@ -276,6 +290,7 @@ fn navigate(app: &mut App, delta: isize) {
     match app.focus {
         Focus::Sidebar => app.move_sidebar(delta),
         Focus::Main => match app.section {
+            Section::Ajustes => move_setting_cursor(app, delta),
             Section::Inicio => app.move_home(if delta < 0 {
                 HomeDirection::Up
             } else {
@@ -303,9 +318,26 @@ fn activate(app: &mut App) {
             Section::Artistas => app.open_selected_artist(),
             // Jump playback to the lyric line under the cursor.
             Section::Letra => app.seek_to_focused_lyric(),
+            Section::Ajustes => step_setting(app, 1),
             _ => {}
         },
     }
+}
+
+/// Moves the Settings cursor, clamped to the list.
+fn move_setting_cursor(app: &mut App, delta: isize) {
+    let last = crate::app::SettingRow::ALL.len() - 1;
+    let next = (app.ui.settings_cursor as isize + delta).clamp(0, last as isize);
+    app.ui.settings_cursor = next as usize;
+}
+
+/// Steps the setting under the cursor.
+fn step_setting(app: &mut App, delta: i32) {
+    let row = crate::app::SettingRow::ALL[app
+        .ui
+        .settings_cursor
+        .min(crate::app::SettingRow::ALL.len() - 1)];
+    app.step_setting(row, delta);
 }
 
 #[cfg(test)]

@@ -45,6 +45,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             }
             crate::ui::truncate_chars(&title, (area.width as usize).saturating_sub(12))
         }
+        Section::Ajustes => "Settings".to_string(),
         Section::Ajuda => "Help".to_string(),
     };
 
@@ -92,6 +93,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         Section::Artistas => draw_artists(f, app, area, block),
         Section::Tocando => super::now_playing_screen::draw(f, app, area, block),
         Section::Letra => draw_lyrics(f, app, area, block),
+        Section::Ajustes => super::settings::draw(f, app, area, block),
         Section::Ajuda => draw_help(f, app, area, block),
     }
 }
@@ -1303,7 +1305,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ("  ↑/↓  or  k/j", "move selection"),
         ("  PgUp/PgDn", "jump 10 items; Home/End first/last"),
         ("  mouse wheel", "scroll the list"),
-        ("  1..9", "jump straight to a section"),
+        ("  1..9, 0", "jump straight to a section"),
         ("  ←/→  or  h/l", "switch between menu and list"),
         ("  Tab", "toggle focus menu/list"),
         ("  Enter", "play / open playlist / open artist"),
@@ -1341,6 +1343,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ("  w", "open Now Playing (big cover, lyric line)"),
         ("", ""),
         ("Appearance", ""),
+        ("  ,", "open Settings (edit everything in place)"),
         ("  t", "cycle the color theme"),
         ("", ""),
         ("General", ""),

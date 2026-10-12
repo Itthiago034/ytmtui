@@ -8,7 +8,7 @@
 **Spec:** [Especificação aprovada](../specs/2026-10-12-ytmtui-mousiki-unification-design.md).
 **Baseline:** master @ cb3f1c6f7c07de472cc0d9db7ed56cb51829021e.
 **Branch:** codex/ytmtui-mousiki-unification.
-**Status:** Plano para revisão. Nenhuma tarefa de implementação foi executada; não interpretar caixas vazias como resultados positivos.
+**Status:** Plano aprovado para execução por Thiago em 2026-10-12 às 11:09 (America/Sao_Paulo). Tarefa 0 iniciada e bloqueada no acesso ao host; nenhuma implementação ou execução Plandex/Cargo realizada.
 
 ## Global Constraints
 - Nome do produto: ytmtui. Uma TUI, uma fila de mensagens e uma thread de saída de áudio.
@@ -171,5 +171,5 @@ Para cada tarefa seguinte: Plandex gera o teste primeiro; Codex aplica/reproduz 
 
 **Regra de desvio:** se Plandex/modelo local não gerar uma edição de teste válida, interromper implementação e relatar a falha concreta. Se uma fronteira arquitetural precisar mudar, apresentar a alteração antes de implementá-la. Não transformar indisponibilidade de máquina em autorização para trocar a ferramenta solicitada.
 
-**Estado no preparo do plano:** GitHub acessível; master permanece no commit aprovado; CachyOS offline; nenhum comando Plandex/Cargo executado. Próximo passo: revisão deste plano e disponibilização do host para tarefa 0.
+**Checkpoint de execução — 2026-10-12:** Thiago autorizou prosseguir. A listagem do Desktop Commander marcou cachyos-x8664 offline (último contato indicado: 13h). O ping direto confirmou que nenhum dispositivo está online e orientou iniciar/reiniciar Desktop Commander Remote. O runtime desta sessão também não tem Plandex, Cargo/Rust, Docker ou Go no PATH. Tarefa 0 interrompida antes de criar worktree, instalar dependências ou chamar o modelo local. Todos os passos continuam pendentes. Próximo passo: disponibilizar o CachyOS no Desktop Commander e retomar o preflight autorizado.
 
